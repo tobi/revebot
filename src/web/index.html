@@ -1069,7 +1069,15 @@ async function loadBots() {
       box.appendChild(d);
     }
   }
-  if (!current && bots.length) select(bots[0].id);
+  if (!current && bots.length) {
+    const want = routeBot();
+    const hit = want && bots.find((b) => b.id === want);
+    if (hit) select(hit.id, true);
+    else {
+      select(bots[0].id, true);
+      setRoute(bots[0].id);
+    }
+  }
   if (toolsStarted) setWorking(true);
 }
 
@@ -1202,8 +1210,28 @@ async function loadOlder() {
   }
 }
 
-async function select(id) {
+function routeBot() {
+  const raw = (location.hash || "").replace(/^#\/?/, "");
+  if (!raw) return "";
+  const id = raw.split("/")[0];
+  try { return decodeURIComponent(id); } catch (_) { return id; }
+}
+
+function setRoute(id) {
+  if (!id) return;
+  const next = "#/" + encodeURIComponent(id);
+  if (location.hash === next) return;
+  history.replaceState(null, "", next);
+}
+
+async function select(id, fromRoute) {
+  if (!id) return;
+  if (current === id) {
+    if (!fromRoute) setRoute(id);
+    return;
+  }
   current = id;
+  if (!fromRoute) setRoute(id);
   toolsStarted = false;
   setWorking(false);
   pin = true;
@@ -1693,6 +1721,15 @@ function caretXY(ta, pos) {
     bottom: rect.top - ta.scrollTop + (sr.bottom - mr.top)
   };
 }
+
+window.addEventListener("hashchange", () => {
+  const id = routeBot();
+  if (id && id !== current) select(id, true);
+});
+window.addEventListener("popstate", () => {
+  const id = routeBot();
+  if (id && id !== current) select(id, true);
+});
 
 Promise.all([loadBots(), loadRoutines()]).catch((e) => {
   document.getElementById("status").textContent = e.message;
