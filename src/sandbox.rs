@@ -55,6 +55,19 @@ pub const DESKTOP_DISPLAY: &str = ":1";
 const DESKTOP_VNC_GUEST_PORT: u16 = 5900;
 const DESKTOP_NOVNC_GUEST_PORT: u16 = 6080;
 
+/// Name of the house tool that asks the user to allow a host. Referenced
+/// from the gateway's 403 body so the model knows what to call.
+pub const ASK_HOST_TOOL: &str = "AskForHostPermission";
+
+/// The 403 body the gateway returns for a host outside the allow list.
+/// `{host}` is substituted by microsandbox.
+const HTTP_DENY_MESSAGE: &str = "\
+This host is not allowed by the sandbox network policy config.\n\
+\n\
+Note to agent: `{host}` is not in the allowed-host list. Call the AskForHostPermission tool \
+with this host and the reason you need it; the user decides. Do not retry the request until \
+they have answered, and do not try to reach the host another way.\n";
+
 /// The image ships a full Rust, Go, Node, and Python toolchain, so the
 /// writable rootfs layer has to be big enough for a real build tree.
 pub const DEFAULT_ROOT_DISK_MIB: u32 = 16 * 1024;
@@ -250,6 +263,14 @@ impl Policy {
                 hosts.join(", ")
             }
         }
+    }
+
+    /// Body the gateway returns to an HTTP(S) client inside the VM when a
+    /// host is not on the allow list. Written for the model: it names the
+    /// tool that asks the user for access. `{host}` is filled in by
+    /// microsandbox.
+    pub fn http_deny_message(&self) -> String {
+        HTTP_DENY_MESSAGE.to_string()
     }
 
     pub fn internet_prompt(&self) -> String {
@@ -1506,7 +1527,24 @@ async fn build(
             .allow_domains(hosts)
             .map_err(|e| SandboxError::Policy(format!("invalid allowed host: {e}")))?;
     }
-    builder = builder.network(move |n| n.enabled(true).policy(network));
+    // Locked down: intercept TLS so a denied HTTPS request is answered with
+    // the 403 note in-tunnel instead of a bare reset (agentd installs the
+    // intercept CA into the guest trust store). The SDK already turns
+    // interception on whenever a secret is configured; this makes the
+    // allow-list mode consistent with or without secrets. Open policies
+    // never deny by default, so they are left alone.
+    let intercept_tls = !policy.open;
+    let deny_message = policy.http_deny_message();
+    builder = builder.network(move |mut n| {
+        n = n
+            .enabled(true)
+            .policy(network)
+            .http_deny_message(deny_message);
+        if intercept_tls {
+            n = n.tls(|t| t);
+        }
+        n
+    });
     if let Some(desktop) = desktop_ports {
         // After network(): `.network()` replaces the local config, so ports
         // have to land on the builder afterwards.
@@ -1750,6 +1788,19 @@ hosts:
             runtime_changed.fingerprint(ws),
             "exec environment and proxy secrets refresh without rebuilding the VM"
         );
+    }
+
+    /// The gateway's 403 body is how the model learns which tool to call;
+    /// it must name the real tool and leave `{host}` for microsandbox.
+    #[test]
+    fn deny_message_names_the_host_permission_tool() {
+        let message = Policy::default().http_deny_message();
+        assert!(
+            message.starts_with("This host is not allowed by the sandbox network policy config.")
+        );
+        assert!(message.contains("Note to agent:"));
+        assert!(message.contains(ASK_HOST_TOOL));
+        assert!(message.contains("{host}"));
     }
 
     #[test]

@@ -16,7 +16,7 @@ The default guest is `ghcr.io/tobi/wrap:desktop`. Workloads run as unprivileged 
 
 - `/workspace` is the house `workspace/` directory, bind-mounted, working directory. Relative paths mean the same thing on the host and in the VM.
 - Bot identity, `config.yml`, sessions, and host Lua stay **outside** the mount. Do not write under `agents/*/sessions/`.
-- Public internet is the default. `config.yml` / `sandbox.lua` `open: false` plus `allow` locks egress to named hosts.
+- Public internet is the default. `config.yml` / `sandbox.lua` `open: false` plus `allow` locks egress to named hosts. In that mode a request to a host outside the list gets `HTTP 403` from the gateway (plain HTTP and HTTPS alike; TLS is intercepted with a CA the guest trusts) whose body says *"Note to agent: `host` is not in the allowed-host list"* and names `AskForHostPermission`. Call that tool with the host and your reason; the user decides. Do not retry or route around it.
 - Unix `HOME=/home/user` is not your agent home (`/workspace/agents/<your-id>/`).
 
 ## Desktop

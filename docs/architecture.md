@@ -233,7 +233,10 @@ reloaded state instead of writing something it decided under stale assumptions.
   owner and virtiofs stat virtualization off, XFCE on `:1`, noVNC/VNC published on
   localhost, and a shared Chrome that `agent-browser` attaches to. Provisioning is off
   by default. Public-internet egress by default (`NetworkProfile::Public`);
-  `open = false` plus `allow` is the lock-down. Scoped source-backed secrets
+  `open = false` plus `allow` is the lock-down; in that mode TLS is intercepted (the SDK already
+  does this whenever a secret exists; agentd installs the CA in the guest) and the gateway
+  answers a host outside the list with `403` plus `Policy::http_deny_message()`, which names
+  the `AskForHostPermission` tool (`sandbox::ASK_HOST_TOOL`). Scoped source-backed secrets
   (per-host `allow`/`headers`; allowed hosts join the egress list), fail-closed boot,
   idle shutdown, workspace bind mount at `/workspace`. Default memory is 8192 MiB.
 - **The scripting surface.** Trusted host `agent { }`, `sandbox { }` and installed
@@ -382,6 +385,7 @@ code or the spec, never the invariant.
 | A namespaced model id survives discovery intact (`openrouter/x-ai/grok-4.6`) | `provider::discovery::tests::the_openrouter_shape_yields_a_pasteable_reference` |
 | Public-internet egress by default; lock-down is `open = false` | `sandbox::tests::default_egress_is_the_public_internet`, `tests/microvm.rs` (opt-in) |
 | Secret hosts are a per-host map; `allow: true` joins the sandbox allow list | `sandbox::tests::secret_hosts_join_the_egress_allow_list`, `lua::tests::a_secret_host_map_carries_headers_and_joins_allow`, `house::secret::tests::upsert_appends_a_secret_to_the_template` |
+| A host outside the allow list answers `403` naming `AskForHostPermission` | `sandbox::tests::deny_message_names_the_host_permission_tool`, `tests/microvm.rs::egress_reaches_an_allowed_host_and_nothing_else` (opt-in) |
 | Chat attachments stay under `workspace/tmp/{id}/` and are named in the message | `house::attach::tests::{save_writes_under_workspace_tmp_id_and_tags_the_guest_path, names_are_basenames_without_traversal, read_refuses_traversal_and_bad_ids}` |
 
 **Not covered yet.** Standalone `compact()` and `navigate()` have no end-to-end test — the

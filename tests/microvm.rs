@@ -238,37 +238,48 @@ async fn egress_reaches_an_allowed_host_and_nothing_else() {
     let root = dir.path();
     let workspace = root.join("workspace");
 
+    // curl (not busybox wget): it prints an error body, which is the point
+    // of the second half of this test. The image pins CURL_CA_BUNDLE to its
+    // own file; point it at the system bundle agentd extends with the
+    // intercept CA, as any other image would use.
     let policy = reve::sandbox::Policy {
         name: Some("reve-it-net".into()),
-        image: "alpine".into(),
+        image: "mirror.gcr.io/curlimages/curl".into(),
         cpus: 1,
         memory: 512,
         provision: false,
         open: false,
         allow_hosts: vec!["github.com".into(), "deb.debian.org".into()],
+        env: std::collections::BTreeMap::from([(
+            "CURL_CA_BUNDLE".to_string(),
+            "/etc/ssl/certs/ca-certificates.crt".to_string(),
+        )]),
         ..Default::default()
     };
     let sandbox = Sandbox::start(policy, &workspace, root.join(".reve"), &Silent)
         .await
         .expect("the microVM must boot");
 
+    // `-f` turns any HTTP error into a non-zero exit, so a gateway 403 still
+    // reads as BLOCKED. The intercept CA is trusted by the guest: no `-k`.
+    let probe =
+        |url: &str| format!("curl -sSf -m 20 -o /dev/null {url} && echo ALLOWED || echo BLOCKED");
+
     let allowed = sandbox
-        .exec(
-            "wget -q -T 20 -O /dev/null https://github.com/ && echo ALLOWED || echo BLOCKED",
-            ExecOptions::default(),
-            None,
-        )
+        .exec(&probe("https://github.com/"), ExecOptions::default(), None)
         .await
         .unwrap();
     assert_eq!(
         allowed.stdout.trim(),
         "ALLOWED",
-        "the named host is reachable"
+        "the named host is reachable: {} {}",
+        allowed.stdout,
+        allowed.stderr
     );
 
     let debian = sandbox
         .exec(
-            "wget -q -T 20 -O /dev/null https://deb.debian.org/debian/README && echo ALLOWED || echo BLOCKED",
+            &probe("https://deb.debian.org/debian/README"),
             ExecOptions::default(),
             None,
         )
@@ -281,14 +292,33 @@ async fn egress_reaches_an_allowed_host_and_nothing_else() {
     );
 
     let blocked = sandbox
+        .exec(&probe("https://example.com/"), ExecOptions::default(), None)
+        .await
+        .unwrap();
+    assert_eq!(blocked.stdout.trim(), "BLOCKED", "an unlisted host is not");
+
+    // The refusal is readable: the gateway answers 403 inside the intercepted
+    // TLS session with the note that names the tool the model should call.
+    let note = sandbox
         .exec(
-            "wget -q -T 12 -O /dev/null https://example.com/ && echo REACHED || echo BLOCKED",
+            "curl -sS -m 20 -w '\nHTTP=%{http_code}\n' https://example.com/",
             ExecOptions::default(),
             None,
         )
         .await
         .unwrap();
-    assert_eq!(blocked.stdout.trim(), "BLOCKED", "an unlisted host is not");
+    assert!(
+        note.stdout.contains("HTTP=403"),
+        "a blocked https host answers 403, got: {} {}",
+        note.stdout,
+        note.stderr
+    );
+    assert!(
+        note.stdout.contains("Note to agent: `example.com`")
+            && note.stdout.contains(reve::sandbox::ASK_HOST_TOOL),
+        "the 403 body carries the agent note, got: {}",
+        note.stdout
+    );
 
     sandbox.stop().await.unwrap();
     let _ = microsandbox::Sandbox::remove("reve-it-net").await;
