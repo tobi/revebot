@@ -88,7 +88,9 @@ src/
                       Compose autocomplete: `/` skills, `@` other bots.
                       AskUserForSecret renders an inline host-secret form.
                       SendUserMessage is hidden from Working… and live-pushed
-                      via user_notice.
+                      via user_notice. Transcript restore treats SendUserMessage
+                      tool calls and custom user_notice entries as bubbles;
+                      assistant prose after the first tool is not.
   eval/               catalog runner for evals/cases (offline / live / microvm);
                       live defaults to openrouter/x-ai/grok-4.6 (OPENROUTER_API_KEY)
   main.rs             init / info / exec / tool / serve / tui / eval; bare `revebot` serves

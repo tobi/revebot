@@ -794,10 +794,14 @@ function addMessage(align, variant, who, text, avSpec, avId) {
   if (!body || body === "[]") return lastMsg();
   const speaker = avId || who || "";
   const prev = lastMsg();
+  if (isMsg(prev, align) && prev.dataset.speaker === speaker && prev.dataset.body === body) {
+    return prev;
+  }
   const cont = isMsg(prev, align) && (align !== "start" || prev.dataset.speaker === speaker);
   if (cont) prev.classList.add("followed");
   const msg = el("div", "msg " + align + (cont ? " cont" : ""));
   msg.dataset.speaker = speaker;
+  msg.dataset.body = body;
   const av = el("div", "msg-av");
   av.appendChild(avatar(avId || who, avSpec, 28));
   const col = el("div", "msg-col");
@@ -1078,6 +1082,19 @@ function paintHead(bot) {
   document.getElementById("screen-title").textContent = bot ? bot.name + "'s screen" : "Screen";
 }
 
+function isUserNotice(entry) {
+  const t = entry.type || entry.entry_type;
+  const c = entry.customType || entry.custom_type;
+  return t === "custom" && c === "user_notice";
+}
+
+function noticeText(entry) {
+  const d = entry.data;
+  if (d && typeof d === "object") return String(d.text || d.message || "").trim();
+  if (typeof d === "string") return d.trim();
+  return String(entry.text || "").trim();
+}
+
 function paintLog(bot, msgs) {
   if (!msgs.length) {
     const empty = el("div", "empty");
@@ -1085,22 +1102,24 @@ function paintLog(bot, msgs) {
     track(empty, "empty");
     return;
   }
+  let sawTool = false;
   for (const entry of msgs) {
-    if (entry.type === "custom" && entry.customType === "user_notice") {
-      const notice = (entry.data && entry.data.text) || "";
+    if (isUserNotice(entry)) {
+      const notice = noticeText(entry);
       if (notice) addMessage("start", "muted", bot ? bot.name : "bot", notice, bot && bot.avatar, bot && bot.id);
       continue;
     }
     const msg = entry.message || {};
     const role = msg.role;
     if (role === "toolResult") {
-      if (hiddenTool(msg.toolName)) continue;
+      if (hiddenTool(msg.toolName || msg.tool_name)) continue;
       const out = textOf(msg.content);
       const id = msg.toolCallId || msg.tool_call_id;
       finishTool(id, out, msg.isError || msg.is_error);
       if (id && !document.querySelector('.tool[data-id="' + CSS.escape(String(id)) + '"]')) {
         addTool(msg.toolName || "tool", {}, { bot, id, out, err: msg.isError || msg.is_error });
       }
+      sawTool = true;
       continue;
     }
     if (role === "user") {
@@ -1119,8 +1138,16 @@ function paintLog(bot, msgs) {
       if (!parts.length) continue;
       for (const part of parts) {
         if (part.type === "toolCall" || part.type === "tool_use") {
-          addTool(part.name, part.arguments || part.input || {}, { bot, id: part.id });
-        } else {
+          const name = part.name || "";
+          if (hiddenTool(name)) {
+            const args = asArgs(part.arguments || part.input || {});
+            const text = (args.text || args.message || "").trim();
+            if (text) addMessage("start", "muted", bot ? bot.name : "bot", text, bot && bot.avatar, bot && bot.id);
+          } else {
+            addTool(name, part.arguments || part.input || {}, { bot, id: part.id });
+          }
+          sawTool = true;
+        } else if (!sawTool) {
           const t = (part.text || "").trim();
           if (t && t !== "[]") {
             addMessage("start", "muted", bot ? bot.name : "bot", t, bot && bot.avatar, bot && bot.id);

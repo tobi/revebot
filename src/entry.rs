@@ -462,6 +462,18 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn a_user_notice_serialises_for_the_chat_page() {
+        let entry = Entry::custom(
+            "user_notice",
+            Some(json!({"text": "What's your timezone?", "bot": "rune"})),
+        );
+        let v = serde_json::to_value(&entry).unwrap();
+        assert_eq!(v["type"], "custom", "{v}");
+        assert_eq!(v["customType"], "user_notice", "{v}");
+        assert_eq!(v["data"]["text"], "What's your timezone?", "{v}");
+    }
+
+    #[test]
     fn header_lines_round_trip() {
         let line = Line::header(Header::new("s1", Some("workspace".into())));
         let text = serde_json::to_string(&line).unwrap();

@@ -30,6 +30,9 @@ mod tests {
         assert!(html.contains("openSheet"));
         assert!(html.contains("swatches"));
         assert!(html.contains("function acUpdate"));
+        assert!(html.contains("function isUserNotice"));
+        assert!(html.contains("function noticeText"));
+        assert!(html.contains("sawTool"));
         assert!(html.contains("think-dot"));
         assert!(html.contains("--blink-dur"));
         assert!(html.contains("function setWorking"));
