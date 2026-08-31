@@ -1,0 +1,13 @@
+id: harness.prompt-roundtrip
+suite: harness
+mode: offline
+runner: harness
+tags: [offline, smoke]
+description: A prompt becomes a user entry and an assistant reply.
+script:
+  - text: hello back
+test:
+  - send: hello
+  - succeeded
+  - reply_includes: hello back
+

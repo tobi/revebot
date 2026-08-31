@@ -1,0 +1,5 @@
+# Shared defaults for this catalog. Everything is optional.
+timeout_ms: 30000
+max_concurrency: 4
+# judge:
+#   model: openrouter/x-ai/grok-4.6

@@ -1,0 +1,21 @@
+id: live.create-specialist-when-asked
+suite: live
+mode: live
+runner: harness
+tags: [live]
+description: When the user asks for a dedicated researcher, the model calls CreateAgent.
+test:
+  - send: Please create a researcher bot named Papers that owns literature review.
+  - succeeded
+  - called_tool:
+      name: CreateAgent
+      args:
+        name: Papers
+system: |
+  You are the Chief of Staff. When a job has a distinct owner, call CreateAgent.
+  Ask before creating several. Cap is 50.
+tools:
+  CreateAgent:
+    result: "created Papers (id: papers)"
+    replay: never
+timeout_seconds: 120

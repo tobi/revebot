@@ -1,0 +1,16 @@
+id: house.tools-offered
+suite: house
+mode: offline
+runner: unit
+unit: house_tools
+description: House tool names win a slot on the model’s list.
+graders:
+  - kind: contains
+    text: CreateAgent
+    in: final_text
+  - kind: contains
+    text: SendAgentMessage
+    in: final_text
+  - kind: contains
+    text: update_state
+    in: final_text

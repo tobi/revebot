@@ -646,6 +646,14 @@ impl PendingEntry {
         }
     }
 
+    pub fn custom(custom_type: impl Into<String>, data: Value) -> Self {
+        Self {
+            entry_type: "custom".into(),
+            custom_type: Some(custom_type.into()),
+            payload: Some(data),
+        }
+    }
+
     /// The entry this content becomes when placed, under the reserved id.
     pub fn into_entry(self, id: EntryId) -> crate::entry::Entry {
         match self.entry_type.as_str() {

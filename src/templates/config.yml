@@ -1,0 +1,24 @@
+# House configuration. Bot identity lives under
+# workspace/agents/<id>/ — not at the house root.
+#
+# models.yml stays the provider catalog. This file is the runtime: default
+# model, sandbox, secrets.
+
+model: openrouter/x-ai/grok-4.6
+thinking: low
+
+sandbox:
+  image: ghcr.io/tobi/wrap:latest
+  cpus: 2
+  memory: 2048
+  root_disk: 16384
+  open: true
+  secrets:
+    - env: GITHUB_TOKEN
+      source: "$(gh auth token)"
+      placeholder: reve-github-token
+      hosts: [github.com, api.github.com]
+    - env: OPENROUTER_API_KEY
+      source: OPENROUTER_API_KEY
+      placeholder: reve-openrouter-key
+      hosts: [openrouter.ai]

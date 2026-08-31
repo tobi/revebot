@@ -36,10 +36,10 @@ Reve deliberately fails closed:
   shim, no daemon, no CLI transport.
 - Only `workspace/` is bind-mounted into the VM, at `/workspace`, and set as the working
   directory. The agent's own definition files stay outside the mount.
-- Network access starts from `NetworkPolicy::none()` and remains deny-all except for the
-  narrow gateway-DNS rule and hostnames explicitly listed by `sandbox.lua`. An empty
-  `allow` list permits no outbound host. Provisioning never widens the allowlist
-  implicitly; the generated scaffold names every package and toolchain host it needs.
+- Network access is the public internet by default (`NetworkProfile::Public` plus
+  gateway DNS). `sandbox.lua` can set `open = false` and list hosts in `allow` to
+  lock down; that path starts from `NetworkPolicy::none()`. Private/LAN and cloud
+  metadata are not included in the default.
 - Secrets are scoped per host. Configuration stores a host environment variable name, not
   its value. Microsandbox resolves that source when the VM starts; the guest sees only the
   placeholder, and the real value is injected into requests to named hosts at the network

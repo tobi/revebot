@@ -21,7 +21,8 @@ use reve::model::{
 use reve::sandbox::tokio_util_lite::CancelRx;
 use reve::session::Session;
 use reve::state::{
-    LaneConfiguration, ModelRef, OperationState, Outcome, Replay, RetryPolicy, RunSettings,
+    LaneConfiguration, ModelRef, OperationState, Outcome, PendingEntry, Replay, RetryPolicy,
+    RunSettings,
 };
 use reve::storage::Storage;
 use reve::tools::Tools;
@@ -1016,4 +1017,47 @@ async fn tool_is_pending(session: &Session) -> bool {
         },
         _ => false,
     }
+}
+
+#[tokio::test]
+async fn kick_starts_a_run_from_pending_next_run_without_duplicating() {
+    let world = World::new();
+    let session = world.session();
+    let harness = world.harness(
+        &session,
+        world.scripted(vec![assistant_text("woke")]),
+        no_tools(),
+        Hooks::new(),
+    );
+    harness.next_run(MAIN_LANE, "from the queue").await.unwrap();
+    let result = harness.kick(MAIN_LANE).await.unwrap();
+    assert_eq!(result.outcome, Outcome::Completed);
+    let transcript = world.transcript(&session).await;
+    assert_eq!(
+        transcript,
+        vec![
+            ("user".into(), "from the queue".into()),
+            ("assistant".into(), "woke".into())
+        ]
+    );
+    session.close().await;
+}
+
+#[tokio::test]
+async fn place_idle_notice_keeps_custom_type() {
+    let world = World::new();
+    let session = world.session();
+    let harness = world.harness(&session, world.scripted(vec![]), no_tools(), Hooks::new());
+    let id = harness
+        .place_idle(
+            MAIN_LANE,
+            PendingEntry::custom("user_notice", json!({"text": "hi"})),
+        )
+        .await
+        .unwrap();
+    let entries = session.transcript(MAIN_LANE).await.unwrap();
+    let entry = entries.iter().find(|e| e.id == id).expect("placed");
+    assert_eq!(entry.entry_type, "custom");
+    assert_eq!(entry.custom_type.as_deref(), Some("user_notice"));
+    session.close().await;
 }

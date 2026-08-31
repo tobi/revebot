@@ -1,0 +1,9 @@
+id: house.init-loads
+suite: house
+mode: offline
+runner: unit
+unit: init_loads
+description: A freshly initialised house directory loads as a Project.
+graders:
+  - kind: equals
+    text: ok

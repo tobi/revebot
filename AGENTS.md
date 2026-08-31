@@ -48,12 +48,17 @@ touches — configuration, project tools, sandbox policy — is Lua.
   line; on reopen we truncate the torn tail and resume. A malformed line in the middle is
   corruption and we refuse to open. An agent that reports work it did not persist is worse
   than one that is slow.
-- **Lua is trusted launch code.** `agent.lua`, `sandbox.lua`, and `tools/*.lua` run on the
-  host before any work starts, exactly like the Rust they extend. They are not model
-  output and they are not sandboxed — they are configuration. What they must never do is
-  execute a command on the host: `ctx.sh` goes to the microVM, and it is the only way out
-  of a tool. `Runtime::new` deletes `os.execute`, `io.popen`, `os.exit`, and
-  `package.loadlib` from the VM before any script runs; keep that list closed.
+- **Lua is trusted launch code, in two layers.** Host `plugins/*.lua` and leftover
+  `tools/*.lua` sit outside the mount. Workspace `workspace/plugins/` and
+  `workspace/agents/<id>/{plugins,routines}/` are bot-editable: syntax-checked, reloaded,
+  available as tools on the next turn. Both layers still have no host command path:
+  `ctx.sh` is the only way out and it goes to the microVM. `ctx.send` is the house
+  messaging API, not a shell. Roster tools (`CreateAgent`, `SendAgentMessage`, …) stay
+  Rust and win on name. `Runtime::new` deletes `os.execute`, `io.popen`, `os.exit`, and
+  `package.loadlib` before any script runs; keep that list closed.
+- **Host config is `config.yml`** (model, sandbox, secrets). `models.yml` stays the
+  provider catalog. Existing `agent.lua` / `sandbox.lua` still load if `config.yml` is
+  missing.
 - **Never silently overwrite files a user has edited.** `reve init` is idempotent: a
   matching file is left `unchanged`, an edited file is reported `changed` and kept, a
   missing file is created.
@@ -61,10 +66,15 @@ touches — configuration, project tools, sandbox policy — is Lua.
 
 ## Commands
 
-    cargo build                              build the crate and the `reve` binary
-    cargo install --path . --bin reve        install it; `--bin reve` keeps the two
-                                             test-helper binaries out of ~/.cargo/bin
+    cargo build                              build the crate and the `revebot` binary
+    make install                             cargo install --path . --bin revebot --locked --force
+                                             (`--bin revebot` keeps the two test-helper
+                                             binaries out of ~/.cargo/bin; `--locked`
+                                             uses Cargo.lock so yanked transitive crates
+                                             do not break the install)
     cargo test                               run the unit test suite
+    make eval                                offline eval catalog (no VM, no model)
+    make eval ARGS='--live'                  live cases; OPENROUTER_API_KEY by default
     cargo test --test microvm -- --ignored   opt-in microVM integration tests
     cargo clippy                             lint
     cargo fmt                                format

@@ -1,0 +1,30 @@
+id: live.chief-does-not-ask-name
+suite: live
+mode: live
+runner: harness
+tags: [live, smoke]
+description: >
+  On a first user turn, Chief of Staff greets and offers help. It does not
+  ask what it should be called.
+system: |
+  # Chief of Staff
+
+  You are the Chief of Staff of this house. You coordinate the roster.
+  Your id (folder name) is `chief-of-staff` and does not change if the
+  display name is updated.
+
+  On the first turn:
+  1. Greet the user.
+  2. Ask how you can help.
+
+  You already have a name. Do not ask what to be called.
+timeout_seconds: 120
+test:
+  - send: Hello, what can you do for me?
+  - succeeded
+  - reply_not_includes: what should I be called
+  - reply_not_includes: what should my name
+  - closed_qa: Does not ask the user what the assistant should be named.
+    at_least: 0.8
+    soft: true
+

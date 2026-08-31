@@ -4,20 +4,20 @@
 //! FFI shim, and no host-shell path: if the VM cannot boot, the agent refuses
 //! to run rather than quietly executing model-authored commands on your machine.
 //!
-//! Egress is deny-by-default. The policy starts from
-//! [`NetworkPolicy::none`] — deny both directions — and gains exactly two kinds
-//! of rule: one narrow gateway-DNS rule so names resolve at all, and one allow
-//! rule per host the agent's `sandbox.lua` names. Nothing here can widen that
-//! to "the internet".
+//! Egress is open to the public internet by default. The guest can reach
+//! [`NetworkProfile::Public`] (plus the gateway-DNS rule names need). Set
+//! `open = false` in `sandbox.lua` and list hosts in `allow` to lock down to
+//! an allowlist; that path still starts from [`NetworkPolicy::none`].
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use microsandbox::size::SizeExt;
 use microsandbox::{Sandbox as MsbSandbox, SandboxModificationBuilder, SecretSource};
-use microsandbox_network::policy::{NetworkPolicy, Rule};
+use microsandbox_network::policy::{NetworkPolicy, NetworkProfile, Rule};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -84,16 +84,28 @@ git config --system credential.https://github.com.helper \
 \"$GITHUB_TOKEN\"; }; f'; fi";
 
 /// A host environment reference whose value is resolved only while the VM runs.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Secret {
     /// Environment variable exposed in the guest. Its value is a placeholder.
     pub env: String,
-    /// Host environment variable resolved by microsandbox's network proxy.
+    /// How the host obtains the value: a host env var name, `$(command)`,
+    /// `http(s)://…` (GET on the host), or `file:` relative to the house
+    /// root (paste store under `.reve/secrets/`). Never a literal secret.
+    /// Command/HTTP/file output is copied into a process env var so
+    /// microsandbox still only sees [`SecretSource::Env`].
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
     #[serde(default)]
     pub hosts: Vec<String>,
+    /// Optional HTTP header the guest should send the placeholder in
+    /// (e.g. `Authorization`). The proxy substitutes the real value for
+    /// `hosts` only — the guest never sees it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    /// Optional prefix in that header, typically `Bearer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
 }
 
 /// What `sandbox.lua` produced.
@@ -112,6 +124,9 @@ pub struct Policy {
     pub packages: Vec<String>,
     pub mise: Vec<String>,
     pub npm: Vec<String>,
+    /// Public internet. The default. `false` plus `allow_hosts` is the lock-down.
+    #[serde(default = "default_open")]
+    pub open: bool,
     pub allow_hosts: Vec<String>,
     pub secrets: Vec<Secret>,
     pub bootstrap: Vec<String>,
@@ -135,6 +150,7 @@ impl Default for Policy {
             packages: APT_PACKAGES.iter().map(|s| s.to_string()).collect(),
             mise: MISE_TOOLS.iter().map(|s| s.to_string()).collect(),
             npm: NPM_TOOLS.iter().map(|s| s.to_string()).collect(),
+            open: true,
             allow_hosts: Vec::new(),
             secrets: Vec::new(),
             bootstrap: Vec::new(),
@@ -151,14 +167,45 @@ fn default_root_disk() -> u32 {
     DEFAULT_ROOT_DISK_MIB
 }
 
+fn default_open() -> bool {
+    true
+}
+
 impl Policy {
-    /// Every host this policy explicitly allows. An empty list means no
-    /// egress: provisioning never widens the network policy implicitly.
+    /// Hosts named in `allow`. When [`Self::open`] is true the guest can
+    /// already reach the public internet; this list is extra (or the whole
+    /// allowlist when `open` is false).
     pub fn egress_hosts(&self) -> Vec<String> {
         let mut hosts = self.allow_hosts.clone();
         hosts.sort();
         hosts.dedup();
         hosts
+    }
+
+    pub fn egress_summary(&self) -> String {
+        if self.open {
+            "internet".into()
+        } else {
+            let hosts = self.egress_hosts();
+            if hosts.is_empty() {
+                "none".into()
+            } else {
+                hosts.join(", ")
+            }
+        }
+    }
+
+    pub fn internet_prompt(&self) -> String {
+        if self.open {
+            "You have internet access.".into()
+        } else {
+            let hosts = self.egress_hosts();
+            if hosts.is_empty() {
+                "You have no internet access.".into()
+            } else {
+                format!("You have internet access to {}.", hosts.join(", "))
+            }
+        }
     }
 
     /// A stable VM name per workspace, so a second launch restarts the
@@ -280,6 +327,11 @@ pub struct ExecOptions {
 pub struct Sandbox {
     policy: Policy,
     host_workspace: PathBuf,
+    /// House root (parent of `.reve/`). `file:` secret sources resolve here.
+    secret_root: PathBuf,
+    /// Live secret list. Starts as `policy.secrets`; AskUserForSecret upserts
+    /// here so a save takes effect without rebuilding the VM fingerprint.
+    secrets: parking_lot::Mutex<Vec<Secret>>,
     name: String,
     vm: Arc<Mutex<VmState>>,
 }
@@ -324,8 +376,9 @@ impl Sandbox {
         tokio::fs::create_dir_all(&host_workspace)
             .await
             .map_err(|e| SandboxError::Unavailable(format!("cannot create workspace: {e}")))?;
+        let secret_root = secret_root_from(state_dir.as_ref());
         for secret in &policy.secrets {
-            if let Some(warning) = missing_secret_warning(secret) {
+            if let Some(warning) = missing_secret_warning(secret, &secret_root) {
                 progress.warning(&warning);
             }
         }
@@ -363,12 +416,15 @@ impl Sandbox {
                 let config = handle.config().map_err(secret_config_error)?;
                 let existing = persisted_secret_names(&config);
                 remove_secret_definitions(handle.modify(), &existing, true).await?;
-                install_secret_definitions(handle.modify(), &policy.secrets, true).await?;
+                install_secret_definitions(handle.modify(), &policy.secrets, true, &secret_root)
+                    .await?;
             }
             progress.stage(&format!("restarting microVM {name}"));
             if let Ok(vm) = MsbSandbox::start(&name).await {
-                let secret_digests = runtime_secret_digests(&policy);
+                let secret_digests = runtime_secret_digests(&policy.secrets, &secret_root);
                 let sandbox = Self {
+                    secrets: parking_lot::Mutex::new(policy.secrets.clone()),
+                    secret_root,
                     policy,
                     host_workspace,
                     name,
@@ -386,9 +442,11 @@ impl Sandbox {
         }
 
         progress.stage(&format!("building microVM {name} from {}", policy.image));
-        let vm = build(&policy, &name, &host_workspace).await?;
-        let secret_digests = runtime_secret_digests(&policy);
+        let vm = build(&policy, &name, &host_workspace, &secret_root).await?;
+        let secret_digests = runtime_secret_digests(&policy.secrets, &secret_root);
         let sandbox = Self {
+            secrets: parking_lot::Mutex::new(policy.secrets.clone()),
+            secret_root,
             policy,
             host_workspace,
             name,
@@ -460,6 +518,40 @@ impl Sandbox {
 
     pub fn host_workspace(&self) -> &Path {
         &self.host_workspace
+    }
+
+    /// Keep the guest from idle-stopping for the lifetime of the house.
+    pub async fn hold(&self) -> Result<()> {
+        let _ = self.acquire().await?;
+        Ok(())
+    }
+
+    /// Pair of [`hold`]: allow idle-stop again.
+    pub async fn release_hold(&self) {
+        self.release().await;
+    }
+
+    /// If a namesake is still Running after a dead house, stop it so
+    /// [`Sandbox::start`] can boot. Only the lock holder should call this.
+    pub async fn reclaim_namesake(name: &str) -> Result<()> {
+        let Ok(handle) = MsbSandbox::get(name).await else {
+            return Ok(());
+        };
+        use microsandbox::sandbox::SandboxStatus;
+        if matches!(
+            handle.status_snapshot(),
+            SandboxStatus::Running | SandboxStatus::Draining
+        ) {
+            handle
+                .stop()
+                .await
+                .map_err(|e| SandboxError::Failed(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    pub fn sandbox_name_for(policy: &Policy, host_workspace: impl AsRef<Path>) -> String {
+        policy.sandbox_name(host_workspace.as_ref())
     }
 
     /// Run a command through `sh -lc`, so the guest's login PATH (and therefore
@@ -585,10 +677,11 @@ impl Sandbox {
         if !self.policy.mise.is_empty() {
             extras.push(format!("mise {}", self.policy.mise.join(",")));
         }
-        extras.push(format!("net {} hosts", self.policy.egress_hosts().len()));
+        extras.push(format!("net {}", self.policy.egress_summary()));
         extras.push(format!("idle {}s", IDLE_TIMEOUT.as_secs()));
-        if !self.policy.secrets.is_empty() {
-            let names: Vec<&str> = self.policy.secrets.iter().map(|s| s.env.as_str()).collect();
+        let secrets = self.secrets();
+        if !secrets.is_empty() {
+            let names: Vec<&str> = secrets.iter().map(|s| s.env.as_str()).collect();
             extras.push(format!("secrets {}", names.join(",")));
         }
         let mount = if self.policy.mount_workspace {
@@ -609,6 +702,33 @@ impl Sandbox {
         )
     }
 
+    pub fn secrets(&self) -> Vec<Secret> {
+        self.secrets.lock().clone()
+    }
+
+    /// Merge `secret` by `env` and reinstall host-side sources on the live VM
+    /// definition. The guest still only sees a placeholder.
+    pub async fn upsert_secret(&self, secret: Secret) -> Result<()> {
+        {
+            let mut secrets = self.secrets.lock();
+            if let Some(existing) = secrets.iter_mut().find(|s| s.env == secret.env) {
+                *existing = secret.clone();
+            } else {
+                secrets.push(secret.clone());
+            }
+        }
+        let secrets = self.secrets();
+        let mut state = self.vm.lock().await;
+        if let Some(vm) = state.vm.as_ref() {
+            let config = vm.config();
+            let existing = persisted_secret_names(config);
+            remove_secret_definitions(vm.modify(), &existing, true).await?;
+            install_secret_definitions(vm.modify(), &secrets, true, &self.secret_root).await?;
+            state.secret_digests = runtime_secret_digests(&secrets, &self.secret_root);
+        }
+        Ok(())
+    }
+
     fn absolute(&self, path: &str) -> String {
         if path.starts_with('/') {
             path.to_string()
@@ -621,13 +741,15 @@ impl Sandbox {
     /// `start` serializes simultaneous first effects inside this process.
     async fn acquire(&self) -> Result<MsbSandbox> {
         let mut state = self.vm.lock().await;
-        let desired = runtime_secret_digests(&self.policy);
+        let secrets = self.secrets();
+        let desired = runtime_secret_digests(&secrets, &self.secret_root);
         if state.vm.is_none() {
             if let Ok(handle) = MsbSandbox::get(&self.name).await {
                 let config = handle.config().map_err(secret_config_error)?;
                 let existing = persisted_secret_names(&config);
                 remove_secret_definitions(handle.modify(), &existing, true).await?;
-                install_secret_definitions(handle.modify(), &self.policy.secrets, true).await?;
+                install_secret_definitions(handle.modify(), &secrets, true, &self.secret_root)
+                    .await?;
             }
             state.vm = Some(MsbSandbox::start(&self.name).await.map_err(|error| {
                 SandboxError::Unavailable(format!("cannot start microVM {}: {error}", self.name))
@@ -641,7 +763,7 @@ impl Sandbox {
             let config = vm.config();
             let existing = persisted_secret_names(config);
             remove_secret_definitions(vm.modify(), &existing, true).await?;
-            install_secret_definitions(vm.modify(), &self.policy.secrets, true).await?;
+            install_secret_definitions(vm.modify(), &secrets, true, &self.secret_root).await?;
             state.vm = Some(MsbSandbox::start(&self.name).await.map_err(|error| {
                 SandboxError::Unavailable(format!(
                     "cannot restart microVM {} after secret rotation: {error}",
@@ -729,15 +851,161 @@ fn encode(output: &microsandbox::ExecOutput, cancelled: bool) -> Output {
     }
 }
 
-fn runtime_secret_digests(policy: &Policy) -> BTreeMap<String, String> {
-    policy
-        .secrets
+fn secret_root_from(state_dir: &Path) -> PathBuf {
+    state_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| state_dir.to_path_buf())
+}
+
+fn runtime_secret_digests(secrets: &[Secret], root: &Path) -> BTreeMap<String, String> {
+    secrets
         .iter()
         .filter_map(|secret| {
-            let value = std::env::var(&secret.source).ok()?;
+            let value = secret_value(secret, root)?;
             Some((secret.env.clone(), hex(&Sha256::digest(value.as_bytes()))))
         })
         .collect()
+}
+
+/// `$(command)` as the entire `source`, no nested substitution.
+pub(crate) fn command_secret_source(source: &str) -> Option<&str> {
+    let trimmed = source.trim();
+    let inner = trimmed.strip_prefix("$(")?.strip_suffix(')')?;
+    if inner.is_empty() || inner.contains("$(") {
+        return None;
+    }
+    Some(inner.trim())
+}
+
+fn host_var_for_command(secret_env: &str) -> String {
+    let cleaned: String = secret_env
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    format!("REVEBOT_SECRET_{cleaned}")
+}
+
+fn run_secret_command(script: &str) -> Result<String, String> {
+    let words = shell_words::split(script).map_err(|e| e.to_string())?;
+    let Some(program) = words.first() else {
+        return Err("empty command".into());
+    };
+    let output = std::process::Command::new(program)
+        .args(&words[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("{program}: {e}"))?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        let err = err.trim();
+        let code = output.status.code().unwrap_or(-1);
+        if err.is_empty() {
+            return Err(format!("exit {code}"));
+        }
+        return Err(format!("exit {code}: {err}"));
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        return Err("produced no output".into());
+    }
+    if value.len() > 16 * 1024 {
+        return Err("output too large".into());
+    }
+    Ok(value)
+}
+
+fn file_secret_path(source: &str, root: &Path) -> Option<PathBuf> {
+    let rest = source.strip_prefix("file:")?;
+    let path = Path::new(rest.trim());
+    if rest.trim().is_empty() {
+        return None;
+    }
+    Some(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    })
+}
+
+fn http_secret_url(source: &str) -> Option<&str> {
+    let url = source.trim();
+    let url = url
+        .strip_prefix("http:")
+        .filter(|rest| rest.starts_with("http://") || rest.starts_with("https://"))
+        .unwrap_or(url);
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return None;
+    }
+    if url
+        .chars()
+        .any(|c| c.is_ascii_whitespace() || matches!(c, ';' | '|' | '&' | '`'))
+    {
+        return None;
+    }
+    Some(url)
+}
+
+fn fetch_http_secret(url: &str) -> Result<String, String> {
+    let output = std::process::Command::new("curl")
+        .args(["-fsSL", "--max-time", "15", "--", url])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("curl: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("exit {}", output.status.code().unwrap_or(-1)));
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        return Err("produced no output".into());
+    }
+    if value.len() > 16 * 1024 {
+        return Err("output too large".into());
+    }
+    Ok(value)
+}
+
+fn read_file_secret(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn secret_value(secret: &Secret, root: &Path) -> Option<String> {
+    if let Some(script) = command_secret_source(&secret.source) {
+        run_secret_command(script).ok().filter(|s| !s.is_empty())
+    } else if let Some(path) = file_secret_path(&secret.source, root) {
+        read_file_secret(&path)
+    } else if let Some(url) = http_secret_url(&secret.source) {
+        fetch_http_secret(url).ok().filter(|s| !s.is_empty())
+    } else {
+        std::env::var(&secret.source).ok()
+    }
+}
+
+/// Resolve a secret to a host env var microsandbox can read. Command, file, and
+/// HTTP sources are copied into `REVEBOT_SECRET_<env>` for this process.
+fn bind_secret(secret: &Secret, root: &Path) -> Option<String> {
+    let needs_copy = command_secret_source(&secret.source).is_some()
+        || file_secret_path(&secret.source, root).is_some()
+        || http_secret_url(&secret.source).is_some();
+    if needs_copy {
+        let value = secret_value(secret, root)?;
+        let var = host_var_for_command(&secret.env);
+        // SAFETY: we only write Reve-owned `REVEBOT_SECRET_*` keys. Secret
+        // install is serialized by the VM mutex; other threads may read env
+        // concurrently, which is the documented hazard of `set_var`.
+        unsafe { std::env::set_var(&var, &value) };
+        Some(var)
+    } else {
+        std::env::var_os(&secret.source)?;
+        Some(secret.source.clone())
+    }
 }
 fn secret_config_error(error: microsandbox::MicrosandboxError) -> SandboxError {
     SandboxError::Failed(format!("cannot inspect runtime secrets: {error}"))
@@ -779,20 +1047,24 @@ async fn install_secret_definitions(
     mut modification: SandboxModificationBuilder,
     secrets: &[Secret],
     next_start: bool,
+    root: &Path,
 ) -> Result<()> {
-    let available: Vec<Secret> = secrets
+    let available: Vec<(Secret, String)> = secrets
         .iter()
-        .filter(|secret| std::env::var_os(&secret.source).is_some())
         .cloned()
+        .filter_map(|secret| {
+            let host_var = bind_secret(&secret, root)?;
+            Some((secret, host_var))
+        })
         .collect();
     if available.is_empty() {
         return Ok(());
     }
-    for secret in available {
+    for (secret, host_var) in available {
         modification = modification.secret(move |mut patch| {
-            patch = patch.env(secret.env.as_str()).source(SecretSource::Env {
-                var: secret.source.clone(),
-            });
+            patch = patch
+                .env(secret.env.as_str())
+                .source(SecretSource::Env { var: host_var });
             if let Some(placeholder) = &secret.placeholder {
                 patch = patch.placeholder(placeholder.as_str());
             }
@@ -812,26 +1084,44 @@ async fn install_secret_definitions(
         .map_err(|e| SandboxError::Failed(format!("cannot apply runtime secrets: {e}")))
 }
 
-fn missing_secret_warning(secret: &Secret) -> Option<String> {
-    std::env::var_os(&secret.source)
+fn missing_secret_warning(secret: &Secret, root: &Path) -> Option<String> {
+    secret_value(secret, root)
         .is_none()
         .then(|| format_missing_secret_warning(secret))
 }
 
 fn format_missing_secret_warning(secret: &Secret) -> String {
+    let hosts = secret.hosts.join(", ");
+    if let Some(script) = command_secret_source(&secret.source) {
+        let detail = match run_secret_command(script) {
+            Ok(value) if value.is_empty() => "produced no output".to_string(),
+            Ok(_) => "unavailable".to_string(),
+            Err(e) => e,
+        };
+        return format!(
+            "{} failed ({detail}); authenticated access for {hosts} is disabled",
+            secret.source
+        );
+    }
     let mut warning = format!(
-        "{} is unset; authenticated access for {} is disabled",
-        secret.source,
-        secret.hosts.join(", ")
+        "{} is unset; authenticated access for {hosts} is disabled",
+        secret.source
     );
     if secret.source == "GITHUB_TOKEN" {
         warning.push_str("\nexport GITHUB_TOKEN=\"$(gh auth token)\"");
+    } else if secret.source == "OPENROUTER_API_KEY" {
+        warning.push_str("\nexport OPENROUTER_API_KEY=...");
     }
     warning
 }
 
 /// Turn a [`Policy`] into a booted VM.
-async fn build(policy: &Policy, name: &str, host_workspace: &Path) -> Result<MsbSandbox> {
+async fn build(
+    policy: &Policy,
+    name: &str,
+    host_workspace: &Path,
+    secret_root: &Path,
+) -> Result<MsbSandbox> {
     let mut builder = MsbSandbox::builder(name.to_string())
         .image(policy.image.clone())
         .root_disk(policy.root_disk.mib())
@@ -847,27 +1137,32 @@ async fn build(policy: &Policy, name: &str, host_workspace: &Path) -> Result<Msb
         builder = builder.volume(policy.workdir.clone(), move |m| m.bind(host));
     }
 
-    // Deny both directions, admit gateway DNS, then allow exactly the named
-    // hosts. Order matters only in that `allow_domains` prepends.
-    let mut network = NetworkPolicy::none();
-    network.rules.push(Rule::allow_dns());
-    network = network
-        .allow_domains(policy.egress_hosts())
-        .map_err(|e| SandboxError::Policy(format!("invalid allowed host: {e}")))?;
+    // Open (the default): public internet + gateway DNS.
+    // Locked down: deny both directions, gateway DNS, then named hosts.
+    let mut network = if policy.open {
+        NetworkPolicy::from_profiles([NetworkProfile::Public])
+    } else {
+        let mut network = NetworkPolicy::none();
+        network.rules.push(Rule::allow_dns());
+        network
+    };
+    if !policy.allow_hosts.is_empty() {
+        network = network
+            .allow_domains(policy.egress_hosts())
+            .map_err(|e| SandboxError::Policy(format!("invalid allowed host: {e}")))?;
+    }
     builder = builder.network(move |n| n.enabled(true).policy(network));
 
     // Only host environment references enter the durable definition. Values
     // are resolved by microsandbox when the VM starts and remain host-side.
-    for secret in policy
-        .secrets
-        .iter()
-        .filter(|secret| std::env::var_os(&secret.source).is_some())
-        .cloned()
-    {
+    for secret in policy.secrets.clone() {
+        let Some(host_var) = bind_secret(&secret, secret_root) else {
+            continue;
+        };
         builder = builder.secret(move |mut entry| {
-            entry = entry.env(secret.env.as_str()).source(SecretSource::Env {
-                var: secret.source.clone(),
-            });
+            entry = entry
+                .env(secret.env.as_str())
+                .source(SecretSource::Env { var: host_var });
             if let Some(placeholder) = &secret.placeholder {
                 entry = entry.placeholder(placeholder.as_str());
             }
@@ -951,11 +1246,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_egress_denies_every_host_even_during_provisioning() {
-        assert!(
-            Policy::default().egress_hosts().is_empty(),
-            "network access must be named explicitly in sandbox.lua"
-        );
+    fn default_egress_is_the_public_internet() {
+        let policy = Policy::default();
+        assert!(policy.open, "the guest can reach the public internet");
+        assert_eq!(policy.egress_summary(), "internet");
+    }
+
+    #[test]
+    fn a_closed_policy_with_no_allow_list_has_no_named_hosts() {
+        let policy = Policy {
+            open: false,
+            ..Default::default()
+        };
+        assert!(policy.egress_hosts().is_empty());
+        assert_eq!(policy.egress_summary(), "none");
     }
 
     #[test]
@@ -1007,6 +1311,7 @@ mod tests {
             source: "HOST_TOKEN".into(),
             placeholder: Some("reve-token".into()),
             hosts: vec!["x.com".into()],
+            ..Default::default()
         });
         assert_eq!(
             base.fingerprint(ws),
@@ -1042,9 +1347,10 @@ mod tests {
             source: "REVE_TEST_MISSING_GITHUB_TOKEN_9D2B".into(),
             placeholder: Some("reve-github-token".into()),
             hosts: vec!["github.com".into(), "api.github.com".into()],
+            ..Default::default()
         };
         assert_eq!(
-            missing_secret_warning(&secret).as_deref(),
+            missing_secret_warning(&secret, Path::new("/tmp")).as_deref(),
             Some(
                 "REVE_TEST_MISSING_GITHUB_TOKEN_9D2B is unset; authenticated access for github.com, api.github.com is disabled"
             )
@@ -1058,11 +1364,80 @@ mod tests {
             source: "GITHUB_TOKEN".into(),
             placeholder: Some("reve-github-token".into()),
             hosts: vec!["github.com".into(), "api.github.com".into()],
+            ..Default::default()
         };
         assert_eq!(
             format_missing_secret_warning(&secret),
             "GITHUB_TOKEN is unset; authenticated access for github.com, api.github.com is disabled\nexport GITHUB_TOKEN=\"$(gh auth token)\""
         );
+    }
+
+    #[test]
+    fn an_unset_openrouter_key_warning_explains_how_to_export_it() {
+        let secret = Secret {
+            env: "OPENROUTER_API_KEY".into(),
+            source: "OPENROUTER_API_KEY".into(),
+            placeholder: Some("reve-openrouter-key".into()),
+            hosts: vec!["openrouter.ai".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            format_missing_secret_warning(&secret),
+            "OPENROUTER_API_KEY is unset; authenticated access for openrouter.ai is disabled\nexport OPENROUTER_API_KEY=..."
+        );
+    }
+
+    #[test]
+    fn a_command_source_is_the_inner_script() {
+        assert_eq!(
+            command_secret_source("$(gh auth token)"),
+            Some("gh auth token")
+        );
+        assert_eq!(
+            command_secret_source("  $( gh auth token )  "),
+            Some("gh auth token")
+        );
+        assert_eq!(command_secret_source("GITHUB_TOKEN"), None);
+        assert_eq!(command_secret_source("$(gh auth token"), None);
+        assert_eq!(command_secret_source("$()"), None);
+        assert_eq!(command_secret_source("$(echo $(gh auth token))"), None);
+    }
+
+    #[test]
+    fn a_command_source_runs_on_the_host_and_is_not_an_env_name() {
+        let secret = Secret {
+            env: "TOKEN_CMD_TEST_9D2B".into(),
+            source: "$(/bin/echo command-secret-ok)".into(),
+            placeholder: None,
+            hosts: vec!["example.com".into()],
+            ..Default::default()
+        };
+        let root = Path::new("/tmp");
+        assert_eq!(
+            secret_value(&secret, root).as_deref(),
+            Some("command-secret-ok")
+        );
+        assert!(missing_secret_warning(&secret, root).is_none());
+        let var = bind_secret(&secret, root).expect("bind");
+        assert_eq!(var, "REVEBOT_SECRET_TOKEN_CMD_TEST_9D2B");
+        assert_eq!(std::env::var(&var).as_deref(), Ok("command-secret-ok"));
+    }
+
+    #[test]
+    fn a_failing_command_source_is_reported_not_as_an_unset_env() {
+        let secret = Secret {
+            env: "TOKEN".into(),
+            source: "$(/bin/false)".into(),
+            placeholder: None,
+            hosts: vec!["example.com".into()],
+            ..Default::default()
+        };
+        let root = Path::new("/tmp");
+        assert!(secret_value(&secret, root).is_none());
+        let warning = missing_secret_warning(&secret, root).expect("warning");
+        assert!(warning.starts_with("$(/bin/false) failed"), "{warning}");
+        assert!(warning.contains("example.com"), "{warning}");
+        assert!(!warning.contains("is unset"), "{warning}");
     }
 
     #[test]

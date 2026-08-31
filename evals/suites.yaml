@@ -1,0 +1,18 @@
+# Eval catalog. Cases live in cases/<suite>/*.yaml
+#
+#   make eval                    offline suite (CI)
+#   make eval ARGS='--live'      include real-model cases (OPENROUTER_API_KEY)
+#   revebot eval --microvm       include guest cases (none wired in v1)
+#   revebot eval --list
+#   revebot eval --suite harness
+
+default: offline
+suites:
+  harness:
+    description: Durable lane — prompt, kick, place_idle, tools
+  house:
+    description: House filesystem, slugs, roster, offered tools
+  tools:
+    description: Built-in tool policy (session-path refuse)
+  live:
+    description: Real model, no VM. Skipped unless --live

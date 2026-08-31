@@ -1,0 +1,14 @@
+id: harness.place-idle-notice
+suite: harness
+mode: offline
+runner: harness
+description: place_idle writes a custom user_notice with custom_type intact.
+actions:
+  - place_idle:
+      custom_type: user_notice
+      text: hi from the house
+graders:
+  - kind: transcript
+    messages:
+      - role: user_notice
+        contains: hi from the house

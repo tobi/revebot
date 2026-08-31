@@ -1,0 +1,11 @@
+id: house.unique-slug
+suite: house
+mode: offline
+runner: unit
+unit: unique_slug
+input:
+  base: researcher
+  taken: [researcher, researcher-2]
+graders:
+  - kind: equals
+    text: researcher-3

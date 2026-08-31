@@ -1,0 +1,26 @@
+id: harness.tool-then-reply
+suite: harness
+mode: offline
+runner: harness
+tags: [offline, tools]
+description: Scripted tool call is recorded and the follow-up text is the answer.
+script:
+  - text: ""
+    tool_calls:
+      - name: example
+        arguments:
+          commits: 2
+  - text: two commits
+tools:
+  example:
+    result: "abc\ndef"
+    replay: safe
+test:
+  - send: summarize
+  - succeeded
+  - called_tool:
+      name: example
+      args:
+        commits: 2
+  - reply_includes: two commits
+

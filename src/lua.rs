@@ -1,11 +1,12 @@
 //! The scripting surface.
 //!
 //! Everything an agent author writes is Lua: `agent.lua` configures the model,
-//! `sandbox.lua` states the VM policy, and each `tools/*.lua` adds a tool the
-//! model can call. Those files are *trusted launch code* — they run on the host
-//! before any work starts, exactly like the Rust they extend. What they must
-//! never do is execute a command on the host: `ctx.sh` goes to the microVM, and
-//! it is the only way out of a tool.
+//! `sandbox.lua` states the VM policy, each `tools/*.lua` adds a tool the model
+//! can call, and each `routines/*.lua` declares a cron-fired job. Those files
+//! are *trusted launch code* — they run on the host before any work starts,
+//! exactly like the Rust they extend. What they must never do is execute a
+//! command on the host: `ctx.sh` goes to the microVM, and it is the only way
+//! out of a tool. A routine's `ctx.send` queues a message to a bot.
 //!
 //! Lua rather than a config format because a real tool needs branching, string
 //! handling, and a standard library. Lua rather than embedding a second large
@@ -22,6 +23,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
+use crate::cron::Cron;
+use crate::hooks::{BeforeToolEvent, BeforeToolResult, Block};
 use crate::sandbox::{ExecOptions, Policy, Sandbox, Secret};
 use crate::state::Replay;
 
@@ -92,6 +95,8 @@ pub struct ToolDef {
     pub description: String,
     pub params: Vec<Param>,
     pub replay: Replay,
+    /// `None` = house-wide. `Some(id)` = only that bot.
+    pub owner: Option<String>,
     key: mlua::RegistryKey,
 }
 
@@ -147,12 +152,39 @@ impl ToolDef {
 
 // ── the runtime ──────────────────────────────────────────────────────────
 
+/// A cron-fired house job declared in `routines/*.lua`.
+pub struct RoutineDef {
+    pub id: String,
+    pub name: String,
+    pub cron: Cron,
+    pub cron_src: String,
+    pub enabled: bool,
+    pub bot: Option<String>,
+    pub message: Option<String>,
+    run: Option<mlua::RegistryKey>,
+}
+
+impl RoutineDef {
+    pub fn schedule(&self) -> String {
+        self.cron.describe(&self.cron_src)
+    }
+}
+
 /// Owns the Lua VM and everything the agent's scripts declared.
 pub struct Runtime {
     lua: Lua,
     pub agent: AgentConfig,
     pub policy: Policy,
     pub tools: Vec<ToolDef>,
+    pub routines: Vec<RoutineDef>,
+    pub guards: Vec<GuardDef>,
+}
+
+/// A `guard()` from a workspace plugin. Runs on `before_tool`, fail closed.
+pub struct GuardDef {
+    pub id: String,
+    pub tools: Vec<String>,
+    key: mlua::RegistryKey,
 }
 
 /// Everything Lua's standard library offers that reaches the host as a
@@ -183,6 +215,8 @@ impl Runtime {
             agent: AgentConfig::default(),
             policy: Policy::default(),
             tools: Vec::new(),
+            routines: Vec::new(),
+            guards: Vec::new(),
         })
     }
 
@@ -216,7 +250,7 @@ impl Runtime {
     }
 
     /// Load `sandbox.lua`, if the agent has one. Absent means the default
-    /// policy, which is already deny-by-default.
+    /// policy (public internet).
     pub fn load_sandbox(&mut self, path: &Path) -> Result<()> {
         let captured: Arc<Mutex<Option<Table>>> = Arc::default();
         let sink = captured.clone();
@@ -235,6 +269,10 @@ impl Runtime {
 
     /// Load every `tools/*.lua`. One file may declare several tools.
     pub fn load_tools(&mut self, dir: &Path) -> Result<()> {
+        self.load_tools_for(dir, None)
+    }
+
+    pub fn load_tools_for(&mut self, dir: &Path, owner: Option<&str>) -> Result<()> {
         if !dir.is_dir() {
             return Ok(());
         }
@@ -247,6 +285,24 @@ impl Runtime {
                 Ok(())
             })?;
         self.lua.globals().set("tool", tool_fn)?;
+        let guards: Arc<Mutex<Vec<(String, Table)>>> = Arc::default();
+        let guard_sink = guards.clone();
+        let guard_fn = self
+            .lua
+            .create_function(move |_, (name, spec): (String, Table)| {
+                guard_sink.lock().push((name, spec));
+                Ok(())
+            })?;
+        self.lua.globals().set("guard", guard_fn)?;
+        let crons: Arc<Mutex<Vec<(String, Table)>>> = Arc::default();
+        let cron_sink = crons.clone();
+        let cron_fn = self
+            .lua
+            .create_function(move |_, (id, spec): (String, Table)| {
+                cron_sink.lock().push((id, spec));
+                Ok(())
+            })?;
+        self.lua.globals().set("cron", cron_fn)?;
 
         let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
             .map_err(|source| LuaError::Io {
@@ -263,13 +319,181 @@ impl Runtime {
 
         let declared = std::mem::take(&mut *collected.lock());
         for (name, spec) in declared {
-            self.tools.push(self.tool_from_table(name, spec)?);
+            self.tools
+                .push(self.tool_from_table(name, spec, owner.map(str::to_string))?);
+        }
+        let declared_guards = std::mem::take(&mut *guards.lock());
+        for (name, spec) in declared_guards {
+            self.guards.push(self.guard_from_table(name, spec)?);
+        }
+        let declared_crons = std::mem::take(&mut *crons.lock());
+        for (id, spec) in declared_crons {
+            let mut def = self.routine_from_table(id, spec)?;
+            if def.bot.is_none() {
+                def.bot = owner.map(str::to_string);
+            }
+            self.routines.push(def);
         }
         Ok(())
     }
 
+    /// Load every `routines/*.lua`. One file may declare several routines.
+    pub fn load_routines(&mut self, dir: &Path) -> Result<()> {
+        self.load_routines_for(dir, None)
+    }
+
+    /// Like [`Self::load_routines`], filling in `bot` from the owning folder
+    /// when the file omits it.
+    pub fn load_routines_for(&mut self, dir: &Path, default_bot: Option<&str>) -> Result<()> {
+        if !dir.is_dir() {
+            return Ok(());
+        }
+        let collected: Arc<Mutex<Vec<(String, Table)>>> = Arc::default();
+        let sink = collected.clone();
+        let routine_fn = self
+            .lua
+            .create_function(move |_, (id, spec): (String, Table)| {
+                sink.lock().push((id, spec));
+                Ok(())
+            })?;
+        self.lua.globals().set("routine", routine_fn)?;
+
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+            .map_err(|source| LuaError::Io {
+                path: dir.to_path_buf(),
+                source,
+            })?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "lua"))
+            .collect();
+        paths.sort();
+        for path in &paths {
+            self.exec_file(path)?;
+        }
+
+        let declared = std::mem::take(&mut *collected.lock());
+        for (id, spec) in declared {
+            let mut def = self.routine_from_table(id, spec)?;
+            if def.bot.is_none() {
+                def.bot = default_bot.map(str::to_string);
+            }
+            if def.run.is_none() && (def.bot.is_none() || def.message.is_none()) {
+                return Err(invalid(
+                    "routine",
+                    format!("{} needs `run`, or both `bot` and `message`", def.id),
+                ));
+            }
+            self.routines.push(def);
+        }
+        Ok(())
+    }
+
+    pub fn routine(&self, id: &str) -> Option<&RoutineDef> {
+        self.routines.iter().find(|r| r.id == id)
+    }
+
+    /// Collect the messages a routine wants to send. Does not talk to the house
+    /// — the caller delivers each pair through `House::prompt`.
+    pub async fn fire_routine(&self, id: &str) -> Result<Vec<(String, String)>> {
+        let def = self
+            .routine(id)
+            .ok_or_else(|| invalid("routine", format!("no routine named {id:?}")))?;
+        if let Some(key) = &def.run {
+            let queued: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
+            let sink = queued.clone();
+            let ctx = self.lua.create_table()?;
+            let send = self
+                .lua
+                .create_function(move |_, (bot, text): (String, String)| {
+                    sink.lock().push((bot, text));
+                    Ok(())
+                })?;
+            ctx.set("send", send)?;
+            let function: mlua::Function = self.lua.registry_value(key)?;
+            function.call_async::<()>(ctx).await?;
+            return Ok(std::mem::take(&mut *queued.lock()));
+        }
+        match (&def.bot, &def.message) {
+            (Some(bot), Some(message)) => Ok(vec![(bot.clone(), message.clone())]),
+            _ => Err(invalid(
+                "routine",
+                format!("{id} has no `run` and no `bot`+`message`"),
+            )),
+        }
+    }
+
+    fn routine_from_table(&self, id: String, spec: Table) -> Result<RoutineDef> {
+        let cron_src: String = spec
+            .get("cron")
+            .map_err(|_| invalid("routine", format!("{id} needs a `cron` field")))?;
+        let cron = Cron::parse(&cron_src).map_err(|e| invalid("routine", e.to_string()))?;
+        let name: String = spec
+            .get::<Option<String>>("name")?
+            .unwrap_or_else(|| id.clone());
+        let enabled = spec.get::<Option<bool>>("enabled")?.unwrap_or(true);
+        let bot = spec.get::<Option<String>>("bot")?;
+        let message = spec.get::<Option<String>>("message")?;
+        let run = spec
+            .get::<Option<mlua::Function>>("run")?
+            .map(|f| self.lua.create_registry_value(f))
+            .transpose()?;
+        Ok(RoutineDef {
+            id,
+            name,
+            cron,
+            cron_src,
+            enabled,
+            bot,
+            message,
+            run,
+        })
+    }
+
     pub fn tool(&self, name: &str) -> Option<&ToolDef> {
         self.tools.iter().find(|t| t.name == name)
+    }
+
+    /// Workspace `guard()` plugins. Fail closed: a Lua error blocks the tool.
+    pub async fn run_guards(
+        &self,
+        event: &BeforeToolEvent,
+    ) -> std::result::Result<Option<BeforeToolResult>, String> {
+        for guard in &self.guards {
+            if !guard.tools.is_empty() && !guard.tools.iter().any(|t| t == &event.tool_name) {
+                continue;
+            }
+            let function: mlua::Function = self
+                .lua
+                .registry_value(&guard.key)
+                .map_err(|e| e.to_string())?;
+            let table = self.lua.create_table().map_err(|e| e.to_string())?;
+            table
+                .set("tool_name", event.tool_name.clone())
+                .map_err(|e| e.to_string())?;
+            let args = self.lua.to_value(&event.args).map_err(|e| e.to_string())?;
+            table.set("args", args).map_err(|e| e.to_string())?;
+            let result: LuaValue = function
+                .call_async(table)
+                .await
+                .map_err(|e| format!("guard {}: {e}", guard.id))?;
+            if result.is_nil() {
+                continue;
+            }
+            let parsed: Value = self.lua.from_value(result).map_err(|e| e.to_string())?;
+            if let Some(reason) = parsed.get("block").and_then(Value::as_str) {
+                return Ok(Some(BeforeToolResult {
+                    args: None,
+                    block: Some(Block {
+                        reason: reason.to_string(),
+                        terminate: parsed
+                            .get("terminate")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                    }),
+                }));
+            }
+        }
+        Ok(None)
     }
 
     /// Run a Lua tool.
@@ -323,6 +547,9 @@ impl Runtime {
         })?;
         ctx.set("sh", sh)?;
         ctx.set("workdir", sandbox.workdir().to_string())?;
+        if let Some(owner) = &def.owner {
+            ctx.set("bot", owner.clone())?;
+        }
         ctx.set(
             "shellescape",
             self.lua
@@ -363,7 +590,7 @@ impl Runtime {
             })
     }
 
-    fn tool_from_table(&self, name: String, spec: Table) -> Result<ToolDef> {
+    fn tool_from_table(&self, name: String, spec: Table, owner: Option<String>) -> Result<ToolDef> {
         let run: mlua::Function = spec
             .get("run")
             .map_err(|_| invalid("tool", format!("{name} has no `run` function")))?;
@@ -411,8 +638,20 @@ impl Runtime {
             description,
             params,
             replay,
+            owner,
             key,
         })
+    }
+
+    fn guard_from_table(&self, id: String, spec: Table) -> Result<GuardDef> {
+        let run: mlua::Function = spec
+            .get("run")
+            .map_err(|_| invalid("guard", format!("{id} has no `run` function")))?;
+        let key = self.lua.create_registry_value(run)?;
+        let tools = spec
+            .get::<Option<Vec<String>>>("tools")?
+            .unwrap_or_default();
+        Ok(GuardDef { id, tools, key })
     }
 }
 
@@ -451,6 +690,9 @@ fn policy_from_table(table: &Table) -> Result<Policy> {
     if let Some(v) = table.get::<Option<bool>>("mount_workspace")? {
         policy.mount_workspace = v;
     }
+    if let Some(v) = table.get::<Option<bool>>("open")? {
+        policy.open = v;
+    }
     if let Ok(list) = table.get::<Table>("packages") {
         policy.packages = string_list(&list)?;
     }
@@ -488,9 +730,19 @@ fn policy_from_table(table: &Table) -> Result<Policy> {
             let source: String = entry.get("source").map_err(|_| {
                 invalid(
                     "sandbox secret",
-                    "each secret needs a host environment `source`; literal `value` secrets are not supported",
+                    "each secret needs a host `source` (env var or `$(command)`); literal `value` secrets are not supported",
                 )
             })?;
+            if source.trim().starts_with("$(")
+                && crate::sandbox::command_secret_source(&source).is_none()
+            {
+                return Err(invalid(
+                    "sandbox secret",
+                    format!(
+                        "secret {env} source must be `$(command)` with a non-empty command and no nested substitution"
+                    ),
+                ));
+            }
             let hosts = entry
                 .get::<Table>("hosts")
                 .ok()
@@ -505,6 +757,8 @@ fn policy_from_table(table: &Table) -> Result<Policy> {
                     ),
                 ));
             }
+            let header = entry.get::<String>("header").ok().filter(|s| !s.is_empty());
+            let prefix = entry.get::<String>("prefix").ok().filter(|s| !s.is_empty());
             secrets.push(Secret {
                 env,
                 source,
@@ -513,6 +767,8 @@ fn policy_from_table(table: &Table) -> Result<Policy> {
                     .ok()
                     .filter(|s| !s.is_empty()),
                 hosts,
+                header,
+                prefix,
             });
         }
         policy.secrets = secrets;
@@ -600,7 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_lua_builds_an_explicit_deny_by_default_allowlist() {
+    fn sandbox_lua_records_an_allow_list() {
         let dir = tempfile::tempdir().unwrap();
         let path = write(
             dir.path(),
@@ -620,11 +876,33 @@ mod tests {
         assert_eq!(rt.policy.image, "alpine");
         assert_eq!(rt.policy.cpus, 1);
         assert!(!rt.policy.provision);
+        assert!(
+            rt.policy.open,
+            "internet stays on unless sandbox.lua turns it off"
+        );
         assert_eq!(
             rt.policy.egress_hosts(),
             vec!["api.example.com".to_string()],
-            "no host appears unless sandbox.lua names it"
         );
+    }
+
+    #[test]
+    fn sandbox_lua_can_lock_down_egress() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            "sandbox.lua",
+            r#"
+            sandbox {
+              open = false,
+              allow = { "github.com" },
+            }
+        "#,
+        );
+        let mut rt = Runtime::new().unwrap();
+        rt.load_sandbox(&path).unwrap();
+        assert!(!rt.policy.open);
+        assert_eq!(rt.policy.egress_summary(), "github.com");
     }
 
     #[test]
@@ -643,6 +921,7 @@ mod tests {
         let mut rt = Runtime::new().unwrap();
         rt.load_sandbox(&path).unwrap();
         assert!(rt.policy.mount_workspace, "the workspace is still mounted");
+        assert!(rt.policy.open, "an unmentioned open flag keeps internet on");
         assert_eq!(
             rt.policy.root_disk,
             crate::sandbox::DEFAULT_ROOT_DISK_MIB,
@@ -711,6 +990,46 @@ mod tests {
     }
 
     #[test]
+    fn a_command_secret_source_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            "sandbox.lua",
+            r#"
+            sandbox {
+              secrets = {
+                { env = "GITHUB_TOKEN", source = "$(gh auth token)",
+                  hosts = { "github.com" } },
+              },
+            }
+        "#,
+        );
+        let mut rt = Runtime::new().unwrap();
+        rt.load_sandbox(&path).unwrap();
+        assert_eq!(rt.policy.secrets[0].source, "$(gh auth token)");
+    }
+
+    #[test]
+    fn a_malformed_command_secret_source_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            "sandbox.lua",
+            r#"
+            sandbox {
+              secrets = {
+                { env = "TOKEN", source = "$(gh auth token",
+                  hosts = { "github.com" } },
+              },
+            }
+        "#,
+        );
+        let mut rt = Runtime::new().unwrap();
+        let err = rt.load_sandbox(&path).unwrap_err();
+        assert!(err.to_string().contains("$(command)"), "got {err}");
+    }
+
+    #[test]
     fn a_literal_secret_value_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let path = write(
@@ -727,10 +1046,7 @@ mod tests {
         );
         let mut rt = Runtime::new().unwrap();
         let err = rt.load_sandbox(&path).unwrap_err();
-        assert!(
-            err.to_string().contains("host environment `source`"),
-            "got {err}"
-        );
+        assert!(err.to_string().contains("host `source`"), "got {err}");
     }
 
     #[test]
@@ -860,5 +1176,119 @@ mod tests {
         let mut rt = Runtime::new().unwrap();
         rt.load_tools(&dir.path().join("tools")).unwrap();
         assert!(rt.tool("t").is_some());
+    }
+
+    #[test]
+    fn a_routine_declares_cron_and_a_message() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "routines/morning.lua",
+            r#"
+            routine("morning", {
+              name = "Morning briefing",
+              cron = "0 9 * * 1-5",
+              bot = "chief-of-staff",
+              message = "Brief me.",
+            })
+            "#,
+        );
+        let mut rt = Runtime::new().unwrap();
+        rt.load_routines(&dir.path().join("routines")).unwrap();
+        let r = rt.routine("morning").expect("declared");
+        assert_eq!(r.name, "Morning briefing");
+        assert!(r.enabled);
+        assert_eq!(r.schedule(), "Weekdays at 9:00 AM");
+    }
+
+    #[test]
+    fn a_bot_folder_routine_inherits_the_folder_id() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "routines/ping.lua",
+            r#"
+            routine("ping", {
+              cron = "0 9 * * 1-5",
+              message = "ping",
+            })
+            "#,
+        );
+        let mut rt = Runtime::new().unwrap();
+        rt.load_routines_for(&dir.path().join("routines"), Some("qmd-dev"))
+            .unwrap();
+        assert_eq!(rt.routine("ping").unwrap().bot.as_deref(), Some("qmd-dev"));
+    }
+
+    #[tokio::test]
+    async fn a_guard_blocks_a_matching_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "plugins/nope.lua",
+            r#"
+            guard("no-ls", {
+              tools = { "bash" },
+              run = function(event)
+                return { block = "no bash", terminate = false }
+              end,
+            })
+            "#,
+        );
+        let mut rt = Runtime::new().unwrap();
+        rt.load_tools(&dir.path().join("plugins")).unwrap();
+        assert_eq!(rt.guards.len(), 1);
+        let event = crate::hooks::BeforeToolEvent {
+            lane: "main".into(),
+            run_id: "op".into(),
+            tool_call_id: "c1".into(),
+            tool_name: "bash".into(),
+            args: serde_json::Map::new(),
+        };
+        let result = rt.run_guards(&event).await.unwrap().unwrap();
+        assert_eq!(result.block.unwrap().reason, "no bash");
+    }
+
+    #[tokio::test]
+    async fn a_routine_run_function_queues_sends() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "routines/fan.lua",
+            r#"
+            routine("fan", {
+              cron = "0 * * * *",
+              run = function(ctx)
+                ctx.send("chief-of-staff", "one")
+                ctx.send("researcher", "two")
+              end,
+            })
+            "#,
+        );
+        let mut rt = Runtime::new().unwrap();
+        rt.load_routines(&dir.path().join("routines")).unwrap();
+        let sends = rt.fire_routine("fan").await.unwrap();
+        assert_eq!(
+            sends,
+            vec![
+                ("chief-of-staff".into(), "one".into()),
+                ("researcher".into(), "two".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_routine_without_a_target_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "routines/empty.lua",
+            r#"
+            routine("empty", { cron = "* * * * *" })
+            "#,
+        );
+        let mut rt = Runtime::new().unwrap();
+        let err = rt.load_routines(&dir.path().join("routines")).unwrap_err();
+        assert!(err.to_string().contains("run"), "got {err}");
     }
 }

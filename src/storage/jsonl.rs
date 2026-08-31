@@ -19,10 +19,13 @@
 //! **Snapshot compaction.** Every register `set` appends a line, so a 30-turn
 //! run leaves dozens of dead `op.state` revisions behind once the terminal
 //! transaction deletes the register. On open, when the dead-write ratio is
-//! high, the file is rewritten as `header + entries + usage + live registers`
-//! through a temp file and an atomic rename. Surviving lines keep their `seq`;
-//! the gaps are legal.
+//! high, the file is rewritten as header plus surviving writes **in seq
+//! order** through a temp file and an atomic rename. Surviving lines keep
+//! their `seq`; the gaps are legal. Grouping by kind (entries, then usage,
+//! then registers) would put an early usage `seq` after a later entry and
+//! fail the monotonicity check on the next open.
 
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write as IoWrite};
 use std::path::{Path, PathBuf};
@@ -60,6 +63,9 @@ struct Replay {
     valid_len: u64,
     /// Register writes superseded by a later set or delete on the same key.
     dead_writes: usize,
+    /// Unique seqs, but not in file order (a grouped snapshot from an
+    /// earlier compact). Replay sorts them; open rewrites the file.
+    out_of_order: bool,
 }
 
 impl Storage {
@@ -119,8 +125,9 @@ impl Storage {
             for write in replay.writes {
                 storage.replay(write);
             }
-            if replay.dead_writes >= COMPACT_DEAD_WRITES
-                && replay.dead_writes > storage.register_count()
+            if replay.out_of_order
+                || (replay.dead_writes >= COMPACT_DEAD_WRITES
+                    && replay.dead_writes > storage.register_count())
             {
                 storage.compact_file()?;
             }
@@ -131,7 +138,7 @@ impl Storage {
         Ok(storage)
     }
 
-    /// Rewrite the file as header + entries + usage rows + live registers, via
+    /// Rewrite the file as header plus surviving writes in seq order, via
     /// temp file and atomic rename. Logical state is unchanged.
     pub fn compact_file(&mut self) -> Result<()> {
         let Some(sink) = self.sink.as_mut() else {
@@ -148,19 +155,23 @@ impl Storage {
                 Ok(())
             };
             line(&Line::header(self.header.clone()))?;
-            for entry in self.scan_entries(super::Order::OldestFirst) {
-                line(&Line::Single(Write::Entry(entry.clone())))?;
-            }
-            for row in self.all_usage() {
-                line(&Line::Single(Write::Usage(row.clone())))?;
-            }
-            for register in self.all_registers() {
-                line(&Line::Single(Write::Register(RegisterWrite::Set {
-                    seq: register.seq,
-                    namespace: register.namespace,
-                    key: register.key.clone(),
-                    value: register.value.clone(),
-                })))?;
+            let mut writes: Vec<Write> = self
+                .scan_entries(super::Order::OldestFirst)
+                .into_iter()
+                .map(|entry| Write::Entry(entry.clone()))
+                .chain(self.all_usage().iter().cloned().map(Write::Usage))
+                .chain(self.all_registers().map(|register| {
+                    Write::Register(RegisterWrite::Set {
+                        seq: register.seq,
+                        namespace: register.namespace,
+                        key: register.key.clone(),
+                        value: register.value.clone(),
+                    })
+                }))
+                .collect();
+            writes.sort_by_key(Write::seq);
+            for write in writes {
+                line(&Line::Single(write))?;
             }
             out.flush()?;
             out.get_ref().sync_all()?;
@@ -190,6 +201,7 @@ fn read_lines(path: &Path) -> Result<Replay> {
         writes: Vec::new(),
         valid_len: 0,
         dead_writes: 0,
+        out_of_order: false,
     };
     let file = match File::open(path) {
         Ok(file) => file,
@@ -201,6 +213,7 @@ fn read_lines(path: &Path) -> Result<Replay> {
     let mut raw = Vec::new();
     let mut number = 0usize;
     let mut last_seq = 0u64;
+    let mut seen = HashSet::new();
     let mut live: std::collections::HashMap<(crate::entry::Namespace, String), ()> =
         std::collections::HashMap::new();
 
@@ -258,13 +271,16 @@ fn read_lines(path: &Path) -> Result<Replay> {
         };
         for write in &writes {
             let seq = write.seq();
-            if seq <= last_seq {
+            if !seen.insert(seq) {
                 return Err(StorageError::Corrupt {
                     line: number,
-                    reason: format!("seq {seq} does not increase past {last_seq}"),
+                    reason: format!("duplicate seq {seq}"),
                 });
             }
-            last_seq = seq;
+            if seq <= last_seq {
+                replay.out_of_order = true;
+            }
+            last_seq = last_seq.max(seq);
             if let Write::Register(r) = write {
                 let key = match r {
                     RegisterWrite::Set { namespace, key, .. } => (*namespace, key.clone()),
@@ -286,13 +302,16 @@ fn read_lines(path: &Path) -> Result<Replay> {
         replay.writes.extend(writes);
         replay.valid_len += read as u64;
     }
+    if replay.out_of_order {
+        replay.writes.sort_by_key(Write::seq);
+    }
     Ok(replay)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entry::{Entry, Namespace, Transaction};
+    use crate::entry::{Entry, Header, Line, Namespace, RegisterWrite, Transaction};
     use crate::storage::Order;
     use serde_json::json;
 
@@ -418,6 +437,64 @@ mod tests {
             matches!(err, StorageError::Corrupt { line: 3, .. }),
             "got {err}"
         );
+        assert!(err.to_string().contains("duplicate seq 5"), "got {err}");
+    }
+
+    #[test]
+    fn a_kind_grouped_snapshot_reopens_and_rewrites_in_seq_order() {
+        let (_dir, path) = temp();
+        let mut entry = user("hi");
+        entry.seq = 8;
+        let usage = crate::entry::UsageRow {
+            id: crate::ids::UsageId::new(),
+            seq: 3,
+            usage: crate::entry::Usage {
+                input: 4,
+                output: 1,
+                cached_input: 0,
+            },
+            entry_id: Some(entry.id.clone()),
+            adjustment: false,
+            details: None,
+        };
+        let mut body = String::new();
+        body.push_str(&serde_json::to_string(&Line::header(Header::new("s1", None))).unwrap());
+        body.push('\n');
+        body.push_str(&serde_json::to_string(&Line::Single(Write::Entry(entry.clone()))).unwrap());
+        body.push('\n');
+        body.push_str(&serde_json::to_string(&Line::Single(Write::Usage(usage))).unwrap());
+        body.push('\n');
+        body.push_str(
+            &serde_json::to_string(&Line::Single(Write::Register(RegisterWrite::Set {
+                seq: 1,
+                namespace: Namespace::LaneLeaf,
+                key: "main".into(),
+                value: json!(entry.id.as_str()),
+            })))
+            .unwrap(),
+        );
+        body.push('\n');
+        std::fs::write(&path, &body).unwrap();
+
+        let s = Storage::open(&path, "s1", None).unwrap();
+        assert_eq!(s.entry_count(), 1);
+        assert_eq!(s.usage_count(), 1);
+        assert_eq!(s.seq(), 8);
+        assert_eq!(
+            s.register(Namespace::LaneLeaf, "main")
+                .map(|r| r.value.clone()),
+            Some(json!(entry.id.as_str()))
+        );
+
+        let rewritten = std::fs::read_to_string(&path).unwrap();
+        let mut last = 0u64;
+        for line in rewritten.lines().skip(1) {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            let seq = v["seq"].as_u64().expect(line);
+            assert!(seq > last, "seq {seq} after {last} in {rewritten}");
+            last = seq;
+        }
+        assert_eq!(last, 8);
     }
 
     #[test]

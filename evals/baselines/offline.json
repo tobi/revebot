@@ -1,0 +1,240 @@
+{
+  "started_at": "2026-08-30T01:36:34.077337180+00:00",
+  "catalog": "evals",
+  "passed": 11,
+  "failed": 0,
+  "skipped": 2,
+  "errored": 0,
+  "duration_ms": 11,
+  "cases": [
+    {
+      "id": "harness.kick-from-queue",
+      "suite": "harness",
+      "status": "passed",
+      "duration_ms": 3,
+      "grades": [
+        {
+          "grader": "outcome",
+          "passed": true,
+          "detail": "want completed, got completed"
+        },
+        {
+          "grader": "transcript",
+          "passed": true,
+          "detail": "ok"
+        }
+      ]
+    },
+    {
+      "id": "harness.place-idle-notice",
+      "suite": "harness",
+      "status": "passed",
+      "duration_ms": 0,
+      "grades": [
+        {
+          "grader": "transcript",
+          "passed": true,
+          "detail": "ok"
+        }
+      ]
+    },
+    {
+      "id": "harness.prompt-roundtrip",
+      "suite": "harness",
+      "status": "passed",
+      "duration_ms": 3,
+      "grades": [
+        {
+          "grader": "outcome",
+          "passed": true,
+          "detail": "want completed, got completed"
+        },
+        {
+          "grader": "exact",
+          "passed": true,
+          "detail": "want \"hello back\", got \"hello back\""
+        },
+        {
+          "grader": "transcript",
+          "passed": true,
+          "detail": "ok"
+        }
+      ]
+    },
+    {
+      "id": "harness.tool-then-reply",
+      "suite": "harness",
+      "status": "passed",
+      "duration_ms": 5,
+      "grades": [
+        {
+          "grader": "outcome",
+          "passed": true,
+          "detail": "want completed, got completed"
+        },
+        {
+          "grader": "tools",
+          "passed": true,
+          "detail": "want [\"example\"], got [\"example\"]"
+        },
+        {
+          "grader": "tool_args",
+          "passed": true,
+          "detail": "example with {\"commits\": Number(2)}"
+        },
+        {
+          "grader": "contains",
+          "passed": true,
+          "detail": "ok"
+        }
+      ]
+    },
+    {
+      "id": "house.tools-offered",
+      "suite": "house",
+      "status": "passed",
+      "duration_ms": 0,
+      "grades": [
+        {
+          "grader": "contains",
+          "passed": true,
+          "detail": "ok"
+        },
+        {
+          "grader": "contains",
+          "passed": true,
+          "detail": "ok"
+        },
+        {
+          "grader": "contains",
+          "passed": true,
+          "detail": "ok"
+        }
+      ]
+    },
+    {
+      "id": "house.init-chief-of-staff",
+      "suite": "house",
+      "status": "passed",
+      "duration_ms": 0,
+      "grades": [
+        {
+          "grader": "file_exists",
+          "passed": true,
+          "detail": "workspace/agents/chief-of-staff/instructions.md"
+        },
+        {
+          "grader": "file_exists",
+          "passed": true,
+          "detail": "workspace/agents/chief-of-staff/profile.json"
+        },
+        {
+          "grader": "file_contains",
+          "passed": true,
+          "detail": "workspace/agents/chief-of-staff/instructions.md has \"Chief of Staff\""
+        },
+        {
+          "grader": "file_contains",
+          "passed": true,
+          "detail": "workspace/agents/chief-of-staff/instructions.md has \"Do not ask what to be called\""
+        },
+        {
+          "grader": "json_pointer",
+          "passed": true,
+          "detail": "workspace/agents/chief-of-staff/profile.json /id == \"chief-of-staff\""
+        },
+        {
+          "grader": "json_pointer",
+          "passed": true,
+          "detail": "workspace/agents/chief-of-staff/profile.json /name == \"Chief of Staff\""
+        },
+        {
+          "grader": "file_contains",
+          "passed": true,
+          "detail": ".gitignore has \"workspace/agents/*/sessions/\""
+        }
+      ]
+    },
+    {
+      "id": "house.init-loads",
+      "suite": "house",
+      "status": "passed",
+      "duration_ms": 0,
+      "grades": [
+        {
+          "grader": "equals",
+          "passed": true,
+          "detail": "want \"ok\", got \"ok\""
+        }
+      ]
+    },
+    {
+      "id": "house.slug-chief-of-staff",
+      "suite": "house",
+      "status": "passed",
+      "duration_ms": 0,
+      "grades": [
+        {
+          "grader": "equals",
+          "passed": true,
+          "detail": "want \"chief-of-staff\", got \"chief-of-staff\""
+        }
+      ]
+    },
+    {
+      "id": "house.unique-slug",
+      "suite": "house",
+      "status": "passed",
+      "duration_ms": 0,
+      "grades": [
+        {
+          "grader": "equals",
+          "passed": true,
+          "detail": "want \"researcher-3\", got \"researcher-3\""
+        }
+      ]
+    },
+    {
+      "id": "live.chief-does-not-ask-name",
+      "suite": "live",
+      "status": "skipped",
+      "duration_ms": 0,
+      "skip_reason": "pass --live (real model)",
+      "grades": []
+    },
+    {
+      "id": "live.create-specialist-when-asked",
+      "suite": "live",
+      "status": "skipped",
+      "duration_ms": 0,
+      "skip_reason": "pass --live (real model)",
+      "grades": []
+    },
+    {
+      "id": "tools.session-path-allows-instructions",
+      "suite": "tools",
+      "status": "passed",
+      "duration_ms": 0,
+      "grades": [
+        {
+          "grader": "equals",
+          "passed": true,
+          "detail": "want \"false\", got \"false\""
+        }
+      ]
+    },
+    {
+      "id": "tools.session-path-refuse",
+      "suite": "tools",
+      "status": "passed",
+      "duration_ms": 0,
+      "grades": [
+        {
+          "grader": "equals",
+          "passed": true,
+          "detail": "want \"true\", got \"true\""
+        }
+      ]
+    }
+  ]
+}

@@ -25,8 +25,9 @@ Reve combines three ideas:
    `ctx.sh` runs in a full microVM — never in a host-shell fallback. Reve links the
    official [`microsandbox`](https://github.com/superradcompany/microsandbox) Rust crate
    directly (pinned `=0.6.8`): no FFI shim, no CLI, no daemon, no host shell. The host
-   only orchestrates; the agent works inside its mounted `workspace/` with deny-by-default
-   networking and explicitly scoped secrets.
+   only orchestrates; the agent works inside its mounted `workspace/` with public
+   internet by default and explicitly scoped secrets. Set `open = false` in
+   `sandbox.lua` to lock down to an allowlist.
 3. **State is durable data, not process memory.** Reve's append-only conversation tree and
    intent-before-effect records are based on the durable harness work in
    [Pi](https://github.com/badlogic/pi-mon). A crash can leave an incomplete operation,
@@ -51,10 +52,11 @@ Requirements:
   `~/.microsandbox` and pull the VM image.
 
 ```bash
-cargo install --path .          # installs the `reve` binary
-mkdir my-agent && cd my-agent
-reve init
-export OPENAI_API_KEY=...
+make install                    # cargo install --path . --bin revebot --locked --force
+mkdir my-house && cd my-house
+revebot init
+export OPENROUTER_API_KEY=...
+revebot                         # boots the microVM and serves http://127.0.0.1:7420
 ```
 
 The first launch builds and provisions the microVM and shows live startup progress. Bare
@@ -63,15 +65,18 @@ Later launches reuse its persisted root disk.
 
 ## The CLI
 
-`reve` has four subcommands, and `--version`:
+`revebot` subcommands:
 
 | Command | Purpose |
 |---|---|
-| `reve init [dir]` | Scaffold an agent directory (default: the current directory). Idempotent. |
-| `reve info` | Show the loaded agent's model, sandbox policy, egress hosts, and tools. |
-| `reve exec <cmd...>` | Run a command inside this agent's microVM. |
-| `reve tool [name] [--args JSON]` | Run one of this agent's Lua tools. No `name` lists them. |
-| `reve --version` | Print the version. |
+| `revebot` / `revebot serve` | Boot the house: one microVM, HTTP+WS on `127.0.0.1:7420`. |
+| `revebot tui` | Terminal UI for the first bot (`chief-of-staff`). |
+| `revebot init [dir]` | Scaffold a house (idempotent). |
+| `revebot info` | Show model, sandbox policy, egress hosts, and tools. |
+| `revebot exec <cmd...>` | Run a command inside the house microVM. |
+| `revebot tool [name] [--args JSON]` | Run one of this house's Lua tools. |
+| `revebot eval` | Run `evals/` (offline by default; `--live` for real models). |
+| `revebot --version` | Print the version. |
 
 A worked session:
 
@@ -79,22 +84,22 @@ A worked session:
 $ mkdir my-agent && cd my-agent
 $ reve init
 initialised /home/you/my-agent
-  + agent.lua
-  + sandbox.lua
+  + config.yml
   + tools/example.lua
-  + instructions.md
   + models.yml
   + workspace/AGENTS.md
   + workspace/SOUL.md
   + workspace/KNOWLEDGE.md
   + workspace/HEARTBEAT.yml
+  + workspace/agents/chief-of-staff/instructions.md
+  + workspace/agents/chief-of-staff/profile.json
   + .gitignore
 
-  edit instructions.md, then run reve here
+  edit workspace/agents/chief-of-staff/instructions.md, then run revebot here
 
 $ reve info
 root      /home/you/my-agent
-model     openai/gpt-5.6-luna
+model     openrouter/x-ai/grok-4.6
 thinking  low
 sandbox   debian:trixie-slim (2 cpu, 2048MB)
 egress    api.github.com, codeload.github.com, github.com, objects.githubusercontent.com, raw.githubusercontent.com
@@ -132,13 +137,11 @@ highlighted path.
 `reve init` writes exactly these files, and nothing outside the target root:
 
 ```text
-my-agent/                     the agent root
-├── agent.lua                  configuration: model and thinking level
-├── sandbox.lua                sandbox policy: image, egress, secrets
+my-house/                      the house root
+├── config.yml                 house runtime: model, sandbox, secrets
 ├── tools/
-│   └── example.lua            a project tool written in Lua
-├── instructions.md            identity, purpose, and standing instructions
-├── models.yml                 provider and model configuration owned by this agent
+│   └── example.lua            a host-trusted Lua tool
+├── models.yml                 provider catalog
 ├── workspace/                 the VM-visible, agent-editable mind and worktree
 │   ├── AGENTS.md              abbreviated stateful-agent kernel
 │   ├── SOUL.md                identity, voice, and boundaries
@@ -146,10 +149,19 @@ my-agent/                     the agent root
 │   ├── HEARTBEAT.yml          background task schedule
 │   ├── knowledge/             mutable durable facts
 │   ├── notes/                 append-only daily narrative
-│   └── skills/                all skills
-├── .gitignore                 ignores .reve/
-└── .reve/                     durable state (created on first launch, not scaffolded)
-    └── sessions/              JSONL durable session logs
+│   ├── skills/                house-level skills
+│   ├── plugins/               bot-editable Lua tools (e.g. web_fetch)
+│   └── agents/
+│       └── chief-of-staff/
+│           ├── instructions.md   standing orders (self-editable)
+│           ├── profile.json      name, title, optional model
+│           ├── skills/           bot skills
+│           ├── memory/           durable notes
+│           ├── routines/         this bot's cron jobs
+│           ├── plugins/          this bot's Lua tools
+│           └── sessions/         JSONL (gitignored)
+├── .gitignore                 ignores .reve/ and bot sessions
+└── .reve/                     durable host state (created on first launch)
 ```
 
 `reve init` is idempotent: a file that matches the template is left `unchanged`; a file you
@@ -157,89 +169,35 @@ have edited is reported as `changed` and kept as you wrote it; a missing file is
 It also creates the empty `tools/`, `channels/`, `workspace/knowledge/`,
 `workspace/notes/`, and `workspace/skills/` directories.
 
-`reve` refuses to run in a directory that is not an agent. An agent directory needs at
-least one of `agent.lua` or `instructions.md` — the guard that stops an agent from
-silently attaching itself to an arbitrary checkout.
+`revebot` refuses to run in a directory that is not a house. A house directory needs
+`config.yml` (or a leftover `agent.lua`). Standing instructions live under
+`workspace/agents/<id>/instructions.md`, not at the house root.
 
-### Define an agent in Lua
+### House config
 
-`agent.lua` selects the model and thinking level; `instructions.md` holds the prose
-identity. The real template:
+`config.yml` selects the house model, thinking level, and sandbox. Each bot's prose
+identity is its own `workspace/agents/<id>/instructions.md`. The real template:
 
-```lua
--- What this agent is, in code. instructions.md is its prose; this file is its
--- configuration. Both are read from this directory and nowhere else.
-
-agent {
-  model = "openai/gpt-5.6-luna",
-  thinking = "low",
-}
-```
-
-### State the sandbox policy
-
-`sandbox.lua` is ordinary Lua. The real template allows GitHub egress and lends a token
-only to those hosts. The guest sees `reve-github-token`; the microsandbox runtime resolves
-the named host environment variable at VM start and substitutes its value at the network boundary:
-
-```lua
--- The sandbox every command runs in.
---
--- workspace/ is mounted at /workspace and is the working directory, so a
--- relative path means the same thing on the host and in the VM. The agent's
--- own definition files stay outside it.
---
--- The microVM is mandatory: Reve links the microsandbox Rust crate directly
--- and refuses to run without it. There is no host or local mode.
---
--- Egress starts with deny-all. Every reachable hostname must be listed here;
--- provisioning does not add hidden exceptions.
-
-sandbox {
-  image = "debian:trixie-slim",
-  cpus = 2,
-  memory = 2048,
-
-  allow = {
-    "github.com",
-    "api.github.com",
-    "codeload.github.com",
-    "objects.githubusercontent.com",
-    "raw.githubusercontent.com",
-    "deb.debian.org",
-    "security.debian.org",
-    "ftp.debian.org",
-    "mise.run",
-    "mise.jdx.dev",
-    "registry.npmjs.org",
-    "nodejs.org",
-  },
-
-  -- A credential the VM may use without ever holding it: the guest sees only
-  -- the placeholder and the proxy substitutes the real value for these hosts.
-  -- `gh` keeps its token in the OS keyring, so export it first:
-  --   export GITHUB_TOKEN="$(gh auth token)"
-  secrets = {
-    {
-      env = "GITHUB_TOKEN",
-      source = "GITHUB_TOKEN",
-      placeholder = "reve-github-token",
-      hosts = { "github.com", "api.github.com" },
-    },
-  },
-
-  -- bootstrap = { "npm ci" },
-}
+```yaml
+model: openrouter/x-ai/grok-4.6
+thinking: low
+sandbox:
+  image: ghcr.io/tobi/wrap:latest
+  open: true
+  secrets:
+    - env: GITHUB_TOKEN
+      source: "$(gh auth token)"
+      hosts: [github.com, api.github.com]
 ```
 
 There is no `host-exec`, and omitting a secret does not create an invisible host fallback.
 
 ### Add a tool by dropping in one Lua file
 
-Every `tools/*.lua` file is trusted launch code, loaded before any work runs. There is no
-plugin manifest and no registry to edit: drop in a file. The Lua body runs on the host, but
-`ctx.sh` executes in the microVM — that is the only command path a tool has. The real
-template, `tools/example.lua`:
+Host-trusted tools live in `tools/*.lua` (outside the mount). Bot-editable plugins live in
+`workspace/plugins/` and `workspace/agents/<id>/plugins/` — they reload on the next house
+start and are documented as the `plugins` skill. `ctx.sh` always runs in the microVM.
+The real host template, `tools/example.lua`:
 
 ```lua
 -- Every tools/*.lua file is trusted launch code, loaded before any work runs.
@@ -294,14 +252,14 @@ secrets do not belong in this file. The real template:
 #
 # Every apiKey must be a $ENV_VAR reference; secrets do not belong in this file.
 providers:
-  openai:
-    baseUrl: https://api.openai.com/v1
+  openrouter:
+    baseUrl: https://openrouter.ai/api/v1
     api: openai-responses
-    apiKey: $OPENAI_API_KEY
+    apiKey: $OPENROUTER_API_KEY
     models:
-      - id: gpt-5.6-luna
+      - id: x-ai/grok-4.6
         reasoning: true
-        contextWindow: 200000
+        contextWindow: 500000
         maxTokens: 8192
 ```
 
@@ -311,12 +269,11 @@ Reve links the `microsandbox` Rust crate directly (pinned `=0.6.8` in `Cargo.tom
 is no CLI, no daemon, no FFI shim, and no host-shell path: if the VM cannot boot, the agent
 refuses to run rather than quietly executing model-authored commands on your machine.
 
-Egress is **deny-by-default**. The policy starts from `NetworkPolicy::none()` — deny both
-directions — adds the narrow gateway-DNS rule required for name resolution, then adds one
-allow rule for each hostname explicitly listed in `sandbox.lua`. An empty `allow` list
-means no outbound host is reachable. Provisioning does not create hidden exceptions: the
-generated scaffold visibly lists the GitHub, Debian, mise, npm, and Node hosts its default
-toolchain needs.
+Egress is **open to the public internet by default**. The policy uses microsandbox's
+`NetworkProfile::Public` (plus the gateway-DNS rule names need). Set `open = false` in
+`sandbox.lua` and list hosts in `allow` to lock down: that path starts from
+`NetworkPolicy::none()` and only those hosts are reachable. Private/LAN and cloud
+metadata stay off unless you opt into them.
 
 Secrets are scoped, never borrowed implicitly. Each secret names a host environment
 `source` and carries its own destination-host scope. Microsandbox persists only that source

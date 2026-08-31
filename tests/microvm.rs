@@ -230,7 +230,7 @@ async fn an_effect_waits_for_an_in_progress_stop_before_restarting() {
     let _ = microsandbox::Sandbox::remove(name).await;
 }
 
-/// Deny-by-default is the claim the README makes; this is the claim being true.
+/// A locked-down policy reaches named hosts and nothing else.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "boots a real microVM"]
 async fn egress_reaches_an_allowed_host_and_nothing_else() {
@@ -244,6 +244,7 @@ async fn egress_reaches_an_allowed_host_and_nothing_else() {
         cpus: 1,
         memory: 512,
         provision: false,
+        open: false,
         allow_hosts: vec!["github.com".into(), "deb.debian.org".into()],
         ..Default::default()
     };
@@ -369,6 +370,7 @@ async fn runtime_secrets_rotate_without_a_rebuild_and_deleted_secrets_are_revoke
         source: SOURCE.into(),
         placeholder: Some("reve-secret-placeholder".into()),
         hosts: vec!["github.com".into()],
+        ..Default::default()
     };
     let policy = reve::sandbox::Policy {
         name: Some(NAME.into()),

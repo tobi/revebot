@@ -1,5 +1,5 @@
--- What this agent is, in code. instructions.md is its prose; this file is its
--- configuration. Both are read from this directory and nowhere else.
+-- House configuration. Bot identity lives under
+-- workspace/agents/<id>/instructions.md — not at the house root.
 
 agent {
   model = "openrouter/x-ai/grok-4.6",

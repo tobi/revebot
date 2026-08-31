@@ -1,0 +1,10 @@
+id: house.slug-chief-of-staff
+suite: house
+mode: offline
+runner: unit
+unit: slug
+input:
+  name: Chief of Staff
+graders:
+  - kind: equals
+    text: chief-of-staff

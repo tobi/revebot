@@ -1,8 +1,9 @@
 //! The terminal, wired to the durable harness and a real microVM.
 //!
-//! This is what bare `reve` runs. Everything the user types either goes to the
-//! model — as a durable operation on the `main` lane — or, prefixed with `!`,
-//! straight into the agent's microVM. Nothing runs on the host.
+//! `revebot tui` talks to the first bot (`chief-of-staff`). Everything the user
+//! types either goes to the model — as a durable operation on the `main` lane
+//! — or, prefixed with `!`, straight into the house microVM. Nothing runs on
+//! the host.
 //!
 //! The worker here does not own the session file. A [`Session`] owner task
 //! does, and this task holds a handle. That is what lets a run be a spawned
@@ -161,8 +162,9 @@ pub async fn run(project: Project, sandbox: Arc<Sandbox>) -> anyhow::Result<()> 
                     hooks: Hooks::new(),
                     system_prompt: {
                         let project = project.clone();
-                        // Rebuilt per turn: the agent edits these files.
-                        Arc::new(move || system_prompt(&project))
+                        // Rebuilt per turn from workspace/agents/<id>/, which
+                        // the bot can edit.
+                        Arc::new(move || first_bot_system_prompt(&project))
                     },
                     settings: RunSettings::default(),
                     retry: RetryPolicy::default(),
@@ -373,21 +375,32 @@ async fn forward_events(
             Kind::MessageUpdate { delta } => Some(Update::Delta(delta)),
             Kind::MessageEnd { .. } => Some(Update::EndMessage),
             Kind::ToolStart { tool_name, .. } => {
-                Some(Update::Working(Some(format!("Running {tool_name}"))))
+                if tool_name == "SendUserMessage" || tool_name == "SendMessage" {
+                    Some(Update::Working(Some("Working".into())))
+                } else {
+                    Some(Update::Working(Some(format!("Running {tool_name}"))))
+                }
             }
+            Kind::UserNotice { text, .. } => Some(Update::Item(Item::Assistant(text))),
             Kind::ToolEnd {
                 tool_name,
                 content,
                 is_error,
                 ..
-            } => Some(Update::Item(Item::Tool {
-                verb: "Ran".into(),
-                description: tool_name,
-                status: if is_error { Status::Failed } else { Status::Ok },
-                duration: None,
-                detail: (!content.trim().is_empty()).then(|| content.trim().to_string()),
-                outcome: is_error.then(|| "failed".to_string()),
-            })),
+            } => {
+                if tool_name == "SendUserMessage" || tool_name == "SendMessage" {
+                    None
+                } else {
+                    Some(Update::Item(Item::Tool {
+                        verb: "Ran".into(),
+                        description: tool_name,
+                        status: if is_error { Status::Failed } else { Status::Ok },
+                        duration: None,
+                        detail: (!content.trim().is_empty()).then(|| content.trim().to_string()),
+                        outcome: is_error.then(|| "failed".to_string()),
+                    }))
+                }
+            }
             Kind::RetryScheduled {
                 attempt,
                 max_attempts,
@@ -777,49 +790,23 @@ fn load_model(project: &Project) -> std::result::Result<Arc<dyn Model>, String> 
     Ok(Arc::new(HttpModel::new(resolved)))
 }
 
-/// The system prompt: identity, workspace context, and the live skill catalog.
-///
-/// Rebuilt each exchange because the agent edits these files inside the
-/// workspace — that is the point of them being writable.
-fn system_prompt(project: &Project) -> String {
-    let mut parts = Vec::new();
-    if let Ok(text) = std::fs::read_to_string(project.root.join("instructions.md")) {
-        parts.push(text.trim().to_string());
-    }
-    let workspace = project.workspace();
-    for (file, limit) in [
-        ("AGENTS.md", usize::MAX),
-        ("SOUL.md", usize::MAX),
-        ("KNOWLEDGE.md", 100),
-    ] {
-        if let Ok(text) = std::fs::read_to_string(workspace.join(file)) {
-            let body: String = text.lines().take(limit).collect::<Vec<_>>().join("\n");
-            if !body.trim().is_empty() {
-                parts.push(format!("# {file}\n\n{}", body.trim()));
-            }
-        }
-    }
-    if let Ok(skills) = crate::skills::discover(&workspace)
-        && !skills.is_empty()
-    {
-        let catalog = skills
-            .iter()
-            .map(|skill| format!("- `{}` — {}", skill.name, skill.description))
-            .collect::<Vec<_>>()
-            .join("\n");
-        parts.push(format!("# Available skills\n\n{catalog}"));
-    }
-    parts.push(environment_prompt(&project.runtime.policy));
-    parts.join("\n\n")
+/// Standing instructions come from the first bot, never a file at the house root.
+fn first_bot_system_prompt(project: &Project) -> String {
+    let teammates = crate::house::profile::scan(&project.agents_dir());
+    let bot = teammates
+        .iter()
+        .find(|p| p.id == crate::house::profile::FIRST_BOT)
+        .cloned()
+        .or_else(|| teammates.first().cloned());
+    let Some(bot) = bot else {
+        return "This house has no bots under workspace/agents/.".into();
+    };
+    crate::house::prompt::system_prompt(project, &bot, &teammates)
 }
 
+#[cfg(test)]
 fn environment_prompt(policy: &crate::sandbox::Policy) -> String {
-    let hosts = policy.egress_hosts();
-    let internet = if hosts.is_empty() {
-        "You have no internet access.".to_string()
-    } else {
-        format!("You have internet access to {}.", hosts.join(", "))
-    };
+    let internet = policy.internet_prompt();
     format!(
         "<env>\n\
          You are running inside a microVM. The workspace is mounted at /workspace and is the \
@@ -925,6 +912,7 @@ mod tests {
     #[test]
     fn environment_prompt_names_mise_and_the_exact_egress_hosts() {
         let policy = crate::sandbox::Policy {
+            open: false,
             allow_hosts: vec![
                 "registry.npmjs.org".into(),
                 "github.com".into(),
@@ -942,8 +930,18 @@ mod tests {
 
     #[test]
     fn environment_prompt_says_when_egress_is_disabled() {
-        let prompt = environment_prompt(&crate::sandbox::Policy::default());
+        let prompt = environment_prompt(&crate::sandbox::Policy {
+            open: false,
+            ..Default::default()
+        });
         assert!(prompt.contains("You have no internet access."));
+    }
+
+    #[test]
+    fn environment_prompt_says_when_the_internet_is_open() {
+        let prompt = environment_prompt(&crate::sandbox::Policy::default());
+        assert!(prompt.contains("You have internet access."));
+        assert!(!prompt.contains("to github.com"));
     }
 
     #[test]

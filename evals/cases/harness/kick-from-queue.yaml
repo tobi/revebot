@@ -1,0 +1,19 @@
+id: harness.kick-from-queue
+suite: harness
+mode: offline
+runner: harness
+description: next_run then kick starts one run from reserved ids, no duplicate prompt.
+script:
+  - text: woke
+actions:
+  - next_run: from the queue
+  - kick: true
+graders:
+  - kind: outcome
+    equals: completed
+  - kind: transcript
+    messages:
+      - role: user
+        exact: from the queue
+      - role: assistant
+        exact: woke

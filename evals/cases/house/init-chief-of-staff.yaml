@@ -1,0 +1,51 @@
+id: house.init-chief-of-staff
+suite: house
+mode: offline
+runner: files
+description: revebot init writes the Chief of Staff bot and gitignores sessions.
+graders:
+  - kind: file_exists
+    path: config.yml
+  - kind: file_exists
+    path: workspace/agents/chief-of-staff/instructions.md
+  - kind: file_exists
+    path: workspace/agents/chief-of-staff/profile.json
+  - kind: file_contains
+    path: workspace/agents/chief-of-staff/instructions.md
+    text: Chief of Staff
+  - kind: file_contains
+    path: workspace/agents/chief-of-staff/instructions.md
+    text: do not ask what to be called
+  - kind: json_pointer
+    path: workspace/agents/chief-of-staff/profile.json
+    pointer: /id
+    equals: chief-of-staff
+  - kind: json_pointer
+    path: workspace/agents/chief-of-staff/profile.json
+    pointer: /name
+    equals: Chief of Staff
+  - kind: file_contains
+    path: .gitignore
+    text: workspace/agents/*/sessions/
+  - kind: file_not_exists
+    path: instructions.md
+  - kind: file_exists
+    path: workspace/agents/chief-of-staff/routines/example.lua
+  - kind: file_exists
+    path: workspace/plugins/web_fetch.lua
+  - kind: file_exists
+    path: workspace/skills/create-skill/SKILL.md
+  - kind: file_exists
+    path: workspace/skills/vm/SKILL.md
+  - kind: file_exists
+    path: workspace/skills/routines/SKILL.md
+  - kind: file_exists
+    path: workspace/skills/plugins/SKILL.md
+  - kind: file_exists
+    path: workspace/skills/secrets/SKILL.md
+  - kind: file_contains
+    path: workspace/skills/secrets/SKILL.md
+    text: AskUserForSecret
+  - kind: file_contains
+    path: workspace/agents/chief-of-staff/profile.json
+    text: orange:goutte

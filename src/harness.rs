@@ -111,6 +111,11 @@ impl Harness {
         let _ = self.events.send(Event::new(lane, op, kind));
     }
 
+    /// Push an event onto this session's live stream (the bot websocket).
+    pub fn emit_now(&self, lane: &str, kind: Kind) {
+        self.emit(lane, None, kind);
+    }
+
     // ── starting operations ──────────────────────────────────────────────
 
     /// Send a prompt and run to completion.
@@ -242,8 +247,12 @@ impl Harness {
     /// Queue a prompt for the lane's *next* run. Unlike the others this is
     /// legal while the lane is idle, and `lane.state` is where it waits.
     pub async fn next_run(&self, lane: &str, text: &str) -> Result<EntryId> {
+        self.next_run_entry(lane, user_message(text)).await
+    }
+
+    /// Queue an arbitrary pending entry for the lane's next run.
+    pub async fn next_run_entry(&self, lane: &str, content: PendingEntry) -> Result<EntryId> {
         self.session.ensure_lane(lane, None, &self.seed).await?;
-        let content = user_message(text);
         loop {
             let (state, seq) = self
                 .session
@@ -273,6 +282,68 @@ impl Harness {
                 return Ok(id);
             }
         }
+    }
+
+    /// Claim a run from `text` without driving it. The caller must `drive`.
+    pub async fn begin_run(self: &Arc<Self>, lane: &str, text: &str) -> Result<Current> {
+        self.start_run(lane, vec![user_message(text)]).await
+    }
+
+    /// Start a run from already-reserved `pending_next_run` ids. Does not mint
+    /// a second prompt and does not call `start()` (which would prepend those
+    /// ids again). Emits `RunStart`. Idle with an empty queue is `Idle`.
+    pub async fn kick(self: &Arc<Self>, lane: &str) -> Result<OperationResult> {
+        let current = self.start_pending(lane).await?;
+        self.drive(current).await
+    }
+
+    /// Place a conversation entry on an idle lane with no operation. Running
+    /// lanes must use `write_entry`.
+    pub async fn place_idle(&self, lane: &str, content: PendingEntry) -> Result<EntryId> {
+        self.session.ensure_lane(lane, None, &self.seed).await?;
+        match self.session.restore(lane).await? {
+            Restored::Idle { .. } => {}
+            Restored::Suspended(_) => {
+                return Err(HarnessError::Busy(lane.into()));
+            }
+        }
+        loop {
+            let (leaf, seq) = self
+                .session
+                .register::<Option<EntryId>>(Namespace::LaneLeaf, lane)
+                .await?
+                .ok_or_else(|| SessionError::Corrupt(format!("lane {lane} has no leaf")))?;
+            let id = EntryId::new();
+            let entry = content
+                .clone()
+                .into_entry(id.clone())
+                .with_parent(leaf.clone());
+            let committed = self
+                .session
+                .commit_if(
+                    vec![Expect::new(Namespace::LaneLeaf, lane, Some(seq))],
+                    Transaction::new()
+                        .with(Write::entry(entry.clone()))
+                        .with(Write::set(Namespace::LaneLeaf, lane, Some(id.clone()))),
+                )
+                .await?;
+            if committed.is_some() {
+                self.emit(
+                    lane,
+                    None,
+                    Kind::EntryAdded {
+                        entry: entry.clone(),
+                    },
+                );
+                return Ok(id);
+            }
+        }
+    }
+
+    /// Steer and return the running operation id (no post-commit reread).
+    pub async fn steer_claimed(&self, lane: &str, text: &str) -> Result<(EntryId, OpId)> {
+        self.enqueue_claimed(lane, Queue::Steer, user_message(text))
+            .await
     }
 
     /// Ask the lane's operation to stop. Durable: the operation ends aborted
@@ -433,6 +504,123 @@ impl Harness {
         Ok(current)
     }
 
+    /// Claim a run whose prompts are the existing `pending_next_run` ids.
+    /// Sibling of `start_run`; must not call `start()` (that prepends the
+    /// same ids onto `inbox.writes`).
+    async fn start_pending(self: &Arc<Self>, lane: &str) -> Result<Current> {
+        self.session.ensure_lane(lane, None, &self.seed).await?;
+        let (lane_state, lane_state_seq) = self
+            .session
+            .lane_state(lane)
+            .await?
+            .ok_or_else(|| SessionError::Corrupt(format!("lane {lane} vanished")))?;
+        if lane_state.current_operation_id.is_some() {
+            return Err(HarnessError::Busy(lane.into()));
+        }
+        if lane_state.pending_next_run.is_empty() {
+            return Err(HarnessError::Idle(lane.into()));
+        }
+        let ids = lane_state.pending_next_run.clone();
+        let mut prompts = Vec::new();
+        for id in &ids {
+            let Some(pending) = self.session.pending(id.clone()).await? else {
+                return Err(HarnessError::Session(SessionError::Corrupt(format!(
+                    "pending {id} has no register"
+                ))));
+            };
+            prompts.push(pending);
+        }
+        let op = OpId::new();
+        let before = self
+            .hooks
+            .before_run(BeforeRunEvent {
+                lane: lane.to_string(),
+                run_id: op.as_str().to_string(),
+                prompt: prompts.iter().filter_map(|p| p.payload.clone()).collect(),
+                system_prompt: (self.system_prompt)(),
+            })
+            .await;
+        for error in &before.errors {
+            self.emit(
+                lane,
+                Some(op.as_str()),
+                Kind::HandlerError {
+                    hook: error.hook.into(),
+                    error: error.error.clone(),
+                },
+            );
+        }
+        let mut extra = Vec::new();
+        let mut writes = ids.clone();
+        for message in before.value.messages {
+            let id = EntryId::new();
+            extra.push(Write::set(
+                Namespace::PendingEntry,
+                id.as_str(),
+                PendingEntry::message(message),
+            ));
+            writes.push(id);
+        }
+        let trigger = writes.last().cloned().expect("non-empty pending");
+        let intent = Intent::Run {
+            prompt_entry_ids: writes.clone(),
+            system_prompt_override: before.value.system_prompt,
+        };
+        let state = OperationState::Run(RunState {
+            control: Control::Running,
+            settings: self.settings.clone(),
+            phase: RunPhase::Checkpoint(CheckpointPhase::need_assistant(trigger)),
+            inbox: crate::state::Inbox {
+                steer: vec![],
+                follow_up: vec![],
+                writes,
+            },
+            latest_assistant_entry_id: None,
+        });
+        let leaf = self.session.leaf(lane).await?;
+        let operation = Operation {
+            operation_id: op.clone(),
+            lane: lane.to_string(),
+            source_leaf_id: leaf,
+            started_at: crate::ids::now_ms(),
+            intent,
+        };
+        let next_lane_state = LaneState {
+            current_operation_id: Some(op.clone()),
+            pending_next_run: vec![],
+        };
+        let mut tx = Transaction::new()
+            .with(Write::set(Namespace::OpMeta, op.as_str(), &operation))
+            .with(Write::set(Namespace::OpState, op.as_str(), &state))
+            .with(Write::set(Namespace::LaneState, lane, &next_lane_state));
+        for write in extra {
+            tx = tx.with(write);
+        }
+        let committed = self
+            .session
+            .commit_if(
+                vec![Expect::new(
+                    Namespace::LaneState,
+                    lane,
+                    Some(lane_state_seq),
+                )],
+                tx,
+            )
+            .await?;
+        if committed.is_none() {
+            return Err(HarnessError::Busy(lane.into()));
+        }
+        match self.session.restore(lane).await? {
+            Restored::Suspended(current) if current.operation.operation_id == op => {
+                self.emit(lane, Some(op.as_str()), Kind::RunStart);
+                Ok(*current)
+            }
+            _ => Err(HarnessError::Session(SessionError::Corrupt(format!(
+                "operation {op} disappeared as it started"
+            )))),
+        }
+    }
+
     /// The exclusive claim. One transaction: metadata, program counter,
     /// whatever the operation needs pre-provisioned, and the lane's claim.
     /// The claim is conditional on the `lane.state` we read, so exactly one
@@ -511,7 +699,7 @@ impl Harness {
     }
 
     /// Register a cancel channel, drive to the end, deregister.
-    async fn drive(self: &Arc<Self>, current: Current) -> Result<OperationResult> {
+    pub async fn drive(self: &Arc<Self>, current: Current) -> Result<OperationResult> {
         let lane = current.operation.lane.clone();
         let (tx, rx) = cancel_channel();
         // A cancel that arrived before we registered is already durable in
@@ -542,6 +730,15 @@ impl Harness {
     /// Reserve an id, persist the payload, and add it to the running
     /// operation's inbox — all conditional on the operation state we read.
     async fn enqueue(&self, lane: &str, queue: Queue, content: PendingEntry) -> Result<EntryId> {
+        Ok(self.enqueue_claimed(lane, queue, content).await?.0)
+    }
+
+    async fn enqueue_claimed(
+        &self,
+        lane: &str,
+        queue: Queue,
+        content: PendingEntry,
+    ) -> Result<(EntryId, OpId)> {
         loop {
             let Restored::Suspended(current) = self.session.restore(lane).await? else {
                 return Err(HarnessError::Idle(lane.into()));
@@ -595,7 +792,7 @@ impl Harness {
                     next_run: current.lane_state.pending_next_run.clone(),
                 },
             );
-            return Ok(id);
+            return Ok((id, op));
         }
     }
 }

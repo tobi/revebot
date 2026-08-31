@@ -1,0 +1,11 @@
+id: house.cron-weekdays
+suite: house
+mode: offline
+runner: unit
+unit: cron_describe
+description: A weekday 9:28 cron reads as English.
+input:
+  cron: "28 9 * * 1-5"
+graders:
+  - kind: equals
+    text: Weekdays at 9:28 AM

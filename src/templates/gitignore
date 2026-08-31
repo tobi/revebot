@@ -1,1 +1,3 @@
 .reve/
+workspace/agents/*/sessions/
+.reve/secrets/

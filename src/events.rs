@@ -102,6 +102,13 @@ pub enum Kind {
     LaneCreated {
         at: Option<EntryId>,
     },
+    UserNotice {
+        bot_id: String,
+        text: String,
+    },
+    RosterChanged {
+        ids: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -135,5 +142,21 @@ mod tests {
         assert_eq!(json["lane"], "main");
         assert_eq!(json["runId"].as_str(), None, "run_id keeps its field name");
         assert_eq!(json["run_id"], "op");
+    }
+
+    #[test]
+    fn a_user_notice_carries_the_bubble_text() {
+        let event = Event::new(
+            "main",
+            None,
+            Kind::UserNotice {
+                bot_id: "rune".into(),
+                text: "What's your timezone?".into(),
+            },
+        );
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "user_notice");
+        assert_eq!(json["text"], "What's your timezone?");
+        assert_eq!(json["bot_id"], "rune");
     }
 }

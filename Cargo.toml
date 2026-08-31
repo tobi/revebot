@@ -1,15 +1,15 @@
 [package]
-name = "reve"
+name = "revebot"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
-description = "A durable coding agent: Rust core, Lua scripting, mandatory microVM sandbox"
+description = "A local house of durable bots: Rust core, Lua scripting, mandatory microVM sandbox"
 license = "MIT"
 repository = "https://github.com/tobi/reve"
-default-run = "reve"
+default-run = "revebot"
 
 [[bin]]
-name = "reve"
+name = "revebot"
 path = "src/main.rs"
 
 [lib]
@@ -48,9 +48,13 @@ glob = "0.3"
 regex = "1"
 parking_lot = "0.12.5"
 ratatui = { version = "0.30.2", features = ["crossterm_0_29"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "ws"] }
+tower = { version = "0.5", default-features = false }
+tower-http = { version = "0.6", features = ["cors"] }
+
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 microsandbox = "=0.6.8"
 
 [profile.release]

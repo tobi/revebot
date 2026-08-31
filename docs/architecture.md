@@ -51,16 +51,47 @@ src/
   model.rs            Model trait, streaming callback, ScriptedModel, StopReason
   provider/           models.yml, SSE decoder, OpenAI + Anthropic adapters,
                       post-startup model discovery (cached, best effort)
-  sandbox.rs          mandatory microsandbox VM, deny-by-default egress
-  lua.rs              agent.lua, sandbox.lua, tools/*.lua; host door closed
+  sandbox.rs          mandatory microsandbox VM; public internet by default,
+                      lock down with `open = false` + `allow`. Secret
+                      `source` is a host env var or `$(command)` resolved
+                      at apply into `REVEBOT_SECRET_*` for microsandbox —
+                      not a Lua host-exec path.
+  lua.rs              config.yml (or legacy agent.lua/sandbox.lua), host
+                      plugins/*.lua, workspace plugins/routines; host door closed.
+                      Workspace Lua may ctx.send; it cannot os.execute.
+  cron.rs             five-field cron for house routines
   tools.rs            the Tools trait plus seven built-ins, replay declarations
-  skills.rs           recursive SKILL.md catalog
+  skills.rs           recursive SKILL.md catalog; workspace ∪ bot, bot shadows
+                      name. Folded YAML descriptions; a broken file is skipped
+                      in the house catalog. Created/edited skills attach to the
+                      next user wrap as a hidden card.
   heartbeat.rs        schedule reload and response-contract validation
   channels.rs         inbox broadcast and namespaced durable KV
-  project.rs          agent directory and `reve init`
+  project.rs          house directory and `revebot init`; identity is
+                      workspace/agents/<id>/, never a root instructions.md
   tui/                inline ratatui renderer and the terminal session
-  main.rs             init / info / exec / tool / bare `reve`
-tests/{harness,crash,microvm,provider_http}.rs
+  house/              multi-bot house: roster, supervisors, HTTP/WS, routine ticker;
+                      wrap.rs timestamps + [agent] arrivals; kernel before instructions.md.
+                      SendUserMessage emits UserNotice on the bot harness
+                      stream (the chat websocket), not only house_events.
+                      @mention cards carry the bot's real id; `/skill` cards
+                      attach the skill body. Boot never awaits `resume_all` /
+                      drive; each supervisor resumes then kicks in the
+                      background so the HTTP server binds even if a bot is mid-tool.
+  web/                embedded local UI: OpenGrok roster + shadcn-style
+                      bubbles, bloub avatars, routines rail. Assistant
+                      `content` is a part list (text + toolCall); the page
+                      parses it into bubbles and compact tool cards, never
+                      JSON.stringify. GET / is Cache-Control: no-store.
+                      Compose autocomplete: `/` skills, `@` other bots.
+                      AskUserForSecret renders an inline host-secret form.
+                      SendUserMessage is hidden from Working… and live-pushed
+                      via user_notice.
+  eval/               catalog runner for evals/cases (offline / live / microvm);
+                      live defaults to openrouter/x-ai/grok-4.6 (OPENROUTER_API_KEY)
+  main.rs             init / info / exec / tool / serve / tui / eval; bare `revebot` serves
+tests/{harness,crash,microvm,provider_http,eval}.rs
+evals/cases/<suite>/*.yaml   scored cases; offline is `make eval`, live is `--live`
 ```
 
 ## 2. The specification's concepts, in Rust
@@ -99,7 +130,11 @@ reloaded state instead of writing something it decided under stale assumptions.
   usage rows are separate. Payloads are flattened with reserved keys sanitised to
   `payload_*`. Flush every append; a torn last line is discarded whole on reopen; a
   malformed line anywhere else is corruption and we refuse to open. Snapshot compaction
-  rewrites through a temp file and a rename. Cross-process exclusion via `File::try_lock`.
+  rewrites through a temp file and a rename, **in seq order** (not grouped by kind:
+  entries-then-usage-then-registers would put an early usage `seq` after a later
+  entry and fail the next open). A grouped snapshot from an earlier build is
+  accepted when seqs are unique, replayed sorted, and rewritten. Duplicate seq
+  is still corruption. Cross-process exclusion via `File::try_lock`.
 - **The session.** Owner task, `Commit` / `Read` / `Close` commands, CAS tokens, typed
   register reads, `ensure_lane`, `restore` with the specification's bounded validation, and
   `project_context` — which stops at a compaction, expands its summary plus retained tail,
@@ -119,7 +154,8 @@ reloaded state instead of writing something it decided under stale assumptions.
   pre-provisioned Arch image (`ghcr.io/tobi/wrap:latest`) whose toolchain lives at absolute
   paths under `/opt`, so the first command runs at boot instead of after minutes of package
   installation; provisioning is therefore off by default and exists for agents that point
-  at a bare distro. Deny-by-default egress, scoped source-backed secrets, fail-closed boot,
+  at a bare distro. Public-internet egress by default (`NetworkProfile::Public`);
+  `open = false` plus `allow` is the lock-down. Scoped source-backed secrets, fail-closed boot,
   idle shutdown, workspace bind mount at `/workspace`.
 - **The scripting surface.** `agent { }`, `sandbox { }`, `tool("name", { })`. `ctx.sh` is
   the only command path and it goes to the VM. The host command path — `os.execute`,
@@ -187,7 +223,7 @@ Every row names a real test. A claim with no test says so instead of appearing c
 | An unmentioned Lua flag keeps its default | `lua::tests::an_unmentioned_flag_keeps_its_default` |
 | Model discovery contacts only upstreams whose key is set, and never fails the agent | `provider::discovery::tests::{only_upstreams_that_have_a_key_are_probed, an_unreachable_upstream_is_recorded_not_fatal, a_missing_or_corrupt_cache_is_simply_absent}` |
 | A namespaced model id survives discovery intact (`openrouter/x-ai/grok-4.6`) | `provider::discovery::tests::the_openrouter_shape_yields_a_pasteable_reference` |
-| Deny-by-default egress | `tests/microvm.rs` (opt-in, real VM) |
+| Public-internet egress by default; lock-down is `open = false` | `sandbox::tests::default_egress_is_the_public_internet`, `tests/microvm.rs` (opt-in) |
 
 **Not covered yet.** Standalone `compact()` and `navigate()` have no end-to-end test — the
 machinery is shared with the in-run compaction path, which is exercised only through the

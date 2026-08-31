@@ -282,6 +282,7 @@ impl Toolbox {
             }
             "write" => {
                 let path = string(&args, "path")?;
+                refuse_session_path(&path)?;
                 let content = string(&args, "content")?;
                 self.sandbox
                     .write_file(&path, &content)
@@ -291,6 +292,7 @@ impl Toolbox {
             }
             "edit" => {
                 let path = string(&args, "path")?;
+                refuse_session_path(&path)?;
                 let old = string(&args, "old")?;
                 let new = string(&args, "new")?;
                 let content = self
@@ -396,6 +398,26 @@ impl Tools for Toolbox {
     }
 }
 
+/// Session JSONL lives under `agents/<id>/sessions/` on the shared computer.
+/// `write`/`edit` refuse those paths; `bash` can still tear them.
+pub fn is_session_path(path: &str) -> bool {
+    let trimmed = path.trim_start_matches('/');
+    let trimmed = trimmed.strip_prefix("workspace/").unwrap_or(trimmed);
+    let parts: Vec<&str> = trimmed.split('/').filter(|p| !p.is_empty()).collect();
+    parts.len() >= 3 && parts[0] == "agents" && parts[2] == "sessions"
+}
+
+fn refuse_session_path(path: &str) -> Result<(), String> {
+    if is_session_path(path) {
+        Err(
+            "refusing to write a session log; bots cannot edit agents/*/sessions/ with write or edit"
+                .into(),
+        )
+    } else {
+        Ok(())
+    }
+}
+
 fn string(args: &Map<String, Value>, key: &str) -> Result<String, String> {
     args.get(key)
         .and_then(Value::as_str)
@@ -496,6 +518,15 @@ mod tests {
             names.contains(&"bash".to_string()) && names.contains(&"ls".to_string()),
             "{names:?}"
         );
+    }
+
+    #[test]
+    fn write_refuses_a_session_jsonl_path() {
+        assert!(is_session_path("agents/chief-of-staff/sessions/main.jsonl"));
+        assert!(is_session_path("/workspace/agents/x/sessions/a.jsonl"));
+        assert!(!is_session_path("agents/chief-of-staff/instructions.md"));
+        assert!(refuse_session_path("agents/a/sessions/x.jsonl").is_err());
+        assert!(refuse_session_path("notes/today.md").is_ok());
     }
 
     #[test]
