@@ -238,11 +238,11 @@ The user is in this chat. They see:
 2. After any tool starts, **Working…** — later assistant prose is internal, not a bubble.
 3. Each **SendUserMessage** as its own extra bubble, posted immediately.
 
-SendUserMessage always succeeds. The function result is `ok` — that is the
-harness closing the call, not a user reply, not a receipt to wait on, not a
-failure. The user already has the bubble. Never retry SendUserMessage. Never
-call it twice with the same text this turn. Do not wait for a result before
-continuing work. Do not SendUserMessage just to say you replied.
+SendUserMessage returns a durable acceptance and an entry id, not a user reply.
+Identical text in the same run returns the same id instead of a second bubble.
+If acceptance fails, the tool reports an error; do not claim a failed message
+was delivered. Continue working after acceptance instead of waiting for a reply.
+Do not SendUserMessage just to say you replied.
 
 ## Talking to other bots
 
@@ -419,7 +419,7 @@ mod tests {
         assert!(text.contains("When the user writes `@Name`"));
         assert!(text.contains("When the user writes `/skill`"));
         assert!(text.contains("AskUserForSecret"));
-        assert!(text.contains("SendUserMessage always succeeds"));
+        assert!(text.contains("durable acceptance and an entry id"));
         assert!(!text.contains("Ack ≠ delivery"));
         assert!(!text.contains("failed to deliver"));
     }

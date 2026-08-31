@@ -16,7 +16,6 @@
 use std::sync::Arc;
 
 use serde_json::Value;
-use tokio::sync::broadcast;
 
 use crate::entry::{Entry, Namespace, Transaction, UsageRow, Write};
 use crate::events::{Event, Kind};
@@ -81,7 +80,7 @@ pub struct Driver {
     pub model: Arc<dyn Model>,
     pub tools: Arc<dyn Tools>,
     pub hooks: Hooks,
-    pub events: broadcast::Sender<Event>,
+    pub events: Arc<crate::log::Bus>,
     /// Evaluated per request unless the operation carries an override.
     pub system_prompt: Arc<dyn Fn() -> String + Send + Sync>,
     pub retry: RetryPolicy,
@@ -442,6 +441,16 @@ impl Driver {
         }
     }
 
+    async fn publish_entry(&self, lane: &str, op: &OpId, id: &EntryId) -> Result<()> {
+        let entry = self
+            .session
+            .entry(id.clone())
+            .await?
+            .ok_or_else(|| SessionError::Corrupt(format!("committed entry {id} is missing")))?;
+        self.emit(lane, op, Kind::EntryAdded { entry });
+        Ok(())
+    }
+
     fn run_with(&self, run: &RunState, phase: RunPhase) -> OperationState {
         OperationState::Run(RunState {
             phase,
@@ -454,6 +463,7 @@ impl Driver {
     async fn placement_writes(
         &self,
         lane: &str,
+        op: &OpId,
         leaf: Option<EntryId>,
         ids: &[EntryId],
     ) -> Result<(Vec<Write>, Option<EntryId>, Vec<Entry>)> {
@@ -465,7 +475,10 @@ impl Driver {
                 self.session.pending(id.clone()).await?.ok_or_else(|| {
                     SessionError::Corrupt(format!("pending {id} has no register"))
                 })?;
-            let entry = pending.into_entry(id.clone()).with_parent(parent.clone());
+            let entry = pending
+                .into_entry(id.clone())
+                .with_parent(parent.clone())
+                .display(op.as_str(), "chat");
             parent = Some(entry.id.clone());
             writes.push(Write::entry(entry.clone()));
             writes.push(Write::delete(Namespace::PendingEntry, id.as_str()));
@@ -621,7 +634,7 @@ impl Driver {
             ];
             let (ok, reload) = self.transition(current, next, extra).await?;
             if ok {
-                self.emit(&lane, &op, Kind::EntryAdded { entry });
+                self.publish_entry(&lane, &op, &entry.id).await?;
             }
             return Ok(Step::Continue(reload));
         }
@@ -640,7 +653,7 @@ impl Driver {
         let lane = current.operation.lane.clone();
         let op = current.operation.operation_id.clone();
         let (writes, newest, placed) = self
-            .placement_writes(&lane, current.leaf.clone(), &ids)
+            .placement_writes(&lane, &op, current.leaf.clone(), &ids)
             .await?;
         let mut next = run.clone();
         let remove = |queue: &mut Vec<EntryId>| queue.retain(|id| !ids.contains(id));
@@ -669,7 +682,7 @@ impl Driver {
             .await?;
         if ok {
             for entry in placed {
-                self.emit(&lane, &op, Kind::EntryAdded { entry });
+                self.publish_entry(&lane, &op, &entry.id).await?;
             }
             self.emit(
                 &lane,
@@ -770,15 +783,37 @@ impl Driver {
                     );
                 }
                 let assistant = self.request_assistant(&committed, context).await?;
-                self.settle_assistant(
-                    &committed,
-                    context,
-                    *next_attempt,
-                    response_entry_id,
-                    usage_id,
-                    assistant,
-                )
-                .await
+                let mut planned = committed;
+                loop {
+                    let step = self
+                        .settle_assistant(
+                            &planned,
+                            context,
+                            *next_attempt,
+                            response_entry_id.clone(),
+                            usage_id.clone(),
+                            assistant.clone(),
+                        )
+                        .await?;
+                    // A steer/abort can move op.state while the request runs.
+                    // Reclassify the KNOWN response against that new state;
+                    // never turn a CAS miss into an unknown-effect replay.
+                    if let Step::Continue(Reload::Current(next)) = &step
+                        && let OperationState::Run(next_run) = &next.state
+                        && let RunPhase::Assistant {
+                            generation:
+                                Generation::EffectPending {
+                                    response_entry_id: pending,
+                                    ..
+                                },
+                        } = &next_run.phase
+                        && pending == &response_entry_id
+                    {
+                        planned = next.clone();
+                        continue;
+                    }
+                    return Ok(step);
+                }
             }
             Generation::EffectPending {
                 context,
@@ -904,9 +939,56 @@ impl Driver {
             system: &system,
             tools: &schemas,
         };
+        let OperationState::Run(run) = &current.state else {
+            unreachable!()
+        };
+        let RunPhase::Assistant {
+            generation:
+                Generation::EffectPending {
+                    response_entry_id, ..
+                },
+        } = &run.phase
+        else {
+            unreachable!()
+        };
+        let audience = if run.tools_started {
+            "internal"
+        } else {
+            "chat"
+        };
+        let prototype = Entry::message(Assistant::text("").message())
+            .with_id(response_entry_id.clone())
+            .with_parent(current.leaf.clone())
+            .display(op.as_str(), audience);
+        self.emit(
+            &lane,
+            &op,
+            Kind::EntryDraft {
+                entry: prototype.clone(),
+                order: current.state_seq,
+                version: 0,
+            },
+        );
+        let order = current.state_seq;
+        let accumulated = std::sync::Mutex::new(String::new());
         let events = self.events.clone();
         let (lane_for, op_for) = (lane.clone(), op.clone());
         let on_delta = move |delta: &str| {
+            let mut text = accumulated.lock().unwrap();
+            text.push_str(delta);
+            let mut entry = prototype.clone();
+            entry
+                .payload
+                .insert("message".into(), Assistant::text(text.clone()).message());
+            let _ = events.send(Event::new(
+                &lane_for,
+                Some(op_for.as_str()),
+                Kind::EntryDraft {
+                    entry,
+                    order,
+                    version: 0,
+                },
+            ));
             let _ = events.send(Event::new(
                 &lane_for,
                 Some(op_for.as_str()),
@@ -1090,9 +1172,18 @@ impl Driver {
 
         let entry = Entry::message(assistant.message())
             .with_id(response_entry_id.clone())
-            .with_parent(current.leaf.clone());
+            .with_parent(current.leaf.clone())
+            .display(
+                op.as_str(),
+                if run.tools_started {
+                    "internal"
+                } else {
+                    "chat"
+                },
+            );
         let usage_row = UsageRow::new(usage_id, assistant.usage, Some(response_entry_id.clone()));
         let mut next = run.clone();
+        next.tools_started |= matches!(phase, RunPhase::Tools { .. });
         next.phase = phase;
         next.latest_assistant_entry_id = Some(response_entry_id.clone());
         let mut writes = vec![
@@ -1105,7 +1196,7 @@ impl Driver {
             .transition(current, OperationState::Run(next.clone()), writes)
             .await?;
         if ok {
-            self.emit(&lane, &op, Kind::EntryAdded { entry });
+            self.publish_entry(&lane, &op, &entry.id).await?;
             let totals = self.session.stats().await?.usage;
             self.emit(
                 &lane,
@@ -1335,18 +1426,8 @@ impl Driver {
                         args: effective.clone(),
                     },
                 );
-                let OperationState::Run(committed_run) = &committed.state else {
-                    unreachable!()
-                };
-                self.execute_tool(
-                    &committed,
-                    committed_run,
-                    batch,
-                    &call,
-                    effective,
-                    &result_entry_id,
-                )
-                .await
+                self.execute_tool(&committed, &call, effective, &result_entry_id)
+                    .await
             }
             ToolCallState::EffectPending { replay, .. } => {
                 // Restored: re-execute only when both declarations say safe.
@@ -1387,7 +1468,7 @@ impl Driver {
                         },
                     );
                     return self
-                        .execute_tool(current, run, batch, &call, args, &result_entry_id)
+                        .execute_tool(current, &call, args, &result_entry_id)
                         .await;
                 }
                 let text = "Interrupted: the process died while this tool was running and it \
@@ -1414,14 +1495,25 @@ impl Driver {
     async fn execute_tool(
         &self,
         current: &Current,
-        run: &RunState,
-        batch: &ToolBatch,
         call: &ToolCall,
         args: serde_json::Map<String, Value>,
         result_entry_id: &EntryId,
     ) -> Result<Step> {
         let lane = current.operation.lane.clone();
         let op = current.operation.operation_id.clone();
+        let draft = Entry::message(tool_result_message(call, "", false, false, None))
+            .with_id(result_entry_id.clone())
+            .with_parent(current.leaf.clone())
+            .tool_display(op.as_str(), &call.name, &args);
+        self.emit(
+            &lane,
+            &op,
+            Kind::EntryDraft {
+                entry: draft,
+                order: current.state_seq,
+                version: 0,
+            },
+        );
         let outcome = self
             .tools
             .invoke(&call.name, args.clone(), Some(self.cancel.clone()))
@@ -1458,18 +1550,39 @@ impl Driver {
             }
             terminate = after.value.terminate.unwrap_or(false);
         }
-        self.commit_tool_result(
-            current,
-            run,
-            batch,
-            call,
-            result_entry_id,
-            &content,
-            is_error,
-            terminate,
-            None,
-        )
-        .await
+        let mut planned = current.clone();
+        loop {
+            let OperationState::Run(latest) = &planned.state else {
+                return Ok(Step::Continue(Reload::Current(Box::new(planned))));
+            };
+            let RunPhase::Tools {
+                batch: latest_batch,
+            } = &latest.phase
+            else {
+                return Ok(Step::Continue(Reload::Current(Box::new(planned))));
+            };
+            let step = self
+                .commit_tool_result(
+                    &planned,
+                    latest,
+                    latest_batch,
+                    call,
+                    result_entry_id,
+                    &content,
+                    is_error || latest.control.is_cancelled(),
+                    terminate,
+                    None,
+                )
+                .await?;
+            if let Step::Continue(Reload::Current(next)) = &step
+                && let OperationState::Run(next_run) = &next.state
+                && let RunPhase::Tools { batch } = &next_run.phase
+                && batch.calls.iter().any(|c| matches!(c, ToolCallState::EffectPending { result_entry_id: id, .. } if id == result_entry_id)) {
+                planned = (**next).clone();
+                continue;
+            }
+            return Ok(step);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1487,9 +1600,23 @@ impl Driver {
     ) -> Result<Step> {
         let lane = current.operation.lane.clone();
         let op = current.operation.operation_id.clone();
+        let index = batch
+            .calls
+            .iter()
+            .find(|c| c.result_entry_id() == result_entry_id)
+            .expect("planned result")
+            .source_index();
+        let key = ToolBatch::args_key(&op, &batch.turn_id, index);
+        let args = self
+            .session
+            .register::<serde_json::Map<String, Value>>(Namespace::OpToolArgs, &key)
+            .await?
+            .map(|(args, _)| args)
+            .unwrap_or_else(|| call.arguments.clone());
         let entry = Entry::message(tool_result_message(
             call, content, is_error, terminate, synthetic,
         ))
+        .tool_display(op.as_str(), &call.name, &args)
         .with_id(result_entry_id.clone())
         .with_parent(current.leaf.clone());
         let mut next = run.clone();
@@ -1525,7 +1652,7 @@ impl Driver {
                     terminate,
                 },
             );
-            self.emit(&lane, &op, Kind::EntryAdded { entry });
+            self.publish_entry(&lane, &op, &entry.id).await?;
         }
         Ok(Step::Continue(reload))
     }
@@ -1845,13 +1972,7 @@ impl Driver {
                     .transition(current, self.run_with(run, resume(resume_after)), writes)
                     .await?;
                 if ok {
-                    self.emit(
-                        &lane,
-                        &op,
-                        Kind::EntryAdded {
-                            entry: entry.clone(),
-                        },
-                    );
+                    self.publish_entry(&lane, &op, &entry.id).await?;
                     finish(self, Some(entry.id), Outcome::Completed);
                 }
                 Ok(Step::Continue(reload))
@@ -1982,13 +2103,7 @@ impl Driver {
                     )
                     .await?;
                 if ok {
-                    self.emit(
-                        &lane,
-                        &op,
-                        Kind::EntryAdded {
-                            entry: entry.clone(),
-                        },
-                    );
+                    self.publish_entry(&lane, &op, &entry.id).await?;
                     self.emit(
                         &lane,
                         &op,
@@ -2096,7 +2211,8 @@ impl Driver {
                     )
                     .await?;
                 if let Step::Done(_) = &step {
-                    self.emit(&current.operation.lane, &op, Kind::EntryAdded { entry });
+                    self.publish_entry(&current.operation.lane, &op, &entry.id)
+                        .await?;
                 }
                 Ok(step)
             }
@@ -2151,7 +2267,8 @@ impl Driver {
                             )
                             .await?;
                         if let Step::Done(_) = &step {
-                            self.emit(&current.operation.lane, &op, Kind::EntryAdded { entry });
+                            self.publish_entry(&current.operation.lane, &op, &entry.id)
+                                .await?;
                         }
                         Ok(step)
                     }

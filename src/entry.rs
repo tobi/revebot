@@ -150,6 +150,23 @@ impl Entry {
         entry
     }
 
+    /// Presentation travels with the entry, never in a renderer's hidden phase.
+    pub fn display(mut self, run_id: &str, audience: &str) -> Self {
+        self.payload.insert(
+            "display".into(),
+            serde_json::json!({"run_id":run_id,"audience":audience}),
+        );
+        self
+    }
+
+    pub fn tool_display(mut self, run_id: &str, name: &str, args: &Map<String, Value>) -> Self {
+        self.payload.insert(
+            "display".into(),
+            serde_json::json!({"run_id":run_id,"audience":"tool","name":name,"args":args}),
+        );
+        self
+    }
+
     pub fn with_id(mut self, id: EntryId) -> Self {
         self.id = id;
         self

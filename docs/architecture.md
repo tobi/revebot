@@ -78,6 +78,10 @@ src/
                       next user wrap as a hidden card.
   heartbeat.rs        schedule reload and response-contract validation
   channels.rs         inbox broadcast and namespaced durable KV
+  log.rs              in-memory draft log + broadcast bus. Snapshots are
+                      committed/accepted session records plus same-process drafts.
+                      Streams are partial entries under reserved ids, not a
+                      second DOM path. Settlement replaces the draft by id.
   project.rs          house directory and `revebot init`; identity is
                       workspace/agents/<id>/; SOUL.md is the sole prose identity,
                       profile.json is authoritative metadata; HOME/workspace is cwd
@@ -85,6 +89,9 @@ src/
   house/              multi-bot house: roster, supervisors, HTTP/WS, routine ticker;
                       usage.jsonl in `.reve/` logs skill `/name` and Lua plugin
                       invocations (one JSON object per line) for later stats.
+                      roster.rs is the only admission lock: Creating/Ready/Deleting
+                      slots, generation tokens, last-ready-bot floor, process-lifetime
+                      retired create slugs. Guest I/O never runs under that lock.
                       wrap.rs timestamp/cwd headers + [agent] arrivals.
                       profile.rs validates directory-owned ids and refreshes live
                       metadata from disk. home.rs agent-specific SOUL scaffolding.
@@ -93,21 +100,25 @@ src/
                       files.rs serialised compare-before-replace guest writes.
                       resources.rs shared post-write notifications; Lua on_change
                       observes asynchronously, never vetoes writes.
-                      SendUserMessage emits UserNotice on the bot harness
-                      stream (the chat websocket), not only house_events.
-                      @mention cards carry the bot's real id; `/skill` cards
+                      SendUserMessage is accepted once per run (SHA-256 of text)
+                      as a durable chat entry; tool intent is never a delivered
+                      bubble. @mention cards carry the bot's real id; `/skill` cards
                       attach the skill body. Boot never awaits `resume_all` /
                       drive; each supervisor resumes then kicks in the
                       background so the HTTP server binds even if a bot is mid-tool.
+                      Delete stops the supervisor, drains owned effects, closes the
+                      session, then removes the guest home. Recreate uses a new
+                      log identity; clients send the log_id they subscribed to.
   web/                embedded local UI: OpenGrok roster + shadcn-style
-                      bubbles, bloub avatars, routines rail. Assistant
-                      `content` is a part list (text + toolCall); the page
-                      parses it into bubbles and compact tool cards, never
-                      JSON.stringify. GET / is Cache-Control: no-store.
+                      bubbles, bloub avatars, routines rail. `web/log.js` is the
+                      pure log reducer; `web/chat.js` is the only renderer for
+                      snapshots, streams, pagination, reloads and conversation
+                      switches. Markdown uses one `formatText` for drafts and
+                      committed replies. Tools collapse to one Activity row with
+                      an updating Working… line. GET / is Cache-Control: no-store.
                       House events refresh sidebar/header metadata from profile.json;
                       invalid edits show a labelled last-good profile, not silent stale UI.
                       Soul editor reads/writes SOUL.md through /api/bots/<id>/soul.
-                      Single-log rendering remains upcoming.
                       Compose autocomplete: `/` skills, `@` other bots.
                       AskUserForSecret renders an inline host-secret form.
                       Right rail is tabbed (Screen / Files / Routines); Files
@@ -122,10 +133,6 @@ src/
                       JSONL. Paths stay under the mount.
                       Rail working-dots follow house `bot_busy` events, not
                       which chat is open. GET /api/bots includes `busy`.
-                      SendUserMessage is hidden from Working… and live-pushed
-                      via user_notice. Transcript restore treats SendUserMessage
-                      tool calls and custom user_notice entries as bubbles;
-                      assistant prose after the first tool of that turn is not.
   eval/               catalog runner for evals/cases (offline / live / microvm);
                       live defaults to openrouter/x-ai/grok-4.6 (OPENROUTER_API_KEY)
   main.rs             init / info / exec / tool / serve / tui / eval; bare `revebot` serves
@@ -321,6 +328,11 @@ Every row names a real test. A claim with no test says so instead of appearing c
 | Cwd rules are full/root-to-leaf, HOME stays fixed, contexts and headers are isolated | `working_directory::tests`, `house::wrap::tests::cwd_is_an_escaped_message_header_not_part_of_the_user_query` |
 | Change observers are filtered/scoped and failures do not veto another observer | `lua::workspace_tests::change_observers_are_filtered_scoped_and_errors_do_not_veto_other_observers` |
 | Home/cwd/memory/profile effects work against the real VM | `house::microvm_tests::homes_cwd_memory_and_profile_notifications_work_in_the_guest` (opt-in) |
+| Chat is one keyed log; drafts settle by reserved id; notices are accepted once | `tests/log.rs`, `node tests/chat-log.cjs`, `node tests/chat-controller.cjs` |
+| Tool settlement keeps completed output across a steer CAS miss | `tests/log.rs::notices_are_durable_once_and_known_tool_results_survive_state_changes` |
+| Roster tokens, last-bot floor, and capacity include creating/deleting slots | `house::roster::tests` |
+| Supervisor stop seals persistence and waits for owned effects | `house::lifecycle_tests::supervisor_stop_seals_the_session_and_waits_for_owned_effects` |
+| Concurrent create/delete/recreate isolation holds in the guest | `house::microvm_tests::homes_cwd_memory_and_profile_notifications_work_in_the_guest` (opt-in) |
 | The default guest is pre-provisioned, and git reads its token from the environment | `sandbox::tests::{the_default_policy_boots_a_preprovisioned_guest, git_reads_its_token_from_the_environment_not_a_credential_store}` |
 | Every invokable tool is offered to the model | `tools::tests::the_active_tool_list_covers_every_builtin` |
 | An unmentioned Lua flag keeps its default | `lua::tests::an_unmentioned_flag_keeps_its_default` |

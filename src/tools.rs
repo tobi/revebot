@@ -52,7 +52,8 @@ struct Builtin {
     schema: fn() -> Value,
 }
 
-fn object(properties: Value, required: &[&str]) -> Value {
+fn object(mut properties: Value, required: &[&str]) -> Value {
+    properties.as_object_mut().expect("object schema").insert("description".into(), json!({"type":"string","description":"Short active status for the user, e.g. Reading project configuration or Running tests"}));
     json!({
         "type": "object",
         "properties": properties,

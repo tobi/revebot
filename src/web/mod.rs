@@ -5,6 +5,8 @@ pub fn page(token: &str, bind: &str) -> String {
         .replace("{{TOKEN}}", token)
         .replace("{{BIND}}", bind)
         .replace("/*{{BLOUB}}*/", include_str!("bloub.js"))
+        .replace("/*{{LOG}}*/", include_str!("log.js"))
+        .replace("/*{{CHAT}}*/", include_str!("chat.js"))
 }
 
 #[cfg(test)]
@@ -21,9 +23,10 @@ mod tests {
         assert!(html.contains("::-webkit-scrollbar"));
         assert!(html.contains("class=\"fence\"") || html.contains("\"fence\""));
         assert!(html.contains("contentParts"));
-        assert!(html.contains("function addTool"));
+        assert!(html.contains("function renderActivity"));
         assert!(html.contains("function paintLog"));
-        assert!(html.contains("function ensureStream"));
+        assert!(!html.contains("function ensureStream"));
+        assert!(html.contains("class Log"));
         assert!(html.contains("stickToBottom") || html.contains("nearBottom"));
         assert!(html.contains("scroll-fab"));
         assert!(html.contains("before="));
@@ -33,18 +36,15 @@ mod tests {
         assert!(html.contains("function routeBot"));
         assert!(html.contains("function setRoute"));
         assert!(html.contains("location.hash"));
-        assert!(html.contains("function isUserNotice"));
-        assert!(html.contains("function noticeText"));
-        assert!(html.contains("sawTool"));
-        assert!(html.contains("sawTool = false"));
+        assert!(html.contains("function project"));
+        assert!(!html.contains("sawTool"));
+        assert!(!html.contains("toolsStarted"));
         assert!(html.contains("think-dot"));
         assert!(html.contains("--blink-dur"));
         assert!(html.contains("function setBusy"));
         assert!(html.contains("function stickBottom"));
-        assert!(
-            html.contains("if (pin) stickBottom()"),
-            "message_update/user_notice must keep if (pin) or the page script is invalid"
-        );
+        assert!(html.contains("function queueLogRender"));
+        assert!(html.contains("if (keepScroll && !pin)"));
         assert!(html.contains("height: 36px"));
         assert!(html.contains("function openCtx"));
         assert!(html.contains("function loadTree"));
@@ -75,7 +75,7 @@ mod tests {
         assert!(html.contains("function paintBusy"));
         assert!(html.contains("bot_busy"));
         assert!(html.contains("/api/events"));
-        assert!(html.contains("hiddenTool(name)"));
+        assert!(html.contains("name === 'SendUserMessage'"));
         assert!(html.contains("user_notice"));
         assert!(html.contains("AskUserForSecret"));
         assert!(html.contains("function addSecretAsk"));

@@ -65,6 +65,7 @@ fn router(state: AppState) -> Router {
             "/api/bots/{id}/messages",
             get(list_messages).post(post_message),
         )
+        .route("/api/bots/{id}/messages/{entry}", get(get_log_record))
         .route("/api/bots/{id}/soul", get(get_soul).put(put_soul))
         .route("/api/bots/{id}/abort", post(abort_bot))
         .route("/api/models", get(list_models))
@@ -240,19 +241,39 @@ async fn list_messages(
         return deny();
     }
     let limit = q.limit.unwrap_or(80);
-    match state.house.transcript_page(&id, q.before, limit).await {
-        Ok((entries, has_more)) => {
-            let oldest_seq = entries.first().map(|e| e.seq);
-            Json(json!({
-                "messages": entries,
-                "has_more": has_more,
-                "oldest_seq": oldest_seq
-            }))
-            .into_response()
-        }
+    match state.house.log_page(&id, q.before, limit).await {
+        Ok(page) => Json(page).into_response(),
         Err(e) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn get_log_record(
+    State(state): State<AppState>,
+    Path((id, entry)): Path<(String, String)>,
+    headers: HeaderMap,
+    Query(q): Query<QueryAuth>,
+) -> Response {
+    if !authorized(&headers, &q, &state.house) {
+        return deny();
+    }
+    match state
+        .house
+        .log_record(&id, crate::ids::EntryId::from(entry))
+        .await
+    {
+        Ok(Some(record)) => Json(record).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"entry not found"})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error":error.to_string()})),
         )
             .into_response(),
     }
@@ -439,6 +460,7 @@ async fn list_skills(
 #[derive(Deserialize)]
 struct PostMessage {
     text: String,
+    log_id: Option<String>,
 }
 
 async fn post_message(
@@ -451,12 +473,18 @@ async fn post_message(
     if !authorized(&headers, &q, &state.house) {
         return deny();
     }
-    match state.house.prompt(&id, &body.text).await {
+    match state
+        .house
+        .prompt(&id, &body.text, body.log_id.as_deref())
+        .await
+    {
         Ok(ack) => (
             StatusCode::ACCEPTED,
             Json(json!({
+                "log_id": ack.log_id,
                 "operation_id": ack.operation_id,
                 "entry_id": ack.entry_id,
+                "record": ack.record,
                 "mode": ack.mode
             })),
         )
@@ -510,11 +538,22 @@ async fn events_ws(
     if q.token.as_deref() != Some(state.house.token()) {
         return deny();
     }
-    let Ok(rx) = state.house.subscribe(&id) else {
+    let Ok((log_id, rx)) = state.house.subscribe(&id) else {
         return (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response();
     };
-    ws.on_upgrade(move |socket| push_events(socket, rx))
-        .into_response()
+    ws.on_upgrade(move |mut socket| async move {
+        if socket
+            .send(Message::Text(
+                json!({"type":"hello","log_id":log_id}).to_string().into(),
+            ))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        push_events(socket, rx).await;
+    })
+    .into_response()
 }
 
 async fn push_events(

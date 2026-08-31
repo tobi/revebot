@@ -17,6 +17,7 @@ pub mod hooks;
 pub mod house;
 pub mod ids;
 pub mod lane;
+pub mod log;
 pub mod lua;
 pub mod model;
 pub mod progress;

@@ -70,12 +70,13 @@ pub struct Harness {
     model: Arc<dyn Model>,
     tools: Arc<dyn Tools>,
     hooks: Hooks,
-    events: broadcast::Sender<Event>,
+    events: Arc<crate::log::Bus>,
     system_prompt: Arc<dyn Fn() -> String + Send + Sync>,
     settings: RunSettings,
     retry: RetryPolicy,
     seed: LaneConfiguration,
     sources: Mutex<Option<EnvironmentSources>>,
+    closed: std::sync::atomic::AtomicBool,
     /// One cancel channel per *running* operation. Purely an accelerator: the
     /// durable `Control::CancelRequested` is what an abort means, and this is
     /// how an in-flight request or tool learns about it without waiting.
@@ -95,7 +96,7 @@ pub struct HarnessConfig {
 
 impl Harness {
     pub fn new(session: Session, config: HarnessConfig) -> Arc<Self> {
-        let (events, _) = broadcast::channel(config.event_capacity.max(16));
+        let events = Arc::new(crate::log::Bus::new(config.event_capacity));
         Arc::new(Self {
             session,
             model: config.model,
@@ -107,6 +108,7 @@ impl Harness {
             retry: config.retry,
             seed: config.configuration,
             sources: Mutex::new(None),
+            closed: std::sync::atomic::AtomicBool::new(false),
             cancels: Mutex::new(HashMap::new()),
         })
     }
@@ -155,8 +157,70 @@ impl Harness {
         Ok(())
     }
 
+    /// Controlled close seals persistence before waking live effects. It is not
+    /// a durable abort, and cannot persist an aborted reply under running control.
+    pub async fn close(&self) {
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.session.close().await;
+        for cancel in self.cancels.lock().unwrap().values() {
+            cancel.cancel();
+        }
+    }
+
     pub fn session(&self) -> &Session {
         &self.session
+    }
+
+    async fn publish_accepted(&self, lane: &str, op: Option<&str>, id: &EntryId) -> Result<()> {
+        if let Some(record) = self.session.log_record(id.clone()).await? {
+            match record.status {
+                crate::log::Status::Committed => self.emit(
+                    lane,
+                    op,
+                    Kind::EntryAdded {
+                        entry: record.entry,
+                    },
+                ),
+                _ => {
+                    let entry = match op {
+                        Some(op) => record.entry.display(op, "chat"),
+                        None => record.entry,
+                    };
+                    self.emit(
+                        lane,
+                        op,
+                        Kind::EntryAccepted {
+                            entry,
+                            order: record.order,
+                        },
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn log_snapshot(&self, lane: &str) -> Result<Vec<crate::log::Record>> {
+        // Capture drafts first: a settlement before the owner read wins by id;
+        // a settlement after it is delivered to an already-subscribed client.
+        let drafts = self.events.drafts(lane);
+        let mut records = self.session.log_records(lane).await?;
+        for draft in drafts {
+            if !records.iter().any(|r| r.entry.id == draft.entry.id) {
+                records.push(draft);
+            }
+        }
+        records.sort_by_key(|r| r.order);
+        Ok(records)
+    }
+
+    pub async fn log_record(&self, lane: &str, id: EntryId) -> Result<Option<crate::log::Record>> {
+        let draft = self
+            .events
+            .drafts(lane)
+            .into_iter()
+            .find(|r| r.entry.id == id);
+        Ok(self.session.log_record(id).await?.or(draft))
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
@@ -300,6 +364,55 @@ impl Harness {
         self.enqueue(lane, Queue::Writes, entry).await
     }
 
+    /// Accept a keyed deferred write at most once within this operation. The
+    /// key/id map dies with op.state; it is never reconstructed from history.
+    pub async fn write_once(
+        &self,
+        lane: &str,
+        key: &str,
+        content: PendingEntry,
+    ) -> Result<EntryId> {
+        loop {
+            let Restored::Suspended(current) = self.session.restore(lane).await? else {
+                return Err(HarnessError::Idle(lane.into()));
+            };
+            let OperationState::Run(run) = &current.state else {
+                return Err(HarnessError::Busy(lane.into()));
+            };
+            if let Some(id) = run.accepted_writes.get(key) {
+                return Ok(id.clone());
+            }
+            let id = EntryId::new();
+            let mut next = run.clone();
+            next.accepted_writes.insert(key.into(), id.clone());
+            next.inbox.writes.push(id.clone());
+            let op = &current.operation.operation_id;
+            let content = content.clone().display(op.as_str());
+            let committed = self
+                .session
+                .commit_if(
+                    vec![Expect::new(
+                        Namespace::OpState,
+                        op.as_str(),
+                        Some(current.state_seq),
+                    )],
+                    Transaction::new()
+                        .with(Write::set(Namespace::PendingEntry, id.as_str(), &content))
+                        .with(Write::set(
+                            Namespace::OpState,
+                            op.as_str(),
+                            OperationState::Run(next),
+                        )),
+                )
+                .await?;
+            if committed.is_none() {
+                continue;
+            }
+            self.publish_accepted(lane, Some(op.as_str()), &id).await?;
+            return Ok(id);
+        }
+    }
+
     /// Queue a prompt for the lane's *next* run. Unlike the others this is
     /// legal while the lane is idle, and `lane.state` is where it waits.
     pub async fn next_run(&self, lane: &str, text: &str) -> Result<EntryId> {
@@ -335,6 +448,7 @@ impl Harness {
                         next_run: next.pending_next_run,
                     },
                 );
+                self.publish_accepted(lane, None, &id).await?;
                 return Ok(id);
             }
         }
@@ -388,7 +502,11 @@ impl Harness {
                     lane,
                     None,
                     Kind::EntryAdded {
-                        entry: entry.clone(),
+                        entry: self
+                            .session
+                            .entry(id.clone())
+                            .await?
+                            .ok_or_else(|| SessionError::Corrupt("placed entry missing".into()))?,
                     },
                 );
                 return Ok(id);
@@ -497,6 +615,9 @@ impl Harness {
         lane: &str,
         prompts: Vec<PendingEntry>,
     ) -> Result<Current> {
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(HarnessError::Invalid("harness is closed".into()));
+        }
         if prompts.is_empty() {
             return Err(HarnessError::Invalid("a run needs a prompt".into()));
         }
@@ -526,6 +647,10 @@ impl Harness {
         }
         let mut prompts = prompts;
         prompts.extend(before.value.messages.into_iter().map(PendingEntry::message));
+        let prompts: Vec<_> = prompts
+            .into_iter()
+            .map(|p| p.display(op.as_str()))
+            .collect();
 
         let ids: Vec<EntryId> = prompts.iter().map(|_| EntryId::new()).collect();
         let payloads: Vec<Write> = ids
@@ -539,6 +664,8 @@ impl Harness {
             system_prompt_override: before.value.system_prompt,
         };
         let state = OperationState::Run(RunState {
+            tools_started: false,
+            accepted_writes: Default::default(),
             control: Control::Running,
             settings: self.settings.clone(),
             // The prompts are queued as deferred writes and placed by the
@@ -558,6 +685,15 @@ impl Harness {
             Some(current.operation.operation_id.as_str()),
             Kind::RunStart,
         );
+        if let Intent::Run {
+            prompt_entry_ids, ..
+        } = &current.operation.intent
+        {
+            for id in prompt_entry_ids {
+                self.publish_accepted(lane, Some(current.operation.operation_id.as_str()), id)
+                    .await?;
+            }
+        }
         Ok(current)
     }
 
@@ -565,6 +701,9 @@ impl Harness {
     /// Sibling of `start_run`; must not call `start()` (that prepends the
     /// same ids onto `inbox.writes`).
     async fn start_pending(self: &Arc<Self>, lane: &str) -> Result<Current> {
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(HarnessError::Invalid("harness is closed".into()));
+        }
         self.refresh_idle_configuration(lane).await?;
         self.session.ensure_lane(lane, None, &self.seed).await?;
         let (lane_state, lane_state_seq) = self
@@ -625,6 +764,8 @@ impl Harness {
             system_prompt_override: before.value.system_prompt,
         };
         let state = OperationState::Run(RunState {
+            tools_started: false,
+            accepted_writes: Default::default(),
             control: Control::Running,
             settings: self.settings.clone(),
             phase: RunPhase::Checkpoint(CheckpointPhase::need_assistant(trigger)),
@@ -765,7 +906,13 @@ impl Harness {
         if cancelled(&current.state) {
             tx.cancel();
         }
-        self.cancels.lock().unwrap().insert(lane.clone(), tx);
+        {
+            let mut cancels = self.cancels.lock().unwrap();
+            if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(HarnessError::Invalid("harness is closed".into()));
+            }
+            cancels.insert(lane.clone(), tx);
+        }
         let driver = self.driver(rx, &current.configuration);
         let result = driver.drive(current).await;
         self.cancels.lock().unwrap().remove(&lane);
@@ -817,6 +964,7 @@ impl Harness {
                 )));
             }
             let op = current.operation.operation_id.clone();
+            let content = content.clone().display(op.as_str());
             let id = EntryId::new();
             let mut next = run.clone();
             match queue {
@@ -845,6 +993,7 @@ impl Harness {
             if committed.is_none() {
                 continue;
             }
+            self.publish_accepted(lane, Some(op.as_str()), &id).await?;
             self.emit(
                 lane,
                 Some(op.as_str()),

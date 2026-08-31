@@ -16,7 +16,7 @@ let profiles = [{id:'miku', name:'Miku', title:'Old'}];
 let header;
 const context = vm.createContext({
   document:{getElementById(id) { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); }},
-  current:'miku', toolsStarted:false, bots:[], busy:{}, paintBusy(){},
+  current:'miku', bots:[], busy:{}, paintBusy(){}, queueLogRender(){},
   api:async () => ({bots:profiles}), ensureHouseEvents(){},
   el:(tag, cls, text) => ({...element(), textContent:text || ''}),
   avatar:element, modelBadge:() => '',

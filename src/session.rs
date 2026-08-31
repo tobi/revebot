@@ -310,6 +310,70 @@ impl Session {
         .await
     }
 
+    /// One owner read of the full branch plus exactly the pending ids named by
+    /// current lane/operation state. No recovery state is inferred from history.
+    pub async fn log_record(&self, id: EntryId) -> Result<Option<crate::log::Record>> {
+        self.read(move |s| {
+            if let Some(entry) = s.entry(&id) {
+                return Some(crate::log::Record::committed(entry.clone()));
+            }
+            s.register_value::<PendingEntry>(Namespace::PendingEntry, id.as_str())
+                .map(|(pending, order)| crate::log::Record {
+                    entry: pending.into_entry(id),
+                    status: crate::log::Status::Accepted,
+                    order,
+                    revision: 0,
+                })
+        })
+        .await
+    }
+
+    pub async fn log_records(&self, lane: &str) -> Result<Vec<crate::log::Record>> {
+        let lane = lane.to_string();
+        self.read(move |s| {
+            use crate::log::{Record, Status};
+            let leaf = s
+                .register_value::<Option<EntryId>>(Namespace::LaneLeaf, &lane)
+                .and_then(|(l, _)| l);
+            let mut rows: Vec<_> = s
+                .scan_branch(&BranchScan {
+                    start: leaf,
+                    order: Order::OldestFirst,
+                    ..Default::default()
+                })
+                .into_iter()
+                .cloned()
+                .map(Record::committed)
+                .collect();
+            if let Some((state, _)) = s.register_value::<LaneState>(Namespace::LaneState, &lane) {
+                let mut ids = state.pending_next_run;
+                if let Some(op) = state.current_operation_id
+                    && let Some((OperationState::Run(run), _)) =
+                        s.register_value::<OperationState>(Namespace::OpState, op.as_str())
+                {
+                    ids.extend(run.inbox.writes);
+                    ids.extend(run.inbox.steer);
+                    ids.extend(run.inbox.follow_up);
+                }
+                for id in ids {
+                    if let Some((pending, order)) =
+                        s.register_value::<PendingEntry>(Namespace::PendingEntry, id.as_str())
+                    {
+                        rows.push(Record {
+                            entry: pending.into_entry(id),
+                            order,
+                            status: Status::Accepted,
+                            revision: 0,
+                        });
+                    }
+                }
+            }
+            rows.sort_by_key(|r| r.order);
+            rows
+        })
+        .await
+    }
+
     // ── lanes ────────────────────────────────────────────────────────────
 
     /// Seed a lane's registers if they do not exist. Existing configuration is
@@ -509,6 +573,13 @@ fn validate_current(
     };
     if let Some(latest) = &run.latest_assistant_entry_id {
         must_exist(latest, "latestAssistantEntryId")?;
+    }
+    for id in run.accepted_writes.values() {
+        if run.inbox.writes.contains(id) {
+            pending_exists(id)?;
+        } else {
+            must_exist(id, "accepted write")?;
+        }
     }
     for id in run
         .inbox
@@ -829,6 +900,8 @@ mod tests {
                 .with_parent(Some(prompt.id.clone()));
         let op = OpId::new();
         let state = OperationState::Run(RunState {
+            tools_started: false,
+            accepted_writes: Default::default(),
             control: Control::Running,
             settings: RunSettings::default(),
             phase: RunPhase::Checkpoint(crate::state::CheckpointPhase::may_finish(

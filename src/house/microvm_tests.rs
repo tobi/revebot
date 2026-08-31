@@ -19,6 +19,8 @@ async fn homes_cwd_memory_and_profile_notifications_work_in_the_guest() -> anyho
     runtime.agent.model = None;
     runtime.policy.root_disk = 1024;
     println!("isolated VM integration instance: {name}");
+    let policy = runtime.policy.clone();
+    let mut remaining_ids = Vec::new();
     let house = House::boot(project, "127.0.0.1:0".into(), &crate::sandbox::Silent).await?;
     let result: anyhow::Result<()> = async {
         let first = "chief-of-staff";
@@ -64,24 +66,55 @@ async fn homes_cwd_memory_and_profile_notifications_work_in_the_guest() -> anyho
         let stale = files::Change { relative:relative.clone(), before:Some("older bytes".into()), after:"bad overwrite".into() };
         anyhow::ensure!(stale.apply(&sandbox).await.is_err());
         anyhow::ensure!(std::fs::read_to_string(dir.path().join(relative))? == "working output");
+        let (name_patch, role_patch) = tokio::join!(
+            house.patch_bot(&second.id, serde_json::json!({"title":"Composer"})),
+            house.patch_bot(&second.id, serde_json::json!({"description":"Music only"})),
+        );
+        name_patch?; role_patch?;
+        let profile = Profile::load_for(dir.path(), &second.id)?;
+        anyhow::ensure!(profile.title == "Composer" && profile.description == "Music only");
+        let old_log = house.inner.ready_harness(&second.id)?.session().id().to_string();
+        house.delete_bot(&second.id).await?;
+        let make = |name: &str| CreateSpec {name:name.into(),title:String::new(),description:String::new(),soul:None,model:None,avatar:None};
+        let replacement = house.create_bot(make("Miku")).await?;
+        anyhow::ensure!(replacement.id == second.id);
+        let new_log = house.inner.ready_harness(&replacement.id)?.session().id().to_string();
+        anyhow::ensure!(new_log != old_log, "recreated bots must not reuse an old log identity");
+        anyhow::ensure!(house.prompt(&replacement.id, "stale client", Some(&old_log)).await.is_err());
+        let (a,b) = tokio::join!(house.create_bot(make("Worker")), house.create_bot(make("Worker")));
+        let a=a?; let b=b?;
+        anyhow::ensure!(a.id != b.id);
+        house.delete_bot(first).await?;
+        house.delete_bot(&b.id).await?;
+        let (a_deleted,miku_deleted) = tokio::join!(house.delete_bot(&a.id), house.delete_bot(&replacement.id));
+        anyhow::ensure!(a_deleted.is_ok() != miku_deleted.is_ok(), "only one concurrent deletion may pass the last-bot floor");
+        remaining_ids = house.ready_profiles().into_iter().map(|p|p.id).collect();
+        anyhow::ensure!(remaining_ids.len() == 1 && remaining_ids[0] != first);
         Ok(())
     }.await;
-    let sessions: Vec<_> = house
-        .inner
-        .snapshot
-        .read()
-        .values()
-        .filter_map(|slot| match slot {
-            BotSlot::Ready(rt) => Some(rt.session.clone()),
-            _ => None,
-        })
-        .collect();
-    for session in sessions {
-        session.close().await;
-    }
     let stopped = house.shutdown().await;
+    drop(house);
+    if let Err(error) = result {
+        let _ = microsandbox::Sandbox::remove(&name).await;
+        return Err(error);
+    }
+    stopped?;
+    let mut project = Project::load(dir.path())?;
+    let runtime = Arc::get_mut(&mut project.runtime).unwrap();
+    runtime.policy = policy;
+    runtime.agent.model = None;
+    let reopened = House::boot(project, "127.0.0.1:0".into(), &crate::sandbox::Silent).await?;
+    let actual_ids: Vec<_> = reopened
+        .ready_profiles()
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+    let stopped = reopened.shutdown().await;
     let removed = microsandbox::Sandbox::remove(&name).await;
-    result?;
+    anyhow::ensure!(
+        actual_ids == remaining_ids,
+        "restart must not resurrect the deleted chief-of-staff"
+    );
     stopped?;
     removed?;
     Ok(())
