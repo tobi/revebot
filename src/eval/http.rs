@@ -27,7 +27,7 @@ pub async fn run(case: &Case, base: &str, token: &str) -> anyhow::Result<Trace> 
     if sends.is_empty() {
         anyhow::bail!("{}: HTTP target needs a send/prompt", case.id);
     }
-    let mut last_count = 0usize;
+    let mut last_replies = 0usize;
     for text in &sends {
         let url = format!("{}/api/bots/{}/messages", base.trim_end_matches('/'), bot);
         let res = client
@@ -40,8 +40,8 @@ pub async fn run(case: &Case, base: &str, token: &str) -> anyhow::Result<Trace> 
             let body = res.text().await.unwrap_or_default();
             anyhow::bail!("{}: house returned {body}", case.id);
         }
-        last_count =
-            wait_for_assistant(&client, &url, &auth, last_count, case.timeout_seconds).await?;
+        last_replies =
+            wait_for_assistant(&client, &url, &auth, last_replies, case.timeout_seconds).await?;
     }
     let url = format!("{}/api/bots/{}/messages", base.trim_end_matches('/'), bot);
     let body: Value = client
@@ -70,12 +70,13 @@ async fn wait_for_assistant(
             .await?
             .json()
             .await?;
-        let n = body
-            .get("messages")
-            .and_then(Value::as_array)
-            .map(|a| a.len())
-            .unwrap_or(0);
-        if n > before {
+        let n = settled_replies(&body);
+        let idle = body
+            .get("operation_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .is_empty();
+        if n > before && idle {
             return Ok(n);
         }
         if Instant::now() >= deadline {
@@ -85,12 +86,32 @@ async fn wait_for_assistant(
     }
 }
 
+fn settled_replies(body: &Value) -> usize {
+    body.get("records")
+        .and_then(Value::as_array)
+        .map(|records| {
+            records
+                .iter()
+                .filter(|record| {
+                    record["status"] == "committed"
+                        && (record["entry"]["message"]["role"] == "assistant"
+                            || record["entry"]["type"] == "custom")
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
 fn trace_from_messages(body: &Value) -> Trace {
     let mut transcript = Vec::new();
     let mut tools = Vec::new();
     let mut final_text = String::new();
-    if let Some(entries) = body.get("messages").and_then(Value::as_array) {
-        for entry in entries {
+    if let Some(entries) = body.get("records").and_then(Value::as_array) {
+        for record in entries {
+            if record["status"] != "committed" {
+                continue;
+            }
+            let entry = &record["entry"];
             if let Some(message) = entry.get("message") {
                 let role = message
                     .get("role")

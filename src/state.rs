@@ -560,6 +560,11 @@ pub enum RunPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunState {
+    /// Presentation state is durable; a steer does not invent a new run opening.
+    #[serde(default)]
+    pub tools_started: bool,
+    #[serde(default)]
+    pub accepted_writes: Box<std::collections::BTreeMap<String, EntryId>>,
     pub control: Control,
     pub settings: RunSettings,
     pub phase: RunPhase,
@@ -635,6 +640,8 @@ pub struct PendingEntry {
     pub custom_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<Value>,
 }
 
 impl PendingEntry {
@@ -643,6 +650,7 @@ impl PendingEntry {
             entry_type: "message".into(),
             custom_type: None,
             payload: Some(message),
+            display: None,
         }
     }
 
@@ -651,19 +659,29 @@ impl PendingEntry {
             entry_type: "custom".into(),
             custom_type: Some(custom_type.into()),
             payload: Some(data),
+            display: None,
         }
+    }
+
+    pub fn display(mut self, run: &str) -> Self {
+        self.display = Some(serde_json::json!({"run_id":run,"audience":"chat"}));
+        self
     }
 
     /// The entry this content becomes when placed, under the reserved id.
     pub fn into_entry(self, id: EntryId) -> crate::entry::Entry {
-        match self.entry_type.as_str() {
+        let mut entry = match self.entry_type.as_str() {
             "custom" => crate::entry::Entry::custom(
                 self.custom_type.unwrap_or_else(|| "custom".into()),
                 self.payload,
             ),
             _ => crate::entry::Entry::message(self.payload.unwrap_or(Value::Null)),
         }
-        .with_id(id)
+        .with_id(id);
+        if let Some(display) = self.display {
+            entry.payload.insert("display".into(), display);
+        }
+        entry
     }
 }
 
@@ -696,6 +714,8 @@ mod tests {
     #[test]
     fn operation_state_round_trips_with_tagged_unions() {
         let state = OperationState::Run(RunState {
+            tools_started: false,
+            accepted_writes: Default::default(),
             control: Control::CancelRequested {
                 requested_at: 5,
                 drained_steer: vec![EntryId::from("a")],

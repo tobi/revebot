@@ -67,6 +67,17 @@ pub enum Kind {
     EntryAdded {
         entry: Entry,
     },
+    /// A partial entry in this process's in-memory log, under its reserved id.
+    EntryDraft {
+        entry: Entry,
+        order: u64,
+        version: u64,
+    },
+    /// Content is durable in pending.entry but not placed in the tree yet.
+    EntryAccepted {
+        entry: Entry,
+        order: u64,
+    },
     WritePending {
         entry_id: EntryId,
     },
@@ -101,10 +112,6 @@ pub enum Kind {
     },
     LaneCreated {
         at: Option<EntryId>,
-    },
-    UserNotice {
-        bot_id: String,
-        text: String,
     },
     RosterChanged {
         ids: Vec<String>,
@@ -158,19 +165,15 @@ mod tests {
     }
 
     #[test]
-    fn a_user_notice_carries_the_bubble_text() {
-        let event = Event::new(
-            "main",
-            None,
-            Kind::UserNotice {
-                bot_id: "rune".into(),
-                text: "What's your timezone?".into(),
-            },
+    fn accepted_notices_use_the_same_entry_shape_as_the_log() {
+        let entry = Entry::custom(
+            "user_notice",
+            Some(serde_json::json!({"bot":"rune","text":"What's your timezone?"})),
         );
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "user_notice");
-        assert_eq!(json["text"], "What's your timezone?");
-        assert_eq!(json["bot_id"], "rune");
+        let event = Event::new("main", None, Kind::EntryAccepted { entry, order: 1 });
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["entry"]["customType"], "user_notice");
+        assert_eq!(json["entry"]["data"]["text"], "What's your timezone?");
     }
 
     #[test]

@@ -99,7 +99,7 @@ const HOUSE_TOOLS: &[HouseTool] = &[
     ),
     (
         "SendUserMessage",
-        "Post a user-visible chat bubble immediately. Always succeeds. Returns ok. The user already sees the text — this result is not a user reply and not a failure. Do not retry. Do not call twice with the same text this turn. Do not wait; they type in the chat on a later turn.",
+        "Durably accept a user-visible message and return its entry id. Repeating identical text in the same run returns the same id, not a second bubble. An acknowledgment is not a user reply. Acceptance failures are errors; do not claim the user received a failed write.",
         || {
             json!({
                 "type": "object",
@@ -338,10 +338,11 @@ impl HouseTools {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .ok_or("missing text")?;
-        // Persist-and-push best effort. The model must never see a failure
-        // here: that is what produced the retry storm of identical bubbles.
-        let _ = house.send_user_message(&self.bot_id, text).await;
-        Ok("ok".into())
+        let id = house
+            .send_user_message(&self.bot_id, text)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(format!("Message accepted: {id}"))
     }
 
     async fn ask_secret(

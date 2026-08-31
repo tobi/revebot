@@ -28,12 +28,29 @@
     --primary-fg: #0d0d0d;
     --accent: #a78bfa;
     --orange: #f08a24;
+    --danger: #f87171;
     --chip: #2c2e33;
     --chip-text: #b8bcc2;
     --radius: 0.625rem;
     --scroll: #3f3f46;
     --scroll-hover: #71717a;
   }
+  .activity { margin: 8px 0 16px 40px; color: var(--dim); font-size: 12px; border-top: 1px solid var(--line); }
+  .activity summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 10px; min-height: 32px; }
+  .activity summary::-webkit-details-marker { display: none; }
+  .activity-summary::before { content: '›'; font-size: 17px; transition: transform .12s; }
+  .activity[open] > .activity-summary::before { transform: rotate(90deg); }
+  .activity-title { color: var(--dim); }
+  .activity-count { color: var(--quiet); }
+  .activity-description { padding: 2px 0 9px 23px; color: var(--quiet); }
+  .activity-action { padding-left: 12px; border-left: 1px solid var(--line); margin: 2px 0 2px 7px; }
+  .activity-mark { width: 12px; flex: none; }
+  .activity-name { font-family: ui-monospace, monospace; flex: none; }
+  .activity-args { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .activity-output { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; margin: 0 0 12px; padding: 10px; background: var(--rail); border-radius: 6px; color: var(--dim); }
+  .activity-error, .activity-action.failed .activity-mark, .activity-error-line { color: var(--danger); }
+  .activity-error-line { margin: -10px 0 16px 40px; font-size: 12px; }
+  .draft-label { color: var(--dim); font-size: 11px; margin-top: 5px; }
   * { box-sizing: border-box;
     scrollbar-width: thin;
     scrollbar-color: var(--scroll) transparent; }
@@ -722,6 +739,7 @@
 </div>
 <script>
 /*{{BLOUB}}*/
+/*{{LOG}}*/
 const TOKEN = "{{TOKEN}}";
 const headers = { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" };
 let current = null;
@@ -730,7 +748,6 @@ let skills = [];
 let ws = null;
 let houseWs = null;
 let busy = {};
-let toolsStarted = false;
 let pin = true;
 let unread = 0;
 let items = [];
@@ -833,7 +850,10 @@ async function api(path, opt={}) {
   const res = await fetch(path, { headers, ...opt });
   if (res.status === 204) return null;
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || (data.error && data.error.message) || res.statusText);
+  if (!res.ok) {
+    const error = new Error((data.error && data.error.message) || data.error || res.statusText);
+    error.status = res.status; throw error;
+  }
   return data;
 }
 
@@ -949,10 +969,6 @@ function argsPreview(name, args) {
   const s = JSON.stringify(args);
   if (s === "{}" || s === "[]") return "";
   return s.length > 88 ? s.slice(0, 88) + "…" : s;
-}
-
-function hiddenTool(name) {
-  return name === "SendUserMessage" || name === "SendMessage";
 }
 
 function unwrapUser(text) {
@@ -1163,26 +1179,8 @@ function formatText(s) {
   return box;
 }
 
-function lastMsg() {
-  for (let i = items.length - 1; i >= 0; i--) {
-    const n = items[i].node;
-    if (n && n.classList && n.classList.contains("msg")) return n;
-  }
-  return null;
-}
-
-function isMsg(n, align) {
-  return n && n.classList && n.classList.contains("msg")
-    && (!align || n.classList.contains(align))
-    && !n.classList.contains("marker");
-}
-
 function openStart(bot) {
   const speaker = (bot && bot.id) || (bot && bot.name) || "bot";
-  const prev = lastMsg();
-  if (isMsg(prev, "start") && prev.dataset.speaker === speaker) {
-    return prev.querySelector(".msg-col");
-  }
   const who = bot ? bot.name : "bot";
   const msg = el("div", "msg start");
   msg.dataset.speaker = speaker;
@@ -1198,15 +1196,9 @@ function openStart(bot) {
 
 function addMessage(align, variant, who, text, avSpec, avId) {
   const body = text == null ? "" : String(text).trim();
-  if (!body || body === "[]") return lastMsg();
+  if (!body) return null;
   const speaker = avId || who || "";
-  const prev = lastMsg();
-  if (isMsg(prev, align) && prev.dataset.speaker === speaker && prev.dataset.body === body) {
-    return prev;
-  }
-  const cont = isMsg(prev, align) && (align !== "start" || prev.dataset.speaker === speaker);
-  if (cont) prev.classList.add("followed");
-  const msg = el("div", "msg " + align + (cont ? " cont" : ""));
+  const msg = el("div", "msg " + align);
   msg.dataset.speaker = speaker;
   msg.dataset.body = body;
   const av = el("div", "msg-av");
@@ -1227,25 +1219,6 @@ function clipOut(out) {
   const s = String(out).replace(/\s+/g, " ").trim();
   if (!s) return "";
   return s.length > 240 ? s.slice(0, 240) + "…" : s;
-}
-
-function addTool(name, args, opt) {
-  opt = opt || {};
-  if (hiddenTool(name)) return null;
-  if (name === "AskUserForSecret") return addSecretAsk(args, opt);
-  const col = openStart(opt.bot);
-  const card = el("div", "tool" + (opt.running ? " running" : "") + (opt.err ? " err" : ""));
-  if (opt.id) card.dataset.id = opt.id;
-  const row = el("div", "tool-row");
-  row.appendChild(el("span", "tool-name", name || "tool"));
-  const preview = argsPreview(name, args);
-  if (preview) row.appendChild(el("span", "tool-args", preview));
-  card.appendChild(row);
-  const out = clipOut(opt.out);
-  if (out) card.appendChild(el("div", "tool-out", out));
-  col.appendChild(card);
-  if (!silent) scheduleFlush();
-  return card;
 }
 
 function addSecretAsk(args, opt) {
@@ -1396,45 +1369,10 @@ function buildSecretForm(args, card) {
   return form;
 }
 
-function finishTool(id, out, isError) {
-  let card = null;
-  if (id) card = document.querySelector('.tool[data-id="' + CSS.escape(String(id)) + '"]');
-  if (!card) card = document.querySelector(".tool.running");
-  if (!card) return;
-  card.classList.remove("running");
-  if (isError) card.classList.add("err");
-  const form = card.querySelector(".secret-form");
-  if (form) {
-    form.querySelectorAll("input, button, textarea").forEach((n) => { n.disabled = true; });
-  }
-  const clipped = clipOut(out);
-  if (clipped) {
-    let box = card.querySelector(".tool-out");
-    if (!box) { box = el("div", "tool-out"); card.appendChild(box); }
-    box.textContent = clipped;
-  }
-}
-
 function addMarker(text) {
   const m = el("div", "marker", text);
   track(m, "marker");
   return m;
-}
-
-function ensureStream(bot) {
-  const last = lastMsg();
-  if (isMsg(last, "start")) {
-    const live = last.querySelector(".bubble[data-stream='1'] .bubble-content");
-    if (live) return live;
-  }
-  const col = openStart(bot);
-  const wrap = el("div", "bubble muted");
-  wrap.dataset.stream = "1";
-  const body = el("div", "bubble-content");
-  wrap.appendChild(body);
-  col.appendChild(wrap);
-  if (!silent) scheduleFlush();
-  return body;
 }
 
 function groupOf(bot) {
@@ -1445,6 +1383,11 @@ async function loadBots() {
   ensureHouseEvents();
   const data = await api("/api/bots");
   bots = data.bots || [];
+  if (current && !bots.some(bot => bot.id === current)) {
+    logs.delete(current); logIds.delete(current); composeDrafts.delete(current);
+    if (ws) { ws.onclose = null; ws.close(); }
+    current = null; ++connection; rowCache.clear(); resetTranscript();
+  }
   const q = (document.getElementById("q").value || "").toLowerCase();
   const box = document.getElementById("bots");
   box.textContent = "";
@@ -1492,6 +1435,7 @@ async function loadBots() {
   }
   if (current) paintHead(bots.find((bot) => bot.id === current));
   paintBusy();
+  if (current) queueLogRender(current);
 }
 
 function paintHead(bot) {
@@ -1503,126 +1447,7 @@ function paintHead(bot) {
   document.getElementById("screen-title").textContent = bot ? bot.name + "'s screen" : "Screen";
 }
 
-function isUserNotice(entry) {
-  const t = entry.type || entry.entry_type;
-  const c = entry.customType || entry.custom_type;
-  return t === "custom" && c === "user_notice";
-}
-
-function noticeText(entry) {
-  const d = entry.data;
-  if (d && typeof d === "object") return String(d.text || d.message || "").trim();
-  if (typeof d === "string") return d.trim();
-  return String(entry.text || "").trim();
-}
-
-function paintLog(bot, msgs) {
-  if (!msgs.length) {
-    const empty = el("div", "empty");
-    empty.textContent = "Message " + (bot ? bot.name : "this bot") + " to get started.";
-    track(empty, "empty");
-    return;
-  }
-  let sawTool = false;
-  for (const entry of msgs) {
-    if (isUserNotice(entry)) {
-      const notice = noticeText(entry);
-      if (notice) addMessage("start", "muted", bot ? bot.name : "bot", notice, bot && bot.avatar, bot && bot.id);
-      continue;
-    }
-    const msg = entry.message || {};
-    const role = msg.role;
-    if (role === "toolResult") {
-      if (hiddenTool(msg.toolName || msg.tool_name)) continue;
-      const out = textOf(msg.content);
-      const id = msg.toolCallId || msg.tool_call_id;
-      finishTool(id, out, msg.isError || msg.is_error);
-      if (id && !document.querySelector('.tool[data-id="' + CSS.escape(String(id)) + '"]')) {
-        addTool(msg.toolName || "tool", {}, { bot, id, out, err: msg.isError || msg.is_error });
-      }
-      sawTool = true;
-      continue;
-    }
-    if (role === "user") {
-      sawTool = false;
-      const raw = textOf(msg.content) || (typeof msg.content === "string" ? msg.content : "");
-      const u = unwrapUser(raw);
-      if (u.kind === "agent") {
-        addMarker("Message from " + u.name);
-        if (u.text) addMessage("start", "tinted", u.name, u.text, null, u.id);
-      } else if (u.text) {
-        addMessage("end", "default", "you", u.text, null, "you");
-      }
-      continue;
-    }
-    if (role === "assistant") {
-      const parts = contentParts(msg.content);
-      if (!parts.length) continue;
-      for (const part of parts) {
-        if (part.type === "toolCall" || part.type === "tool_use") {
-          const name = part.name || "";
-          if (hiddenTool(name)) {
-            const args = asArgs(part.arguments || part.input || {});
-            const text = (args.text || args.message || "").trim();
-            if (text) addMessage("start", "muted", bot ? bot.name : "bot", text, bot && bot.avatar, bot && bot.id);
-          } else {
-            addTool(name, part.arguments || part.input || {}, { bot, id: part.id });
-          }
-          sawTool = true;
-        } else if (!sawTool) {
-          const t = (part.text || "").trim();
-          if (t && t !== "[]") {
-            addMessage("start", "muted", bot ? bot.name : "bot", t, bot && bot.avatar, bot && bot.id);
-          }
-        }
-      }
-    }
-  }
-}
-
-let loaded = [];
-
-function rebuild(bot, keepScroll) {
-  const log = logEl();
-  const oldH = log.scrollHeight;
-  const oldT = log.scrollTop;
-  items = [];
-  log.textContent = "";
-  silent = true;
-  paintLog(bot, loaded);
-  silent = false;
-  flush();
-  if (keepScroll) log.scrollTop = log.scrollHeight - oldH + oldT;
-}
-
-async function refreshLog(id) {
-  if (current !== id) return;
-  const bot = bots.find((b) => b.id === id);
-  const data = await api("/api/bots/" + encodeURIComponent(id) + "/messages?limit=" + PAGE);
-  if (current !== id) return;
-  loaded = data.messages || [];
-  hasMore = !!data.has_more;
-  oldestSeq = data.oldest_seq || (loaded[0] && loaded[0].seq) || null;
-  pin = true;
-  unread = 0;
-  rebuild(bot, false);
-}
-
-async function loadOlder() {
-  if (!current || !hasMore || loadingOlder || !oldestSeq) return;
-  loadingOlder = true;
-  try {
-    const bot = bots.find((b) => b.id === current);
-    const data = await api("/api/bots/" + encodeURIComponent(current) + "/messages?limit=" + PAGE + "&before=" + oldestSeq);
-    const older = data.messages || [];
-    hasMore = !!data.has_more;
-    if (older.length) oldestSeq = older[0].seq;
-    loaded = older.concat(loaded);
-    rebuild(bot, true);
-  } finally {
-    loadingOlder = false;
-  }
-}
+/*{{CHAT}}*/
 
 function routeBot() {
   const raw = (location.hash || "").replace(/^#\/?/, "");
@@ -1636,83 +1461,6 @@ function setRoute(id) {
   const next = "#/" + encodeURIComponent(id);
   if (location.hash === next) return;
   history.replaceState(null, "", next);
-}
-
-async function select(id, fromRoute) {
-  if (!id) return;
-  if (current === id) {
-    if (!fromRoute) setRoute(id);
-    closeDrawers();
-    return;
-  }
-  const bot = bots.find((b) => b.id === id);
-  const paint = () => {
-    current = id;
-    if (!fromRoute) setRoute(id);
-    toolsStarted = false;
-    pin = true;
-    unread = 0;
-    document.getElementById("status").textContent = "";
-    resetTranscript();
-    paintHead(bot);
-    paintBusy();
-    closeDrawers();
-  };
-  if (document.startViewTransition) document.startViewTransition(paint);
-  else paint();
-  await loadBots();
-  await refreshLog(id);
-  loadSkills(id).catch(() => {});
-  loadRoutines().catch(() => {});
-  if (ws) ws.close();
-  ws = new WebSocket((location.protocol === "https:" ? "wss:" : "ws:") + "//" + location.host +
-    "/api/bots/" + encodeURIComponent(id) + "/events?token=" + encodeURIComponent(TOKEN));
-  ws.onmessage = (ev) => {
-    const e = JSON.parse(ev.data);
-    const t = e.type;
-    if (t === "run_start" || t === "run_resume") {
-      toolsStarted = false;
-      setBusy(id, true);
-      document.getElementById("status").innerHTML = '<span class="shimmer">Working…</span>';
-    } else if (t === "message_update" && !toolsStarted) {
-      const empty = logEl().querySelector(".empty");
-      if (empty) empty.remove();
-      ensureStream(bot).appendChild(document.createTextNode(e.delta || ""));
-      scheduleFlush();
-      if (pin) stickBottom();
-      else { unread++; updateFab(); }
-    } else if (t === "tool_start") {
-      toolsStarted = true;
-      const name = e.tool_name || e.toolName || "tool";
-      if (hiddenTool(name)) {
-        document.getElementById("status").innerHTML = '<span class="shimmer">Working…</span>';
-      } else {
-        document.getElementById("status").innerHTML = '<span class="shimmer">Working… ' + name + "</span>";
-        addTool(name, e.args || e.arguments || {}, {
-          bot, running: true, id: e.tool_call_id || e.toolCallId
-        });
-      }
-    } else if (t === "tool_end") {
-      const name = e.tool_name || e.toolName || "";
-      if (!hiddenTool(name)) {
-        finishTool(e.tool_call_id || e.toolCallId, e.content || "", e.is_error || e.isError);
-      }
-      scheduleFlush();
-    } else if (t === "user_notice") {
-      const empty = logEl().querySelector(".empty");
-      if (empty) empty.remove();
-      const text = e.text || "";
-      if (text) addMessage("start", "muted", bot ? bot.name : "bot", text, bot && bot.avatar, bot && bot.id);
-      if (pin) stickBottom();
-      else { unread++; updateFab(); }
-    } else if (t === "run_end") {
-      document.getElementById("status").textContent = "";
-      toolsStarted = false;
-      setBusy(id, false);
-      loadBots().catch(() => {});
-      refreshLog(id).catch(() => {});
-    }
-  };
 }
 
 async function loadRoutines() {
@@ -1729,7 +1477,7 @@ async function loadRoutines() {
     d.appendChild(el("div", "rs", who + r.schedule + (r.enabled ? "" : " · off")));
     d.title = r.enabled ? "Run now" : "Disabled — edit the routine Lua";
     if (r.enabled) d.onclick = async () => {
-      document.getElementById("status").innerHTML = '<span class="shimmer">Running ' + r.name + "…</span>";
+      document.getElementById("status").textContent = "Working… " + r.name;
       await api("/api/routines/" + encodeURIComponent(r.id) + "/run", { method: "POST", body: "{}" });
     };
     box.appendChild(d);
@@ -2405,23 +2153,34 @@ document.getElementById("compose").onsubmit = async (ev) => {
   if (acOpen() && acItems.length) { acAccept(); return; }
   acHide();
   if (!current) return;
-  const text = document.getElementById("text").value.trim();
   const tags = pendingAttach.map((a) => a.tag).filter(Boolean);
   if (!text && !tags.length) return;
+  if (sending) return;
+  sending = true;
+  const id = current;
   const body = [text].concat(tags).filter(Boolean).join("\n");
-  document.getElementById("text").value = "";
-  pendingAttach = [];
-  paintPending();
-  acHide();
-  const empty = document.getElementById("log").querySelector(".empty");
-  if (empty) empty.remove();
-  pin = true;
-  unread = 0;
-  addMessage("end", "default", "you", body, null, "you");
-  stickBottom();
-  await api("/api/bots/" + encodeURIComponent(current) + "/messages", {
-    method: "POST", body: JSON.stringify({ text: body })
-  });
+  const intendedLog = logIds.get(id) || bots.find(bot => bot.id === id)?.log_id;
+  document.getElementById('status').textContent = 'Sending…';
+  try {
+    await streamReady;
+    const log_id = intendedLog || logIds.get(id);
+    if (!log_id) throw new Error('Connect to the bot log before sending');
+    const ack = await api('/api/bots/' + encodeURIComponent(id) + '/messages', { method:'POST', body:JSON.stringify({text: body, log_id}) });
+    if (ack.log_id !== logIds.get(id)) throw new Error('Bot was replaced before the message settled');
+    if (!ack.record) throw new Error('Message was cancelled before placement');
+    chatLog(id).upsert(ack.record);
+    pendingAttach = [];
+    paintPending();
+    if (composeDrafts.get(id)?.trim() === text) composeDrafts.delete(id);
+    if (current === id) {
+      if (document.getElementById('text').value.trim() === text) {
+        document.getElementById('text').value = '';
+        document.getElementById('text').style.height = 'auto';
+      }
+      pin = true; unread = 0; queueLogRender(id);
+    }
+  } catch (error) { if (current === id) document.getElementById('status').textContent = error.message; }
+  finally { sending = false; }
 };
 document.getElementById("text").addEventListener("input", acUpdate);
 

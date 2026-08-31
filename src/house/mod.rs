@@ -8,6 +8,7 @@ pub mod memory;
 pub mod profile;
 pub mod prompt;
 pub mod resources;
+mod roster;
 pub mod secret;
 pub mod serve;
 pub mod tools;
@@ -15,13 +16,15 @@ pub mod usage;
 pub mod wrap;
 
 #[cfg(test)]
+mod lifecycle_tests;
+#[cfg(test)]
 mod microvm_tests;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Context;
 use chrono::{Datelike, Timelike};
@@ -74,7 +77,11 @@ pub(crate) struct Inner {
     /// Held for process lifetime so the flock stays exclusive.
     #[allow(dead_code)]
     lock: std::fs::File,
-    snapshot: RwLock<HashMap<String, BotSlot>>,
+    snapshot: RwLock<roster::Roster<BotRuntime>>,
+    jobs: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    controllers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    sessions: Mutex<HashMap<String, Session>>,
+    shutdown_lock: tokio::sync::Mutex<()>,
     house_events: broadcast::Sender<Event>,
     me: Mutex<Weak<Inner>>,
     /// Last minute a routine actually fired, so a tick cannot double-send.
@@ -97,13 +104,7 @@ pub(crate) enum SecretAskResult {
 
 type MinuteStamp = (i32, u32, u32, u32, u32);
 
-enum BotSlot {
-    Creating {
-        reserved_at: Instant,
-        _spec: CreateSpec,
-    },
-    Ready(BotRuntime),
-}
+type BotSlot = roster::Slot<BotRuntime>;
 
 struct BotRuntime {
     profile: Profile,
@@ -112,6 +113,16 @@ struct BotRuntime {
     cmds: mpsc::Sender<BotCmd>,
     context: crate::working_directory::Context,
     profile_error: Option<String>,
+    session_key: String,
+    supervisor: Option<tokio::task::AbortHandle>,
+}
+
+impl Drop for BotRuntime {
+    fn drop(&mut self) {
+        if let Some(supervisor) = &self.supervisor {
+            supervisor.abort();
+        }
+    }
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -132,15 +143,26 @@ enum BotCmd {
         text: String,
         reply: tokio::sync::oneshot::Sender<Result<PromptAck, String>>,
     },
-    Abort,
     KickNow,
+    Stop(tokio::sync::oneshot::Sender<()>),
 }
 
 #[derive(Debug, Clone)]
 pub struct PromptAck {
+    pub log_id: String,
+    pub record: Option<crate::log::Record>,
     pub operation_id: String,
     pub entry_id: String,
     pub mode: &'static str,
+}
+
+#[derive(Serialize)]
+pub struct LogPage {
+    pub log_id: String,
+    pub records: Vec<crate::log::Record>,
+    pub operation_id: Option<String>,
+    pub oldest_seq: Option<u64>,
+    pub has_more: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -192,6 +214,10 @@ impl House {
         lock.try_lock()
             .map_err(|_| anyhow::anyhow!("a house is already running in this directory"))?;
 
+        let preflight = scan_checked(&project.root)?;
+        if preflight.len() > BOT_CAP {
+            anyhow::bail!("bot cap ({BOT_CAP}) exceeded");
+        }
         let name =
             crate::sandbox::Sandbox::sandbox_name_for(&project.runtime.policy, project.workspace());
         Sandbox::reclaim_namesake(&name).await.ok();
@@ -216,7 +242,11 @@ impl House {
             bind,
             sock,
             lock,
-            snapshot: RwLock::new(HashMap::new()),
+            snapshot: RwLock::new(roster::Roster::default()),
+            jobs: Mutex::new(Vec::new()),
+            controllers: Mutex::new(Vec::new()),
+            sessions: Mutex::new(HashMap::new()),
+            shutdown_lock: tokio::sync::Mutex::new(()),
             house_events,
             me: Mutex::new(Weak::new()),
             last_fired: Mutex::new(HashMap::new()),
@@ -228,7 +258,7 @@ impl House {
         });
         *inner.me.lock() = Arc::downgrade(&inner);
 
-        let mut profiles = scan_checked(&project.root)?;
+        let mut profiles = preflight;
         if profiles.is_empty() {
             crate::project::init(&project.root)?;
             profiles = scan_checked(&project.root)?;
@@ -247,8 +277,14 @@ impl House {
         // `resume_all` here would block the HTTP server until every
         // in-flight run finished (a hung tool looks like a stuck boot).
 
-        spawn_routines(inner.clone());
-        spawn_resource_observers(Arc::downgrade(&inner), inner.house_events.subscribe());
+        inner
+            .controllers
+            .lock()
+            .push(spawn_routines(Arc::downgrade(&inner)));
+        inner.controllers.lock().push(spawn_resource_observers(
+            Arc::downgrade(&inner),
+            inner.house_events.subscribe(),
+        ));
 
         Ok(Self { inner })
     }
@@ -264,14 +300,37 @@ impl House {
             .snapshot
             .read()
             .values()
-            .filter_map(|slot| {
-                let BotSlot::Ready(rt) = slot else {
-                    return None;
-                };
-                let mut value = serde_json::to_value(&rt.profile).expect("profile JSON");
-                value["profile_error"] = serde_json::json!(rt.profile_error);
-                value["cwd"] = serde_json::json!(rt.context.cwd());
-                Some(value)
+            .filter_map(|slot| match slot {
+                BotSlot::Ready(rt) => {
+                    let mut value = serde_json::to_value(&rt.profile).expect("profile JSON");
+                    value["profile_error"] = serde_json::json!(rt.profile_error);
+                    value["cwd"] = serde_json::json!(rt.context.cwd());
+                    value["log_id"] = serde_json::json!(rt.session.id());
+                    value["status"] = "ready".into();
+                    Some(value)
+                }
+                BotSlot::Deleting {
+                    profile,
+                    error,
+                    retryable,
+                    ..
+                } => {
+                    let mut value = serde_json::to_value(profile).expect("profile JSON");
+                    value["profile_error"] = serde_json::json!(
+                        error
+                            .as_deref()
+                            .unwrap_or("Deleting: waiting for owned work to stop")
+                    );
+                    value["status"] = if error.is_some() {
+                        "delete_failed"
+                    } else {
+                        "deleting"
+                    }
+                    .into();
+                    value["delete_retryable"] = (*retryable).into();
+                    Some(value)
+                }
+                _ => None,
             })
             .collect();
         views.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
@@ -298,8 +357,13 @@ impl House {
         out
     }
 
-    pub async fn prompt(&self, bot: &str, text: &str) -> anyhow::Result<PromptAck> {
-        self.inner.prompt(bot, text).await
+    pub async fn prompt(
+        &self,
+        bot: &str,
+        text: &str,
+        log_id: Option<&str>,
+    ) -> anyhow::Result<PromptAck> {
+        self.inner.prompt(bot, text, log_id).await
     }
 
     pub async fn abort(&self, bot: &str) -> anyhow::Result<()> {
@@ -309,6 +373,60 @@ impl House {
     pub async fn transcript(&self, bot: &str) -> anyhow::Result<Vec<crate::entry::Entry>> {
         let harness = self.inner.ready_harness(bot)?;
         Ok(harness.session().transcript(MAIN_LANE).await?)
+    }
+
+    pub async fn log_record(
+        &self,
+        bot: &str,
+        entry: crate::ids::EntryId,
+    ) -> anyhow::Result<Option<crate::log::Record>> {
+        Ok(self
+            .inner
+            .ready_harness(bot)?
+            .log_record(MAIN_LANE, entry)
+            .await?)
+    }
+
+    pub async fn log_page(
+        &self,
+        bot: &str,
+        before: Option<u64>,
+        limit: usize,
+    ) -> anyhow::Result<LogPage> {
+        use crate::log::Status;
+        let harness = self.inner.ready_harness(bot)?;
+        let rows = harness.log_snapshot(MAIN_LANE).await?;
+        let operation_id = harness
+            .session()
+            .lane_state(MAIN_LANE)
+            .await?
+            .and_then(|(state, _)| state.current_operation_id.map(|id| id.to_string()));
+        let mut committed: Vec<_> = rows
+            .iter()
+            .filter(|r| r.status == Status::Committed && before.is_none_or(|seq| r.order < seq))
+            .cloned()
+            .collect();
+        let limit = limit.clamp(1, 200);
+        let has_more = committed.len() > limit;
+        if has_more {
+            committed.drain(..committed.len() - limit);
+        }
+        if before.is_none() {
+            committed.extend(rows.into_iter().filter(|r| r.status != Status::Committed));
+        }
+        committed.sort_by_key(|r| r.order);
+        let oldest_seq = committed
+            .iter()
+            .filter(|r| r.status == Status::Committed)
+            .map(|r| r.order)
+            .min();
+        Ok(LogPage {
+            records: committed,
+            has_more,
+            oldest_seq,
+            operation_id,
+            log_id: harness.session().id().into(),
+        })
     }
 
     pub async fn transcript_page(
@@ -331,8 +449,11 @@ impl House {
     }
 
     pub async fn set_bot_soul(&self, bot: &str, text: &str) -> anyhow::Result<()> {
-        self.inner.ready_harness(bot)?;
+        let expected = self.inner.ready_harness(bot)?.session().id().to_string();
         let _guard = self.inner.profile_edits.lock().await;
+        if self.inner.ready_harness(bot)?.session().id() != expected {
+            anyhow::bail!("bot was replaced during soul update");
+        }
         let relative = home::relative(bot)?.join("SOUL.md");
         files::Change {
             before: files::read_optional(&self.inner.project.root, &relative)?,
@@ -400,8 +521,9 @@ impl House {
         self.inner.complete_secret(bot, decision).await
     }
 
-    pub fn subscribe(&self, bot: &str) -> anyhow::Result<broadcast::Receiver<Event>> {
-        Ok(self.inner.ready_harness(bot)?.subscribe())
+    pub fn subscribe(&self, bot: &str) -> anyhow::Result<(String, broadcast::Receiver<Event>)> {
+        let harness = self.inner.ready_harness(bot)?;
+        Ok((harness.session().id().into(), harness.subscribe()))
     }
 
     pub fn subscribe_house(&self) -> broadcast::Receiver<Event> {
@@ -446,19 +568,30 @@ impl House {
     }
 
     pub async fn shutdown(&self) -> anyhow::Result<()> {
-        let sessions: Vec<_> = self
-            .inner
-            .snapshot
-            .read()
-            .values()
-            .filter_map(|slot| match slot {
-                BotSlot::Ready(rt) => Some(rt.session.clone()),
-                _ => None,
-            })
-            .collect();
-        for session in sessions {
+        let _shutdown = self.inner.shutdown_lock.lock().await;
+        let runtimes = self.inner.snapshot.write().close();
+        let jobs = std::mem::take(&mut *self.inner.jobs.lock());
+        for job in &jobs {
+            job.abort();
+        }
+        for job in jobs {
+            let _ = job.await;
+        }
+        for runtime in &runtimes {
+            runtime.harness.close().await;
+        }
+        let sessions = std::mem::take(&mut *self.inner.sessions.lock());
+        for (_, session) in sessions {
             session.close().await;
         }
+        let controllers = std::mem::take(&mut *self.inner.controllers.lock());
+        for controller in &controllers {
+            controller.abort();
+        }
+        for controller in controllers {
+            let _ = controller.await;
+        }
+        drop(runtimes);
         self.inner.sandbox.release_hold().await;
         self.inner.sandbox.stop().await?;
         let _ = std::fs::remove_file(self.inner.project.state_dir().join("house.json"));
@@ -482,6 +615,39 @@ impl House {
 }
 
 impl Inner {
+    /// Mutation jobs belong to the house, not a disconnecting HTTP request or
+    /// an aborted caller tool. Registration linearizes with house shutdown.
+    async fn owned<T, F>(self: &Arc<Self>, work: F) -> anyhow::Result<T>
+    where
+        T: Send + 'static,
+        F: std::future::Future<Output = anyhow::Result<T>> + Send + 'static,
+    {
+        let rx = {
+            let roster = self.snapshot.read();
+            if roster.is_closed() {
+                anyhow::bail!("house is closing");
+            }
+            roster::spawn_job(&self.jobs, work)
+        };
+        rx.await
+            .map_err(|_| anyhow::anyhow!("house mutation stopped"))?
+            .map_err(anyhow::Error::msg)
+    }
+
+    fn announce_roster(&self) {
+        let ids = self
+            .snapshot
+            .read()
+            .iter()
+            .filter_map(|(id, slot)| {
+                (!matches!(slot, BotSlot::Creating { .. })).then_some(id.clone())
+            })
+            .collect();
+        let _ = self
+            .house_events
+            .send(Event::new("house", None, Kind::RosterChanged { ids }));
+    }
+
     pub(crate) async fn workspace_changed(
         &self,
         bot: &str,
@@ -531,10 +697,7 @@ impl Inner {
     fn refresh_profiles(&self) {
         let mut changed = false;
         let mut snap = self.snapshot.write();
-        for (id, slot) in snap.iter_mut() {
-            let BotSlot::Ready(rt) = slot else {
-                continue;
-            };
+        for (id, rt) in snap.ready_mut() {
             changed |= profile::refresh(
                 &self.project.root,
                 id,
@@ -574,8 +737,11 @@ impl Inner {
         bot: &str,
         request: memory::Request,
     ) -> anyhow::Result<String> {
-        self.ready_harness(bot)?;
+        let expected = self.ready_harness(bot)?.session().id().to_string();
         let _guard = self.memory_edits.lock().await;
+        if self.ready_harness(bot)?.session().id() != expected {
+            anyhow::bail!("bot was replaced during memory update");
+        }
         let profile = Profile::load_for(&self.project.root, bot)?;
         let planned = memory::plan(&self.project.root, &profile, &request, chrono::Utc::now())?;
         if let Some(change) = planned.change {
@@ -593,7 +759,7 @@ impl Inner {
             .values()
             .filter_map(|slot| match slot {
                 BotSlot::Ready(rt) => Some(rt.profile.clone()),
-                BotSlot::Creating { .. } => None,
+                _ => None,
             })
             .collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -609,18 +775,27 @@ impl Inner {
         }
     }
 
-    async fn prompt(&self, bot: &str, text: &str) -> anyhow::Result<PromptAck> {
-        let harness = self.ready_harness(bot)?;
-        self.context(bot)?
-            .change(harness.session(), MAIN_LANE, &self.sandbox, ".")
-            .await?;
-        let tx = {
-            let snap = self.snapshot.read();
-            match snap.get(bot) {
-                Some(BotSlot::Ready(rt)) => rt.cmds.clone(),
-                _ => anyhow::bail!("unknown bot {bot}"),
+    async fn prompt(
+        &self,
+        bot: &str,
+        text: &str,
+        expected: Option<&str>,
+    ) -> anyhow::Result<PromptAck> {
+        let (harness, context, tx) = {
+            let roster = self.snapshot.read();
+            match roster.get(bot) {
+                Some(BotSlot::Ready(rt)) => {
+                    if expected.is_some_and(|id| id != rt.session.id()) {
+                        anyhow::bail!("bot was replaced; refresh before sending");
+                    }
+                    (rt.harness.clone(), rt.context.clone(), rt.cmds.clone())
+                }
+                _ => anyhow::bail!("unknown or unavailable bot {bot}"),
             }
         };
+        context
+            .change(harness.session(), MAIN_LANE, &self.sandbox, ".")
+            .await?;
         let skills =
             crate::skills::catalog_for(&self.project.workspace(), &self.project.bot_dir(bot));
         let (updated, removed) = {
@@ -647,7 +822,7 @@ impl Inner {
             &removed,
             &wrap::timestamp_now(),
         );
-        let wrapped = wrap::with_cwd(&wrapped, &self.context(bot)?.cwd());
+        let wrapped = wrap::with_cwd(&wrapped, &context.cwd());
         let (reply, rx) = tokio::sync::oneshot::channel();
         tx.send(BotCmd::UserText {
             text: wrapped,
@@ -661,14 +836,7 @@ impl Inner {
     }
 
     async fn abort_bot(&self, bot: &str) -> anyhow::Result<()> {
-        let (harness, cmds) = {
-            let snap = self.snapshot.read();
-            match snap.get(bot) {
-                Some(BotSlot::Ready(rt)) => (rt.harness.clone(), rt.cmds.clone()),
-                _ => anyhow::bail!("unknown bot {bot}"),
-            }
-        };
-        let _ = cmds.send(BotCmd::Abort).await;
+        let harness = self.ready_harness(bot)?;
         match harness.abort(MAIN_LANE).await {
             Ok(()) | Err(HarnessError::Idle(_)) => Ok(()),
             Err(e) => Err(e.into()),
@@ -744,6 +912,19 @@ impl Inner {
     }
 
     async fn spawn_ready(self: &Arc<Self>, profile: Profile) -> anyhow::Result<()> {
+        let token = self.snapshot.write().reserve(&profile.id)?;
+        let mut guard = CreateGuard {
+            inner: self.clone(),
+            id: profile.id.clone(),
+            token: token.clone(),
+            finished: false,
+        };
+        self.prepare_ready(profile, &token).await?;
+        guard.finished = true;
+        Ok(())
+    }
+
+    async fn prepare_ready(self: &Arc<Self>, profile: Profile, token: &str) -> anyhow::Result<()> {
         let id = profile.id.clone();
         profile::validate_id(&id)?;
         home::ensure(&self.sandbox, &profile).await?;
@@ -755,13 +936,18 @@ impl Inner {
         let storage = Storage::open_beneath(
             &self.project.root,
             session_path.strip_prefix(&self.project.root)?,
-            &id,
+            format!("{id}:{token}"),
             Some(home::guest(&id)?),
         )?;
         let session = Session::spawn(storage);
+        self.sessions.lock().insert(token.into(), session.clone());
         let model = resolve_model(&self.project, profile.model.as_deref());
         let context = crate::working_directory::Context::new(&id)?;
-        context.restore(&session, MAIN_LANE, &self.sandbox).await?;
+        if let Err(error) = context.restore(&session, MAIN_LANE, &self.sandbox).await {
+            session.close().await;
+            self.sessions.lock().remove(token);
+            return Err(error);
+        }
         let toolbox = Toolbox::for_context(
             self.sandbox.clone(),
             self.project.runtime_arc(),
@@ -843,14 +1029,37 @@ impl Inner {
         let runtime = BotRuntime {
             profile: profile.clone(),
             harness: harness.clone(),
-            session,
+            session: session.clone(),
             cmds: cmds.clone(),
             context,
             profile_error: None,
+            session_key: token.into(),
+            supervisor: None,
         };
-        {
+        let published = {
             let mut snap = self.snapshot.write();
-            snap.insert(id.clone(), BotSlot::Ready(runtime));
+            match snap.publish(&id, token, runtime) {
+                Ok(()) => {
+                    let handle =
+                        spawn_supervisor(harness, cmd_rx, Arc::downgrade(self), id.clone());
+                    let abort = handle.abort_handle();
+                    let mut controllers = self.controllers.lock();
+                    controllers.retain(|h| !h.is_finished());
+                    controllers.push(handle);
+                    for (key, runtime) in snap.ready_mut() {
+                        if key == &id {
+                            runtime.supervisor = Some(abort.clone());
+                        }
+                    }
+                    Ok(())
+                }
+                Err((error, runtime)) => Err((error, runtime)),
+            }
+        };
+        if let Err((error, _runtime)) = published {
+            session.close().await;
+            self.sessions.lock().remove(token);
+            return Err(error.into());
         }
         {
             let catalog =
@@ -861,7 +1070,6 @@ impl Inner {
                 .collect();
             self.skill_seen.lock().insert(id.clone(), snap);
         }
-        spawn_supervisor(harness, cmd_rx, Arc::downgrade(self), id.clone());
         let _ = self.house_events.send(Event::new(
             "house",
             None,
@@ -873,20 +1081,27 @@ impl Inner {
     }
 
     pub(crate) async fn create_bot(self: &Arc<Self>, spec: CreateSpec) -> anyhow::Result<Profile> {
-        let reserved = self.reserve_create(spec.clone())?;
+        let inner = self.clone();
+        self.owned(async move { inner.create_inner(spec).await })
+            .await
+    }
+
+    async fn create_inner(self: &Arc<Self>, spec: CreateSpec) -> anyhow::Result<Profile> {
+        let (reserved, token) = self.reserve_create(spec.clone())?;
         let guard = CreateGuard {
             inner: Arc::clone(self),
             id: reserved.id.clone(),
+            token: token.clone(),
             finished: false,
         };
         self.write_bot_files(&reserved, &spec).await?;
-        self.finish_create(&reserved.id).await?;
+        self.finish_create(&reserved.id, &token).await?;
         let mut guard = guard;
         guard.finished = true;
         Ok(reserved)
     }
 
-    fn reserve_create(&self, spec: CreateSpec) -> anyhow::Result<Profile> {
+    fn reserve_create(&self, spec: CreateSpec) -> anyhow::Result<(Profile, String)> {
         if spec.name.trim().is_empty() {
             anyhow::bail!("agent name cannot be blank");
         }
@@ -897,12 +1112,9 @@ impl Inner {
             resolve_model_checked(&self.project, model).map_err(anyhow::Error::msg)?;
         }
         let mut snap = self.snapshot.write();
-        if snap.len() >= BOT_CAP {
-            anyhow::bail!("bot cap ({BOT_CAP}) reached");
-        }
         let base = slug_from_name(&spec.name);
         let id = unique_slug(&base, |s| {
-            snap.contains_key(s) || self.project.bot_dir(s).try_exists().unwrap_or(true)
+            snap.contains(s) || self.project.bot_dir(s).try_exists().unwrap_or(true)
         });
         let profile = Profile {
             id: id.clone(),
@@ -915,14 +1127,8 @@ impl Inner {
             model: spec.model.clone(),
             projects: Vec::new(),
         };
-        snap.insert(
-            id,
-            BotSlot::Creating {
-                reserved_at: Instant::now(),
-                _spec: spec,
-            },
-        );
-        Ok(profile)
+        let token = snap.reserve(&id)?;
+        Ok((profile, token))
     }
 
     async fn write_bot_files(&self, profile: &Profile, spec: &CreateSpec) -> anyhow::Result<()> {
@@ -955,32 +1161,19 @@ impl Inner {
         Ok(())
     }
 
-    async fn finish_create(self: &Arc<Self>, id: &str) -> anyhow::Result<()> {
+    async fn finish_create(self: &Arc<Self>, id: &str, token: &str) -> anyhow::Result<()> {
+        if !self.snapshot.read().is_reservation(id, token) {
+            anyhow::bail!("stale create reservation");
+        }
         let profile = Profile::load_for(&self.project.root, id)?;
-        {
-            let snap = self.snapshot.read();
-            match snap.get(id) {
-                Some(BotSlot::Creating { .. }) => {}
-                _ => anyhow::bail!("finish create: {id} is not reserved"),
-            }
-        }
-        self.spawn_ready(profile).await?;
-        Ok(())
+        self.prepare_ready(profile, token).await
     }
 
-    fn abort_create(&self, id: &str) {
-        let mut snap = self.snapshot.write();
-        if matches!(snap.get(id), Some(BotSlot::Creating { .. })) {
-            snap.remove(id);
+    fn abort_create(&self, id: &str, token: &str) {
+        let changed = self.snapshot.write().abandon(id, token);
+        if changed {
+            self.announce_roster();
         }
-    }
-
-    fn sweep_creating(&self) {
-        let mut snap = self.snapshot.write();
-        snap.retain(|_, slot| match slot {
-            BotSlot::Creating { reserved_at, .. } => reserved_at.elapsed().as_secs() < 30,
-            BotSlot::Ready(_) => true,
-        });
     }
 
     pub(crate) async fn patch_profile(
@@ -988,8 +1181,11 @@ impl Inner {
         id: &str,
         patch: serde_json::Value,
     ) -> anyhow::Result<Profile> {
-        self.ready_harness(id)?;
+        let expected = self.ready_harness(id)?.session().id().to_string();
         let _guard = self.profile_edits.lock().await;
+        if self.ready_harness(id)?.session().id() != expected {
+            anyhow::bail!("bot was replaced during profile update");
+        }
         let relative = home::relative(id)?.join("profile.json");
         let before = files::read_optional(&self.project.root, &relative)?
             .ok_or_else(|| anyhow::anyhow!("profile.json is missing"))?;
@@ -1015,35 +1211,86 @@ impl Inner {
         Ok(profile)
     }
 
-    async fn delete_bot(&self, id: &str) -> anyhow::Result<()> {
-        if self.ready_profiles().len() <= 1 {
-            anyhow::bail!("cannot delete the last bot");
-        }
-        let (harness, session, cmds) = {
-            let snap = self.snapshot.read();
-            match snap.get(id) {
-                Some(BotSlot::Ready(rt)) => {
-                    (rt.harness.clone(), rt.session.clone(), rt.cmds.clone())
-                }
-                _ => anyhow::bail!("unknown bot {id}"),
-            }
+    async fn delete_bot(self: &Arc<Self>, id: &str) -> anyhow::Result<()> {
+        let inner = self.clone();
+        let id = id.to_string();
+        self.owned(async move { inner.delete_inner(&id).await })
+            .await
+    }
+
+    async fn delete_inner(self: &Arc<Self>, id: &str) -> anyhow::Result<()> {
+        let _files = self.profile_edits.lock().await;
+        let (token, runtime) = {
+            let mut roster = self.snapshot.write();
+            let profile = match roster.get(id) {
+                Some(BotSlot::Ready(rt)) => rt.profile.clone(),
+                Some(BotSlot::Deleting { profile, .. }) => (**profile).clone(),
+                Some(_) => anyhow::bail!("bot is still creating"),
+                None => anyhow::bail!("unknown bot {id}"),
+            };
+            roster.begin_delete(id, profile)?
         };
-        let _ = cmds.send(BotCmd::Abort).await;
-        let _ = harness.abort(MAIN_LANE).await;
-        session.close().await;
-        let path = home::guest(id)?;
-        let result = self
-            .sandbox
-            .exec(
-                &format!("rm -rf -- {}", shell_words::quote(&path)),
-                crate::sandbox::ExecOptions::default(),
-                None,
-            )
-            .await?;
-        if !result.success || result.cancelled {
-            anyhow::bail!("could not delete bot home: {}", result.stderr);
+        self.announce_roster();
+        if let Some(runtime) = runtime {
+            let stopped = async {
+                let (reply, rx) = tokio::sync::oneshot::channel();
+                runtime.cmds.send(BotCmd::Stop(reply)).await.map_err(|_| {
+                    anyhow::anyhow!("supervisor unavailable; restart the house before deleting")
+                })?;
+                rx.await.map_err(|_| {
+                    anyhow::anyhow!(
+                        "supervisor failed to quiesce; restart the house before deleting"
+                    )
+                })?;
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            if let Err(error) = stopped {
+                runtime.harness.close().await;
+                self.snapshot
+                    .write()
+                    .fail_delete(id, &token, error.to_string(), false);
+                self.announce_roster();
+                return Err(error);
+            }
+            self.sessions.lock().remove(&runtime.session_key);
         }
-        self.snapshot.write().remove(id);
+        let removed = async {
+            let relative = home::relative(id)?;
+            let output = self
+                .sandbox
+                .exec(
+                    &format!("cd /workspace/agents && [ \"$(pwd -P)\" = /workspace/agents ] && rm -rf -- {}", shell_words::quote(id)),
+                    crate::sandbox::ExecOptions::default(),
+                    None,
+                )
+                .await?;
+            if !output.success || output.cancelled {
+                anyhow::bail!("could not delete bot home: {}", output.stderr);
+            }
+            match crate::script_fs::open_dir(&self.project.root, &relative) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                Err(error) => return Err(error.into()),
+                Ok(_) => anyhow::bail!("home still exists after guest removal"),
+            }
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        match removed {
+            Ok(()) => {
+                self.snapshot.write().finish_delete(id, &token)?;
+                self.skill_seen.lock().remove(id);
+                self.secret_asks.lock().remove(id);
+            }
+            Err(error) => {
+                self.snapshot
+                    .write()
+                    .fail_delete(id, &token, error.to_string(), true);
+                self.announce_roster();
+                return Err(error);
+            }
+        }
+        self.announce_roster();
         Ok(())
     }
 
@@ -1053,7 +1300,6 @@ impl Inner {
         to: &str,
         text: &str,
     ) -> anyhow::Result<String> {
-        self.sweep_creating();
         self.refresh_profiles();
         let (target_harness, target_cmds, from_name, to_name) = {
             let snap = self.snapshot.read();
@@ -1089,28 +1335,29 @@ impl Inner {
         Ok(format!("sent to {to_name}"))
     }
 
-    pub(crate) async fn send_user_message(&self, bot: &str, text: &str) -> anyhow::Result<()> {
+    pub(crate) async fn send_user_message(
+        &self,
+        bot: &str,
+        text: &str,
+    ) -> anyhow::Result<crate::ids::EntryId> {
         let harness = self.ready_harness(bot)?;
         let notice = PendingEntry::custom(
             "user_notice",
             serde_json::json!({ "text": text, "bot": bot }),
         );
-        let persist = match harness.write_entry(MAIN_LANE, notice.clone()).await {
-            Ok(_) => Ok(()),
-            Err(HarnessError::Idle(_)) => harness.place_idle(MAIN_LANE, notice).await.map(|_| ()),
-            Err(e) => Err(e),
-        };
-        let event = Kind::UserNotice {
-            bot_id: bot.into(),
-            text: text.into(),
-        };
-        // The UI websocket is the bot harness stream. house_events is a
-        // house-wide bus and is not what the chat page is subscribed to —
-        // emitting only there meant the bubble waited for run_end reload,
-        // which never comes if the model keeps retrying this tool.
-        harness.emit_now(MAIN_LANE, event.clone());
-        let _ = self.house_events.send(Event::new(bot, None, event));
-        persist.map_err(Into::into)
+        use sha2::{Digest, Sha256};
+        let digest: String = Sha256::digest(text.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        match harness
+            .write_once(MAIN_LANE, &format!("user_notice/{digest}"), notice.clone())
+            .await
+        {
+            Ok(id) => Ok(id),
+            Err(HarnessError::Idle(_)) => Ok(harness.place_idle(MAIN_LANE, notice).await?),
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn routine_info(&self) -> Vec<RoutineInfo> {
@@ -1145,7 +1392,7 @@ impl Inner {
         let mut delivered = Vec::new();
         for (bot, text) in sends {
             let body = format!("[routine] {name}\n\n{text}");
-            self.prompt(&bot, &body).await?;
+            self.prompt(&bot, &body, None).await?;
             delivered.push(bot);
         }
         Ok(delivered)
@@ -1173,7 +1420,10 @@ impl Inner {
     }
 }
 
-fn spawn_resource_observers(house: Weak<Inner>, mut events: broadcast::Receiver<Event>) {
+fn spawn_resource_observers(
+    house: Weak<Inner>,
+    mut events: broadcast::Receiver<Event>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             let event = match events.recv().await {
@@ -1228,18 +1478,24 @@ fn spawn_resource_observers(house: Weak<Inner>, mut events: broadcast::Receiver<
                 }
             }
         }
-    });
+    })
 }
 
-fn spawn_routines(inner: Arc<Inner>) {
+fn spawn_routines(house: Weak<Inner>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        inner.fire_due_routines().await;
         loop {
+            let Some(inner) = house.upgrade() else {
+                break;
+            };
+            if inner.snapshot.read().is_closed() {
+                break;
+            }
+            inner.fire_due_routines().await;
+            drop(inner);
             let secs = 60u64.saturating_sub(chrono::Local::now().timestamp() as u64 % 60);
             tokio::time::sleep(Duration::from_secs(secs.max(1))).await;
-            inner.fire_due_routines().await;
         }
-    });
+    })
 }
 
 fn publish_busy(house: &Weak<Inner>, bot_id: &str, busy: bool) {
@@ -1261,12 +1517,13 @@ fn spawn_supervisor(
     mut cmds: mpsc::Receiver<BotCmd>,
     house: Weak<Inner>,
     bot_id: String,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let mut drives = tokio::task::JoinSet::new();
         let mut events = harness.subscribe();
         {
             let h = harness.clone();
-            tokio::spawn(async move {
+            drives.spawn(async move {
                 let _ = h.resume_all().await;
                 match h.kick(MAIN_LANE).await {
                     Ok(_) | Err(HarnessError::Idle(_)) | Err(HarnessError::Busy(_)) => {}
@@ -1280,15 +1537,26 @@ fn spawn_supervisor(
                     let Some(cmd) = cmd else { break };
                     match cmd {
                         BotCmd::UserText { text, reply } => {
-                            let ack = claim_then_drive(&harness, &text).await;
+                            let ack = claim_then_drive(&harness, &text, &mut drives).await;
                             let _ = reply.send(ack);
                         }
-                        BotCmd::Abort => {
+                        BotCmd::Stop(reply) => {
+                            cmds.close();
+                            while let Ok(cmd) = cmds.try_recv() {
+                                if let BotCmd::UserText {reply,..} = cmd { let _ = reply.send(Err("bot is stopping".into())); }
+                            }
                             let _ = harness.abort(MAIN_LANE).await;
+                            harness.close().await;
+                            publish_busy(&house, &bot_id, false);
+                            // Do not unlink a session/home while any owned effect
+                            // still runs. Close prevents late kicks from starting.
+                            while drives.join_next().await.is_some() {}
+                            let _ = reply.send(());
+                            break;
                         }
                         BotCmd::KickNow => {
                             let h = harness.clone();
-                            tokio::spawn(async move {
+                            drives.spawn(async move {
                                 match h.kick(MAIN_LANE).await {
                                     Ok(_) | Err(HarnessError::Idle(_)) | Err(HarnessError::Busy(_)) => {}
                                     Err(_) => {}
@@ -1307,7 +1575,7 @@ fn spawn_supervisor(
                                 Kind::RunEnd { .. } => {
                                     publish_busy(&house, &bot_id, false);
                                     let h = harness.clone();
-                                    tokio::spawn(async move {
+                                    drives.spawn(async move {
                                         let _ = h.kick(MAIN_LANE).await;
                                     });
                                 }
@@ -1320,7 +1588,7 @@ fn spawn_supervisor(
                                 && state.current_operation_id.is_none()
                             {
                                 let h = harness.clone();
-                                tokio::spawn(async move {
+                                drives.spawn(async move {
                                     let _ = h.kick(MAIN_LANE).await;
                                 });
                             }
@@ -1328,15 +1596,26 @@ fn spawn_supervisor(
                         Err(_) => break,
                     }
                 }
+                _ = drives.join_next(), if !drives.is_empty() => {}
             }
         }
-    });
+    })
 }
 
-async fn claim_then_drive(harness: &Arc<Harness>, text: &str) -> Result<PromptAck, String> {
+async fn claim_then_drive(
+    harness: &Arc<Harness>,
+    text: &str,
+    drives: &mut tokio::task::JoinSet<()>,
+) -> Result<PromptAck, String> {
     match harness.steer_claimed(MAIN_LANE, text).await {
         Ok((entry_id, op)) => {
             return Ok(PromptAck {
+                log_id: harness.session().id().into(),
+                record: harness
+                    .session()
+                    .log_record(entry_id.clone())
+                    .await
+                    .map_err(|e| e.to_string())?,
                 operation_id: op.to_string(),
                 entry_id: entry_id.to_string(),
                 mode: "steer",
@@ -1347,19 +1626,38 @@ async fn claim_then_drive(harness: &Arc<Harness>, text: &str) -> Result<PromptAc
     }
     match harness.begin_run(MAIN_LANE, text).await {
         Ok(current) => {
+            let crate::state::Intent::Run {
+                prompt_entry_ids, ..
+            } = &current.operation.intent
+            else {
+                unreachable!()
+            };
+            let id = prompt_entry_ids.first().expect("accepted prompt").clone();
             let ack = PromptAck {
+                log_id: harness.session().id().into(),
+                record: harness
+                    .session()
+                    .log_record(id.clone())
+                    .await
+                    .map_err(|e| e.to_string())?,
                 operation_id: current.operation.operation_id.to_string(),
-                entry_id: String::new(),
+                entry_id: id.to_string(),
                 mode: "prompt",
             };
             let harness = harness.clone();
-            tokio::spawn(async move {
+            drives.spawn(async move {
                 let _ = harness.drive(current).await;
             });
             Ok(ack)
         }
         Err(HarnessError::Busy(_)) => match harness.steer_claimed(MAIN_LANE, text).await {
             Ok((entry_id, op)) => Ok(PromptAck {
+                log_id: harness.session().id().into(),
+                record: harness
+                    .session()
+                    .log_record(entry_id.clone())
+                    .await
+                    .map_err(|e| e.to_string())?,
                 operation_id: op.to_string(),
                 entry_id: entry_id.to_string(),
                 mode: "steer",
@@ -1373,13 +1671,14 @@ async fn claim_then_drive(harness: &Arc<Harness>, text: &str) -> Result<PromptAc
 struct CreateGuard {
     inner: Arc<Inner>,
     id: String,
+    token: String,
     finished: bool,
 }
 
 impl Drop for CreateGuard {
     fn drop(&mut self) {
         if !self.finished {
-            self.inner.abort_create(&self.id);
+            self.inner.abort_create(&self.id, &self.token);
         }
     }
 }
