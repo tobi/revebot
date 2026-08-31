@@ -7,6 +7,15 @@ cut is recorded here.
 
 Reve is one Rust crate (edition 2024, version 0.1.0) with Lua for scripting.
 
+**Quality gate.** Package-wide `[lints.rust]` / `[lints.clippy]` in `Cargo.toml`
+apply to the library and every binary/test/example target. The policy includes
+pedantic checks, production panic paths and unchecked slicing, unsafe hygiene,
+debugging placeholders, and synchronous locks/refcell borrows across await.
+`clippy.toml` grants the narrow test panic/debug exemptions. `make ci` is the
+single local/CI definition: formatting, rustc warnings-as-errors, strict Clippy
+with `-D warnings`, and locked tests. MicroVM tests are not enabled by this gate.
+Violations fail the gate; no baseline or blanket suppression hides existing debt.
+
 ## 0. Why Rust, and what the type system is doing for us
 
 The specification's central structural claim is **one writer per session**. In most

@@ -457,12 +457,19 @@ standalone CLI tool command; normal TUI turns run the durable lane.
 ## Development
 
 ```bash
-cargo test
-cargo test --test microvm -- --ignored   # opt-in real microVM tests
-cargo clippy
-cargo fmt --check
-reve --version
+make ci                                 # the same strict gate as GitHub Actions
+make warnings                           # rustc warnings are errors, all targets
+make clippy                             # strict lint policy, all targets, -D warnings
+make test                               # cargo test --locked
+make fmt-check                          # check formatting
+cargo test --locked --test microvm -- --ignored  # opt-in real microVM tests
+revebot --version
 ```
+
+The lint policy lives in `Cargo.toml`: pedantic checks, production panic paths,
+unsafe hygiene, debugging leftovers, and locks/borrows held across await. Tests get
+narrow panic-path exemptions from `clippy.toml`. Exceptions require a local,
+reviewed justification—not a crate-wide allow or a weakened CI command.
 
 Requirements: Rust 1.91+, Linux with KVM or macOS on Apple Silicon. The repository itself
 is also an ordinary Reve agent directory for development purposes. Tests create isolated

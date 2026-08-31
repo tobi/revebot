@@ -24,9 +24,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Check formatting
-        run: cargo fmt --check
-      - name: Lint
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Test
-        run: cargo test
+      # Keep the gate definition in Makefile, shared with local development.
+      - name: Strict checks
+        run: make ci
