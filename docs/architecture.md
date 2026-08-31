@@ -310,7 +310,9 @@ Two layers hold the durable rules. The **design** is model-checked: `docs/tla/Du
 equivalence) and `docs/tla/DurableHarness.tla` (pending/entry exclusivity, one operation per
 lane, lane-owned `nextRun`, abort-drain payload survival, `aborted` only under cancel,
 intent-before-effect, source-ordered parallel tool batches with `op.tool_args` lifecycle, no
-re-dispatch of an interrupted `never` tool, every tool call has a result, terminal cleanup) are
+re-dispatch of an interrupted `never` tool, every tool call has a result, terminal cleanup) and
+`docs/tla/VmLifecycle.tla` (one microVM shared by every bot: fingerprint honesty across failed
+rebuilds, hold vs idle stop, secret updates landing at the next effect-idle acquire) are
 explored exhaustively on bounded constants by `make tla`, with a mutation table in
 `docs/tla/README.md` proving each invariant can fail. The **implementation** is held by the
 Rust tests below. When a row here and an `Inv*` there disagree, one of them is wrong; fix the

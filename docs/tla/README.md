@@ -1,7 +1,8 @@
 # Model-checked invariants
 
-Two TLA+ specifications pin the parts of [`docs/harness.md`](../harness.md) where a
-wrong ordering silently corrupts a session. They are checked with
+Three TLA+ specifications pin the parts of [`docs/harness.md`](../harness.md) and of
+the microVM lifecycle where a wrong ordering silently corrupts a session or runs a bot
+against the wrong guest. They are checked with
 [tla-rs](https://github.com/fabracht/tla-rs) (`cargo install tla-checker --bin tla`)
 by `make tla`, which `make ci` runs. Every reachable state of the bounded model is
 checked against every `Inv*`/`TypeOK` definition; a violation prints the shortest
@@ -121,10 +122,74 @@ invariant on the small configuration:
 | Dispatch allowed under cancel *and* abort leaves calls armed | `InvNoNewEffectUnderCancel` (each alone is covered by the other guard) |
 | Terminal transaction while a call is still `effect_pending` | `InvEveryToolCallHasResult` |
 
+## `VmLifecycle.tla` — one microVM, many bots, and updates (`src/sandbox.rs`, `src/house/mod.rs`)
+
+The VM has a lifecycle of its own: built from `config.yml` and remembered by
+`.reve/sandbox-fingerprint`; started on the first effect; idle-stopped 30 s after the
+last; pinned by the house's `hold()` for the process lifetime; carrying a secret set
+that microsandbox reads only when the guest starts. Three views of that state are
+modelled — **desired** (host: `policy`, `desired` secret version), **defined** (the
+persisted microsandbox definition: `vmDisk`, `vmDefined`), **effective** (the running
+guest: `vmEffective`) — plus the process (`house`, `held`, `active` effects, the
+`secret_digests` bookkeeping, the idle timer) and two bots issuing effects.
+
+Actions are the updates that can arrive while bots are mid-effect: `EditPolicy`,
+`RotateHostSecret` (env var changed behind Reve's back), `UpsertSecret`
+(AskUserForSecret saved), `HouseBoot` (reclaim → reuse-by-fingerprint or
+`build().replace()` with provisioning that may fail → optional hold), `HouseStop`,
+`HouseCrash` (VM left running, reclaimed next boot), `HouseCrashMidBuild`, and
+`Acquire`/`Release`/`IdleStop` for effects.
+
+| Invariant | Rule |
+|---|---|
+| `InvEffectNeedsRunningVm` | An effect only ever runs against a running guest (the idle timer's generation guard). |
+| `InvHeldVmStaysUp` | A hold prevents idle stop. |
+| `InvNoAdoptedVm` | A dead process's VM is reclaimed, never adopted with live effects. |
+| `InvFingerprintHonest` | If the fingerprint names a policy, the disk was built from it *and* provisioned. |
+| `InvRunningDiskMatchesBootPolicy` | The house runs the disk for the `config.yml` it booted with (edits wait for the next boot). |
+| `InvDigestsDescribeGuest` | `secret_digests` describes the running guest, never merely the definition. |
+| `InvIdleAcquireIsFresh` | An effect that starts while no other effect is live sees the host's current secret set. |
+
+### What the model caught (and what changed in Rust)
+
+1. **Wrong disk for the config.** `build()` uses `.replace()` under the same name, but
+   the fingerprint file was rewritten only after provisioning succeeded. Trace: boot
+   `p1` → edit to `p2` → boot, provisioning fails (or the process dies mid-build) →
+   revert to `p1` → boot: the file still says `p1`, matches, and the **p2 disk is
+   reused**. Fix: `forget_fingerprint` before `build()`
+   (`sandbox::tests::a_rebuild_forgets_the_old_fingerprint_before_replacing_the_disk`).
+2. **A saved secret never reached the guest.** `upsert_secret` applied the new
+   definition with `next_start` (microsandbox: adding a secret to a running VM requires
+   a restart) and then recorded the new digest as if the guest had it. `acquire`'s
+   restart branch requires `active == 0`, and the house's `hold()` counted as an
+   effect — so in house mode no secret change could ever land. Fix: `VmState.holds` is
+   separate from `active` (a hold blocks idle stop, not a rotation restart), and
+   `upsert_secret` leaves `secret_digests` describing the guest
+   (`sandbox::tests::a_hold_blocks_idle_stop_but_not_a_secret_restart`).
+3. Same root cause for a host environment rotation while the house holds the VM.
+
+Known, deliberate gap (`CovStaleUnderConcurrency` is non-zero): an effect that starts
+while *another* effect is live shares that guest and may see the previous secret set;
+the restart happens at the next effect-idle acquire. Making the second effect wait for
+the first would need a notify-based `acquire`; see DECISION in the merge notes.
+
+Not modelled: a second Reve process racing for the same VM name (the `Locked` refusal
+is one line of code and needs two processes to be interesting), the `Draining`
+status, `revebot exec` outside a house.
+
+| Injected bug | Caught by |
+|---|---|
+| Failed build keeps the stale fingerprint (pre-fix) | `InvFingerprintHonest` |
+| Crash mid-build keeps the fingerprint (pre-fix) | `InvFingerprintHonest` |
+| `upsert_secret` claims the new digest on a running guest (pre-fix) | `InvDigestsDescribeGuest` |
+| Hold counts as an effect (pre-fix) | `InvIdleAcquireIsFresh` |
+| Stale idle timer stops a guest with a live effect | `InvEffectNeedsRunningVm` |
+| Idle timer ignores the hold | `InvHeldVmStaysUp` |
+
 ## Running
 
 ```
-make tla                         # CI size: ~2.5 min, ~78k states across both specs
+make tla                         # CI size: ~2.5 min, ~82k states across the three specs
 make tla-deep                    # 5 entry ids, MaxSeq 8; opt-in, long
 tla docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.small.cfg \
     -s EntryIds -s OpIds -s Lanes -i                                            # step through

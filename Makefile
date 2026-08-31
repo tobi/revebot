@@ -28,13 +28,14 @@ clippy:
 test:
 	cargo test --locked
 
-# Model-check the durable log and the lane/inbox state machine against
-# docs/harness.md. Needs `tla` (cargo install tla-checker --bin tla).
+# Model-check the durable log, the lane/inbox state machine (docs/harness.md)
+# and the shared microVM lifecycle (src/sandbox.rs) against their invariants. Needs `tla` (cargo install tla-checker --bin tla).
 # The small harness configuration is the CI size; `tla-deep` is opt-in.
 TLA ?= tla
 tla:
 	$(TLA) docs/tla/DurableLog.tla --config docs/tla/DurableLog.cfg --max-states 3000000
 	$(TLA) docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.small.cfg -s EntryIds -s OpIds -s Lanes --max-states 3000000
+	$(TLA) docs/tla/VmLifecycle.tla --config docs/tla/VmLifecycle.cfg -s Bots -s Policies --max-states 3000000
 
 tla-deep:
 	$(TLA) docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.cfg -s EntryIds -s OpIds -s Lanes --max-states 20000000

@@ -368,8 +368,16 @@ pub struct Sandbox {
 
 struct VmState {
     vm: Option<MsbSandbox>,
+    /// Live effects: execs and file operations that hold a cloned handle.
     active: usize,
+    /// [`Sandbox::hold`]s. A hold keeps the guest from idle-stopping but is
+    /// not an effect: it must not stop a secret-rotation restart, or a house
+    /// (which holds for its whole lifetime) could never pick up a saved
+    /// secret. `docs/tla/VmLifecycle.tla` `InvIdleAcquireIsFresh`.
+    holds: usize,
     generation: u64,
+    /// Digest of the secret values the *running guest* was started with.
+    /// Cleared on every stop; compared against the host at every acquire.
     secret_digests: BTreeMap<String, String>,
 }
 
@@ -382,11 +390,28 @@ impl VmState {
     fn finish(&mut self) -> Option<u64> {
         self.active = self.active.saturating_sub(1);
         self.generation = self.generation.wrapping_add(1);
-        (self.active == 0).then_some(self.generation)
+        (self.active == 0 && self.holds == 0).then_some(self.generation)
+    }
+
+    fn hold(&mut self) {
+        self.holds += 1;
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    fn release_hold(&mut self) -> Option<u64> {
+        self.holds = self.holds.saturating_sub(1);
+        self.generation = self.generation.wrapping_add(1);
+        (self.active == 0 && self.holds == 0).then_some(self.generation)
+    }
+
+    /// No effect is live; the guest may be stopped and restarted to pick up
+    /// changed secret sources. Holds do not count.
+    fn effect_idle(&self) -> bool {
+        self.active == 0
     }
 
     fn may_stop(&self, generation: u64) -> bool {
-        self.active == 0 && self.generation == generation
+        self.active == 0 && self.holds == 0 && self.generation == generation
     }
 }
 
@@ -463,6 +488,7 @@ impl Sandbox {
                     vm: Arc::new(Mutex::new(VmState {
                         vm: Some(vm),
                         active: 0,
+                        holds: 0,
                         generation: 0,
                         secret_digests,
                     })),
@@ -473,6 +499,13 @@ impl Sandbox {
             }
         }
 
+        // `build` replaces the persisted definition and disk under the same
+        // name. If provisioning fails or the process dies before the new
+        // fingerprint is written, a stale file naming an *older* policy would
+        // survive; reverting config.yml to that policy would then reuse a
+        // disk built for a different one (`docs/tla/VmLifecycle.tla`
+        // `InvFingerprintHonest`). Forget the old promise before breaking it.
+        forget_fingerprint(&fingerprint_path).await?;
         progress.stage(&format!("building microVM {name} from {}", policy.image));
         let (vm, desktop) = build(&policy, &name, &host_workspace, &secret_root).await?;
         let secret_digests = runtime_secret_digests(&policy.secrets, &secret_root);
@@ -486,6 +519,7 @@ impl Sandbox {
             vm: Arc::new(Mutex::new(VmState {
                 vm: Some(vm),
                 active: 0,
+                holds: 0,
                 generation: 0,
                 secret_digests,
             })),
@@ -558,15 +592,27 @@ impl Sandbox {
         self.desktop
     }
 
-    /// Keep the guest from idle-stopping for the lifetime of the house.
+    /// Keep the guest from idle-stopping for the lifetime of the house. A
+    /// hold is not an effect: a secret change still restarts the guest at the
+    /// next effect-idle acquire.
     pub async fn hold(&self) -> Result<()> {
         let _ = self.acquire().await?;
+        let mut state = self.vm.lock().await;
+        state.hold();
+        // acquire() counted one effect; the hold replaces it.
+        let _ = state.finish();
         Ok(())
     }
 
     /// Pair of [`hold`]: allow idle-stop again.
     pub async fn release_hold(&self) {
-        self.release().await;
+        let generation = {
+            let mut state = self.vm.lock().await;
+            state.release_hold()
+        };
+        if let Some(generation) = generation {
+            self.schedule_idle_stop(generation);
+        }
     }
 
     /// If a namesake is still Running after a dead house, stop it so
@@ -697,6 +743,7 @@ impl Sandbox {
         // draining and receive "sandbox still running".
         let mut state = self.vm.lock().await;
         state.active = 0;
+        state.holds = 0;
         state.generation = state.generation.wrapping_add(1);
         state.secret_digests.clear();
         match state.vm.take() {
@@ -760,13 +807,18 @@ impl Sandbox {
             }
         }
         let secrets = self.secrets();
-        let mut state = self.vm.lock().await;
+        let state = self.vm.lock().await;
         if let Some(vm) = state.vm.as_ref() {
+            // `next_start`: the definition changes now, the running guest does
+            // not. `secret_digests` keeps describing the guest, so the next
+            // effect-idle acquire() sees the difference and restarts. Claiming
+            // the new digest here would make a saved secret invisible for as
+            // long as the house holds the VM (`docs/tla/VmLifecycle.tla`
+            // `InvDigestsDescribeGuest`).
             let config = vm.config();
             let existing = persisted_secret_names(config);
             remove_secret_definitions(vm.modify(), &existing, true).await?;
             install_secret_definitions(vm.modify(), &secrets, true, &self.secret_root).await?;
-            state.secret_digests = runtime_secret_digests(&secrets, &self.secret_root);
         }
         Ok(())
     }
@@ -797,7 +849,7 @@ impl Sandbox {
                 SandboxError::Unavailable(format!("cannot start microVM {}: {error}", self.name))
             })?);
             state.secret_digests = desired;
-        } else if state.active == 0 && state.secret_digests != desired {
+        } else if state.effect_idle() && state.secret_digests != desired {
             let vm = state.vm.take().expect("checked above");
             vm.stop()
                 .await
@@ -823,9 +875,12 @@ impl Sandbox {
             let mut state = self.vm.lock().await;
             state.finish()
         };
-        let Some(generation) = generation else {
-            return;
-        };
+        if let Some(generation) = generation {
+            self.schedule_idle_stop(generation);
+        }
+    }
+
+    fn schedule_idle_stop(&self, generation: u64) {
         let state = Arc::clone(&self.vm);
         tokio::spawn(async move {
             tokio::time::sleep(IDLE_TIMEOUT).await;
@@ -1325,6 +1380,19 @@ fn desktop_from_config(config: &microsandbox::SandboxConfig) -> Option<Desktop> 
         novnc_port: novnc?,
         vnc_port: vnc?,
     })
+}
+
+/// Remove the fingerprint file so no policy is vouched for while the disk is
+/// being replaced. A missing file is already the wanted state.
+async fn forget_fingerprint(path: &Path) -> Result<()> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(SandboxError::Unavailable(format!(
+            "cannot invalidate sandbox fingerprint {}: {e}",
+            path.display()
+        ))),
+    }
 }
 
 /// Turn a [`Policy`] into a booted VM.
@@ -1827,11 +1895,51 @@ mod tests {
         rx.cancelled().await; // still resolved, does not hang
     }
 
+    #[tokio::test]
+    async fn a_rebuild_forgets_the_old_fingerprint_before_replacing_the_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sandbox-fingerprint");
+        std::fs::write(&path, "old-policy\n").unwrap();
+        forget_fingerprint(&path).await.unwrap();
+        assert!(!path.exists(), "a stale promise must not survive a rebuild");
+        forget_fingerprint(&path)
+            .await
+            .expect("forgetting an absent fingerprint is a no-op");
+    }
+
+    #[test]
+    fn a_hold_blocks_idle_stop_but_not_a_secret_restart() {
+        let mut state = VmState {
+            vm: None,
+            active: 0,
+            holds: 0,
+            generation: 0,
+            secret_digests: BTreeMap::new(),
+        };
+        state.hold();
+        assert!(
+            state.effect_idle(),
+            "a hold is not an effect: acquire() may restart for changed secrets"
+        );
+        state.begin();
+        assert!(!state.effect_idle());
+        assert_eq!(
+            state.finish(),
+            None,
+            "held: the last effect arms no idle timer"
+        );
+        let released = state
+            .release_hold()
+            .expect("the last hold arms the idle timer");
+        assert!(state.may_stop(released));
+    }
+
     #[test]
     fn new_activity_invalidates_an_older_idle_deadline() {
         let mut state = VmState {
             vm: None,
             active: 0,
+            holds: 0,
             generation: 0,
             secret_digests: BTreeMap::new(),
         };

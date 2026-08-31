@@ -10,6 +10,19 @@ fresh 0.1.0. The core is Rust (edition 2024); everything an agent author writes 
 configuration, project tools, sandbox policy — is Lua that vendors into the binary and
 starts in microseconds. Concurrency is tokio tasks over single-owner session state.
 
+### Fixed
+
+- A failed or interrupted microVM rebuild could leave `.reve/sandbox-fingerprint`
+  naming the *previous* policy while the disk had already been replaced; reverting
+  `config.yml` then reused a disk built for a different policy. The fingerprint is now
+  forgotten before `build()`.
+- A secret saved through `AskUserForSecret` (or rotated in the host environment) never
+  reached the guest while the house held the VM: the hold counted as a live effect, so
+  the restart that applies `next_start` secret definitions could not run, and
+  `upsert_secret` recorded the new digest as if it had. Holds are now tracked apart
+  from effects, and the digest keeps describing the running guest, so the next
+  effect-idle acquire restarts with the current secrets.
+
 ### Added
 
 - TLA+ models of the durable rules, checked by `make tla` inside `make ci` with
@@ -18,7 +31,8 @@ starts in microseconds. Concurrency is tokio tasks over single-owner session sta
   equivalence) and `docs/tla/DurableHarness.tla` (two interleaved lanes; steer, follow-up,
   deferred-write and nextRun inboxes; abort as control; the effect sandwich; parallel tool
   batches with source-ordered intent and result commits; crash and recovery; the terminal
-  transaction). Twenty `Inv*` properties, each proven falsifiable
+  transaction) and `docs/tla/VmLifecycle.tla` (the shared microVM under updates: policy
+  edits, secret saves and rotations, house crash and restart). Twenty-seven `Inv*` properties, each proven falsifiable
   by an injected bug. Modelling `cancelQueued` fixed its triage before it is implemented:
   an abort-drained id is `not_found` and keeps its payload register.
 - Default guest is [`ghcr.io/tobi/wrap:desktop`](https://github.com/tobi/wrap): unprivileged

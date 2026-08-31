@@ -89,12 +89,12 @@ touches — configuration, project tools, sandbox policy — is Lua.
   explain the invariant/safety argument. A SAFETY comment is not proof by itself.
 - Every new behaviour gets a test. Keep `make ci` green (format, rustc warnings,
   strict Clippy, tests, TLA+ model checks); the microVM tests stay opt-in.
-- **The durable rules are model-checked.** `docs/tla/DurableLog.tla` and
-  `docs/tla/DurableHarness.tla` are the executable form of the storage, lane, inbox,
-  abort, recovery and terminal rules above; `make tla` explores every reachable
+- **The durable rules are model-checked.** `docs/tla/DurableLog.tla`,
+  `docs/tla/DurableHarness.tla` and `docs/tla/VmLifecycle.tla` are the executable form
+  of the storage, lane, inbox, abort, recovery, terminal and shared-microVM rules above; `make tla` explores every reachable
   state of the bounded models. A change to a transaction shape, a queue rule, a
-  recovery policy or an invariant in `docs/harness.md` changes the spec in the same
-  commit, and a new durable rule gets an `Inv*` definition plus a mutation that
+  recovery policy or an invariant in `docs/harness.md` — or to `Sandbox` start, hold,
+  idle-stop, fingerprint or secret handling — changes the spec in the same commit, and a new durable rule gets an `Inv*` definition plus a mutation that
   violates it (see `docs/tla/README.md`). Do not weaken an invariant to make a
   trace pass; the trace is the bug report.
 
