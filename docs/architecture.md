@@ -318,7 +318,7 @@ intent-before-effect, source-ordered parallel tool batches with `op.tool_args` l
 re-dispatch of an interrupted `never` tool, every tool call has a result, terminal cleanup) and
 `docs/tla/VmLifecycle.tla` (one microVM shared by every bot: fingerprint honesty across failed
 rebuilds, hold vs idle stop, secret updates landing at the next effect-idle acquire) are
-explored exhaustively on bounded constants by `make tla`, with a mutation table in
+explored exhaustively on bounded constants by `make spec`, with a mutation table in
 `docs/tla/README.md` proving each invariant can fail. The **implementation** is held by the
 Rust tests below. When a row here and an `Inv*` there disagree, one of them is wrong; fix the
 code or the spec, never the invariant.

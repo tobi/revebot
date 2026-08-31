@@ -4,7 +4,7 @@ Three TLA+ specifications pin the parts of [`docs/harness.md`](../harness.md) an
 the microVM lifecycle where a wrong ordering silently corrupts a session or runs a bot
 against the wrong guest. They are checked with
 [tla-rs](https://github.com/fabracht/tla-rs) (`cargo install tla-checker --bin tla`)
-by `make tla`, which `make ci` runs. Every reachable state of the bounded model is
+by `make spec`, which `make ci` runs (`make tla` is an alias). Every reachable state of the bounded model is
 checked against every `Inv*`/`TypeOK` definition; a violation prints the shortest
 trace that reaches it.
 
@@ -189,8 +189,9 @@ status, `revebot exec` outside a house.
 ## Running
 
 ```
-make tla                         # CI size: ~2.5 min, ~82k states across the three specs
-make tla-deep                    # 5 entry ids, MaxSeq 8; opt-in, long
+make spec                        # CI size; what make ci runs
+make spec-full                   # deep bounds + coverage counts; up to an hour
+make spec-full REMOTE_HOST=gb300:~/src/tries/revebot   # rsync the tree there and run it
 tla docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.small.cfg \
     -s EntryIds -s OpIds -s Lanes -i                                            # step through
 ```

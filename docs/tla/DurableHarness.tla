@@ -191,22 +191,25 @@ Init ==
     /\ owes = [e \in EntryIds |-> {}]
 
 -----------------------------------------------------------------------------
-\* Lane admission. Prompt places immediately. nextRun never starts a run.
+\* Lane admission (src/harness.rs begin_run / start_pending). The prompt is
+\* reserved as a pending.entry and queued on inbox.writes; the driver's first
+\* checkpoint places it, so placement has one implementation and one crash
+\* story. nextRun never starts a run.
 
 AcceptRun(l, e, o) ==
     /\ CanCommit
     /\ Idle(l)
     /\ ~ops[o].present
     /\ Free(e)
-    /\ Place(e, leaf[l])
+    /\ pending' = [pending EXCEPT ![e] = WriteQ]
     /\ seq' = seq + 1
     /\ laneOp' = [laneOp EXCEPT ![l] = o]
-    /\ leaf' = [leaf EXCEPT ![l] = e]
-    /\ ops' = [ops EXCEPT ![o] = FreshOp]
-    /\ UNCHANGED <<abortedStop, billed, nextRun, lastOutcome, owes>>
+    /\ ops' = [ops EXCEPT ![o] = [FreshOp EXCEPT !.writes = e]]
+    /\ UNCHANGED <<placed, parent, abortedStop, billed, nextRun, leaf, lastOutcome, owes>>
 
 \* Capture a lane-owned nextRun as this run's prompt (the other order of
-\* nextRun vs acceptance). Payload is already in pending.entry.
+\* nextRun vs acceptance): the same id moves from pendingNextRun to
+\* inbox.writes; its payload register is untouched.
 AcceptCaptured(l, o) ==
     /\ CanCommit
     /\ Idle(l)
@@ -215,13 +218,12 @@ AcceptCaptured(l, o) ==
     /\ LET e == nextRun[l]
        IN /\ pending[e] = NextRun
           /\ ~placed[e]
-          /\ Place(e, leaf[l])
+          /\ pending' = [pending EXCEPT ![e] = WriteQ]
           /\ seq' = seq + 1
           /\ laneOp' = [laneOp EXCEPT ![l] = o]
-          /\ leaf' = [leaf EXCEPT ![l] = e]
           /\ nextRun' = [nextRun EXCEPT ![l] = None]
-          /\ ops' = [ops EXCEPT ![o] = FreshOp]
-          /\ UNCHANGED <<abortedStop, billed, lastOutcome, owes>>
+          /\ ops' = [ops EXCEPT ![o] = [FreshOp EXCEPT !.writes = e]]
+          /\ UNCHANGED <<placed, parent, abortedStop, billed, leaf, lastOutcome, owes>>
 
 QueueNextRun(l, e) ==
     /\ CanCommit

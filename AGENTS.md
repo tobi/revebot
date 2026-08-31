@@ -93,7 +93,7 @@ touches — configuration, project tools, sandbox policy — is Lua.
   strict Clippy, tests, TLA+ model checks); the microVM tests stay opt-in.
 - **The durable rules are model-checked.** `docs/tla/DurableLog.tla`,
   `docs/tla/DurableHarness.tla` and `docs/tla/VmLifecycle.tla` are the executable form
-  of the storage, lane, inbox, abort, recovery, terminal and shared-microVM rules above; `make tla` explores every reachable
+  of the storage, lane, inbox, abort, recovery, terminal and shared-microVM rules above; `make spec` explores every reachable
   state of the bounded models. A change to a transaction shape, a queue rule, a
   recovery policy or an invariant in `docs/harness.md` — or to `Sandbox` start, hold,
   idle-stop, fingerprint or secret handling — changes the spec in the same commit, and a new durable rule gets an `Inv*` definition plus a mutation that
@@ -111,8 +111,8 @@ touches — configuration, project tools, sandbox policy — is Lua.
     make warnings                            reject rustc warnings on all targets
     make clippy                              strict Cargo.toml policy, -D warnings
     make test                                run the locked test suite
-    make tla                                 model-check docs/tla (needs `cargo install tla-checker --bin tla`)
-    make tla-deep                            larger harness configuration, opt-in
+    make spec                                model-check docs/tla (needs `cargo install tla-checker --bin tla`)
+    make spec-full [REMOTE_HOST=host:dir]    deep bounds + coverage counts; optionally rsync and run remotely
     make eval                                offline eval catalog (no VM, no model)
     make eval ARGS='--live'                  live cases; OPENROUTER_API_KEY by default
     cargo test --test microvm -- --ignored   opt-in microVM integration tests

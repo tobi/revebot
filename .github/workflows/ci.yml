@@ -24,7 +24,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      # `make tla` model-checks docs/tla against the harness specification.
+      # `make spec` model-checks docs/tla against the harness specification.
       - name: Install TLA+ checker
         run: cargo install tla-checker@0.6.11 --bin tla
       # Keep the gate definition in Makefile, shared with local development.
