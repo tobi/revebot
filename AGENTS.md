@@ -63,6 +63,17 @@ touches — configuration, project tools, sandbox policy — is Lua.
   `src/templates/plugins_skill.md` in the same change as any Lua API. Cover all
   declarations, fields, contexts, results, scope, replay/cancellation and limits.
   Test executable examples. Do not describe planned APIs as implemented.
+- **Each agent owns its home.** `workspace/agents/<id>/SOUL.md` is its sole prose
+  identity and standing remit; `profile.json` is authoritative metadata. Never
+  inject global SOUL.md/KNOWLEDGE.md or sibling private memory. HOME is fixed;
+  default cwd is HOME/workspace. AGENTS.md is directory-scoped and follows cwd's
+  full guest ancestor chain, root-to-leaf. Home-level defaults must remain neutral
+  operating rules, not a project assignment or persona. Never overwrite edited souls.
+- **Pre-release: implement the current contract directly.** Do not add migrations,
+  compatibility aliases or routes for superseded feature designs.
+- **Special-file updates use the shared post-write path.** Publish resource changes
+  after effects, refresh profile/directory contexts, and keep files authoritative.
+  Lua on_change observes, never vetoes; its notifications are not durable work.
 - **Host config is `config.yml`** (model, sandbox, secrets). `models.yml` stays the
   provider catalog. Existing `agent.lua` / `sandbox.lua` still load if `config.yml` is
   missing.

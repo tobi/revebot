@@ -38,6 +38,51 @@ pub(crate) fn open_dir(root: &Path, relative: &Path) -> io::Result<File> {
     Ok(dir)
 }
 
+/// Host scaffold/session setup only, not a Lua capability. Every component is
+/// created/opened relative to a held directory descriptor without symlinks.
+pub(crate) fn ensure_dir(root: &Path, relative: &Path) -> io::Result<File> {
+    let mut dir = File::open(root)?;
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unsafe relative directory",
+            ));
+        };
+        match rustix::fs::mkdirat(&dir, name, Mode::from_bits_truncate(0o755)) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(error) => return Err(error.into()),
+        }
+        dir = openat(
+            &dir,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?
+        .into();
+    }
+    Ok(dir)
+}
+
+pub(crate) fn create_new(root: &Path, relative: &Path) -> io::Result<File> {
+    let dir = ensure_dir(
+        root,
+        relative
+            .parent()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing parent"))?,
+    )?;
+    let name = relative
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing name"))?;
+    Ok(openat(
+        &dir,
+        name,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_bits_truncate(0o644),
+    )?
+    .into())
+}
+
 /// List actual child directories, refusing symlinks rather than following them
 /// into a host tree. Used when discovering per-bot script directories.
 pub(crate) fn child_dirs(root: &Path, relative: &Path) -> io::Result<Vec<PathBuf>> {
@@ -67,6 +112,68 @@ pub(crate) fn child_dirs(root: &Path, relative: &Path) -> io::Result<Vec<PathBuf
     }
     dirs.sort();
     Ok(dirs)
+}
+
+/// Read a regular file without following any workspace symlink.
+pub(crate) fn read_text(root: &Path, relative: &Path, limit: u64) -> io::Result<String> {
+    let parent = relative
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing parent"))?;
+    let name = relative
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing filename"))?;
+    let dir = open_dir(root, parent)?;
+    let file: File = openat(
+        &dir,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    )?
+    .into();
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "expected regular file",
+        ));
+    }
+    let mut text = String::new();
+    file.take(limit + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "file exceeds read limit",
+        ));
+    }
+    Ok(text)
+}
+
+pub(crate) fn files(root: &Path, relative: &Path) -> io::Result<Vec<PathBuf>> {
+    let dir = match open_dir(root, relative) {
+        Ok(dir) => dir,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut files = Vec::new();
+    for entry in Dir::read_from(&dir)? {
+        let entry = entry?;
+        let name = OsStr::from_bytes(entry.file_name().to_bytes());
+        if name == "." || name == ".." {
+            continue;
+        }
+        let stat = rustix::fs::statat(&dir, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
+        match rustix::fs::FileType::from_raw_mode(stat.st_mode) {
+            rustix::fs::FileType::RegularFile => files.push(relative.join(name)),
+            rustix::fs::FileType::Symlink => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "symlinked file is not allowed",
+                ));
+            }
+            _ => {}
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 pub(crate) fn scripts(root: &Path, relative: &Path) -> io::Result<Vec<(PathBuf, String)>> {

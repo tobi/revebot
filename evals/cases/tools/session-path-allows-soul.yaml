@@ -1,10 +1,10 @@
-id: tools.session-path-allows-instructions
+id: tools.session-path-allows-soul
 suite: tools
 mode: offline
 runner: unit
 unit: session_path
 input:
-  path: agents/chief-of-staff/instructions.md
+  path: agents/chief-of-staff/SOUL.md
 graders:
   - kind: equals
     text: "false"

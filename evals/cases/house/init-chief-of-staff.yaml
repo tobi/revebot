@@ -7,14 +7,14 @@ graders:
   - kind: file_exists
     path: config.yml
   - kind: file_exists
-    path: workspace/agents/chief-of-staff/instructions.md
+    path: workspace/agents/chief-of-staff/SOUL.md
   - kind: file_exists
     path: workspace/agents/chief-of-staff/profile.json
   - kind: file_contains
-    path: workspace/agents/chief-of-staff/instructions.md
+    path: workspace/agents/chief-of-staff/SOUL.md
     text: Chief of Staff
   - kind: file_contains
-    path: workspace/agents/chief-of-staff/instructions.md
+    path: workspace/agents/chief-of-staff/SOUL.md
     text: do not ask what to be called
   - kind: json_pointer
     path: workspace/agents/chief-of-staff/profile.json
@@ -28,7 +28,7 @@ graders:
     path: .gitignore
     text: workspace/agents/*/sessions/
   - kind: file_not_exists
-    path: instructions.md
+    path: workspace/SOUL.md
   - kind: file_exists
     path: workspace/agents/chief-of-staff/routines/example.lua
   - kind: file_exists

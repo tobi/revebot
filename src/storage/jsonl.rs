@@ -25,8 +25,11 @@
 //! then registers) would put an early usage `seq` after a later entry and
 //! fail the monotonicity check on the next open.
 
+use rustix::fs::{Mode, OFlags, openat};
 use std::collections::HashSet;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(test)]
+use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write as IoWrite};
 use std::path::{Path, PathBuf};
 
@@ -36,7 +39,17 @@ use crate::storage::{Result, Storage, StorageError};
 #[derive(Debug)]
 pub struct Sink {
     file: File,
+    directory: File,
     path: PathBuf,
+}
+
+impl Drop for Sink {
+    fn drop(&mut self) {
+        // Ownership ends with Storage, even if a concurrent fork briefly
+        // inherited/duplicated the fd before exec closes it. Relying only on
+        // last-fd-close can make an immediate reopen spuriously report Locked.
+        let _ = self.file.unlock();
+    }
 }
 
 impl Sink {
@@ -76,20 +89,74 @@ impl Storage {
         cwd: Option<String>,
     ) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let directory = File::open(parent)?;
+        Self::open_in(directory, path, id, cwd)
+    }
 
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .read(true)
-            .open(&path)?;
+    /// Bot sessions use a rooted directory capability. Neither a parent nor the
+    /// final session filename may redirect host writes through a symlink.
+    pub fn open_beneath(
+        root: &Path,
+        relative: &Path,
+        id: impl Into<String>,
+        cwd: Option<String>,
+    ) -> Result<Self> {
+        if relative
+            .components()
+            .any(|p| !matches!(p, std::path::Component::Normal(_)))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "unsafe session path",
+            )
+            .into());
+        }
+        let parent = relative.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing session parent")
+        })?;
+        let directory = crate::script_fs::ensure_dir(root, parent)?;
+        Self::open_in(directory, root.join(relative), id, cwd)
+    }
+
+    fn open_in(
+        directory: File,
+        path: PathBuf,
+        id: impl Into<String>,
+        cwd: Option<String>,
+    ) -> Result<Self> {
+        let name = path.file_name().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing session filename")
+        })?;
+        let mut file: File = openat(
+            &directory,
+            name,
+            OFlags::RDWR
+                | OFlags::APPEND
+                | OFlags::CREATE
+                | OFlags::NOFOLLOW
+                | OFlags::CLOEXEC
+                | OFlags::NONBLOCK,
+            Mode::from_bits_truncate(0o600),
+        )
+        .map_err(std::io::Error::from)?
+        .into();
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "session must be a regular file",
+            )
+            .into());
+        }
         if file.try_lock().is_err() {
             return Err(StorageError::Locked(path.display().to_string()));
         }
 
-        let replay = read_lines(&path)?;
+        let replay = read_lines(&file)?;
         let existed = replay.header.is_some() || !replay.writes.is_empty();
 
         // Drop a torn tail before we append anything after it.
@@ -120,7 +187,14 @@ impl Storage {
         }
 
         file.seek(SeekFrom::End(0))?;
-        let mut storage = Storage::with_header(header.clone(), Some(Sink { file, path }));
+        let mut storage = Storage::with_header(
+            header.clone(),
+            Some(Sink {
+                file,
+                directory,
+                path,
+            }),
+        );
         if existed {
             for write in replay.writes {
                 storage.replay(write);
@@ -145,9 +219,28 @@ impl Storage {
             return Ok(());
         };
         let path = sink.path.clone();
-        let temp = path.with_extension("jsonl.compact");
-        {
-            let mut out = std::io::BufWriter::new(File::create(&temp)?);
+        let directory = sink.directory.try_clone()?;
+        let temp = format!(
+            ".reve-compact-{}.tmp",
+            crate::ids::uuid_v7(crate::ids::now_ms())
+        );
+        let mut file: File = openat(
+            &directory,
+            &temp,
+            OFlags::RDWR
+                | OFlags::APPEND
+                | OFlags::CREATE
+                | OFlags::EXCL
+                | OFlags::NOFOLLOW
+                | OFlags::CLOEXEC,
+            Mode::from_bits_truncate(0o600),
+        )
+        .map_err(std::io::Error::from)?
+        .into();
+        file.try_lock()
+            .map_err(|_| StorageError::Locked(path.display().to_string()))?;
+        let result = (|| -> Result<()> {
+            let mut out = std::io::BufWriter::new(&mut file);
             let mut line = |line: &Line| -> Result<()> {
                 let mut text = serde_json::to_string(line).expect("serialise");
                 text.push('\n');
@@ -175,16 +268,27 @@ impl Storage {
             }
             out.flush()?;
             out.get_ref().sync_all()?;
-        }
-        // Rename over the locked file; the lock follows our open descriptor,
-        // so reopen the new file and lock it before releasing the old one.
-        std::fs::rename(&temp, &path)?;
-        let mut file = OpenOptions::new().append(true).read(true).open(&path)?;
-        if file.try_lock().is_err() {
-            return Err(StorageError::Locked(path.display().to_string()));
+            drop(out);
+            // Publish the already-locked inode through the held directory.
+            rustix::fs::renameat(
+                &directory,
+                &temp,
+                &directory,
+                path.file_name().expect("session filename"),
+            )
+            .map_err(std::io::Error::from)?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let _ = rustix::fs::unlinkat(&directory, &temp, rustix::fs::AtFlags::empty());
+            return Err(error);
         }
         file.seek(SeekFrom::End(0))?;
-        self.sink = Some(Sink { file, path });
+        self.sink = Some(Sink {
+            file,
+            directory,
+            path,
+        });
         Ok(())
     }
 
@@ -195,7 +299,7 @@ impl Storage {
 
 /// Parse every line, returning the decoded writes and the byte length of the
 /// intact prefix.
-fn read_lines(path: &Path) -> Result<Replay> {
+fn read_lines(source: &File) -> Result<Replay> {
     let mut replay = Replay {
         header: None,
         writes: Vec::new(),
@@ -203,11 +307,8 @@ fn read_lines(path: &Path) -> Result<Replay> {
         dead_writes: 0,
         out_of_order: false,
     };
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(replay),
-        Err(e) => return Err(e.into()),
-    };
+    let mut file = source.try_clone()?;
+    file.seek(SeekFrom::Start(0))?;
 
     let mut reader = BufReader::new(file);
     let mut raw = Vec::new();
@@ -522,6 +623,47 @@ mod tests {
             matches!(err, StorageError::StorageVersion(7, 1)),
             "got {err}"
         );
+    }
+
+    #[test]
+    fn rooted_sessions_and_compaction_never_follow_replaced_paths() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let relative = Path::new("workspace/agents/miku/sessions/main.jsonl");
+        let mut storage = Storage::open_beneath(root.path(), relative, "miku", None).unwrap();
+        let directory = root.path().join(relative.parent().unwrap());
+        let moved = root.path().join("saved-sessions");
+        std::fs::rename(&directory, &moved).unwrap();
+        symlink(outside.path(), &directory).unwrap();
+        storage.compact_file().unwrap();
+        assert!(moved.join("main.jsonl").is_file());
+        assert!(!outside.path().join("main.jsonl").exists());
+        assert!(Storage::open_beneath(root.path(), relative, "miku", None).is_err());
+        drop(storage);
+        std::fs::remove_file(&directory).unwrap();
+        std::fs::rename(&moved, &directory).unwrap();
+        std::fs::remove_file(directory.join("main.jsonl")).unwrap();
+        let sentinel = outside.path().join("sentinel");
+        std::fs::write(&sentinel, "untouched").unwrap();
+        symlink(&sentinel, directory.join("main.jsonl")).unwrap();
+        assert!(Storage::open_beneath(root.path(), relative, "miku", None).is_err());
+        assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "untouched");
+    }
+
+    #[test]
+    fn owner_drop_releases_the_lock_even_with_a_stray_descriptor() {
+        let (_dir, path) = temp();
+        let first = Storage::open(&path, "s1", None).unwrap();
+        let stray = first.sink.as_ref().unwrap().file.try_clone().unwrap();
+        drop(first);
+        let reopened = Storage::open(&path, "s1", None).unwrap();
+        drop(stray);
+        assert!(
+            Storage::open(&path, "s1", None).is_err(),
+            "dropping a stray descriptor must not release the new owner's lock"
+        );
+        drop(reopened);
     }
 
     #[test]

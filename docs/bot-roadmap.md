@@ -6,7 +6,7 @@ around it; it is not a claim that the planned features below already exist.
 ## Product model
 
 Persistent named bots are the sidebar's primary objects. Each owns identity,
-standing instructions, memory, tools and a collection of durable conversations.
+SOUL.md (identity and standing remit), memory, tools and a collection of durable conversations.
 Bots communicate asynchronously: persist the receiving inbox before acknowledging;
 never block the sender waiting for a colleague to finish.
 
@@ -41,19 +41,29 @@ shared identity must not implicitly merge independently running transcripts.
 | Slice | Goal / done condition | Status |
 |---|---|---|
 | Workspace Lua boundary | Separate restricted state; no ambient host IO/environment/modules; descriptor-rooted source reads; regression tests | Implemented on `feat/bot-contracts` |
-| Bot identities | Directory-derived immutable ids; reject profile mismatch/traversal/duplicate identities and symlink escapes before privileged host IO | Next |
-| Live configuration | Current profile reaches prompt; a defined run boundary snapshots model/config; updates no longer report misleading success | Planned |
-| Notice delivery | Durable unique notice identity; acknowledge/publish only acceptance; live/restore reconciliation; no bubbles from blocked tool intent | Planned |
+| Bot identities | Directory-owned ids and rooted profile/scaffold/session IO, including locked descriptor-relative compaction | Implemented |
+| Homes and cwd | Local SOUL, fixed HOME with workspace child, cwd headers and full guest AGENTS ancestor chain | Implemented |
+| Live configuration | Disk-authoritative profile/UI refresh, error visibility and run-boundary model snapshots | Implemented |
+| Resource notifications | Shared post-write invalidation path and filtered/scoped Lua on_change observers | Implemented |
+| Notice delivery / f(log) | One canonical log and renderer; streamed drafts are partial in-memory entries replaced by durable ids; no blocked-intent or duplicate bubbles | Next |
 | Roster lifecycle | Serialized create/update/delete decisions with revision/reservation identity around guest IO; preserve last-bot invariant | Planned |
 | Routine conversations | Independent persistent chats/cancellation plus durable trigger/run identity, outcome history and explicit missed/duplicate tick policy | Planned |
 | Plugin contracts | Last-good atomic reload, per-bot scope, consistent name resolution, complete documented bot/conversation/messaging context | Planned |
-| Memory | Write/forget API, tiers/scopes, dedupe, filesystem reads and bounded profile/recent-log prompt projection | Planned |
+| Memory | Exact write/forget, tiers/scopes, dedupe, preserved prose and bounded private/explicit-shared projection | Implemented |
 | Tabs/status/client | Main/side/+ and pinned Routines UI, per-call descriptions, reconnect/resnapshot/lag handling, safe text rendering | Planned |
 
 The entire implemented Lua surface lives in
 [`src/templates/plugins_skill.md`](../src/templates/plugins_skill.md). Update that
 reference and its executable-example tests with every API change. Do not describe
 future context methods, reload behavior or conversation isolation as implemented.
+
+## One rendering path (user requirement)
+
+All rendering is `f(log)`. A log can be loaded from disk or held in memory.
+Streaming replies are partial in-memory entries with stable ids; settlement
+replaces those same entries. Live updates, reload, pagination and tab switching
+must use the same reducer and renderer. Visibility/delivery metadata belongs in
+the log, not hidden UI flags. Uncommitted drafts are not falsely persisted.
 
 ## Separate runner work
 
@@ -62,6 +72,14 @@ self-detach one runner per house, HTTP over the private Unix socket and localhos
 exact executable-hash checking, consent before mismatched restart, and `revebot stop`.
 It must route all normal CLI clients through that same instance and pass validation
 before integration. Do not merge unfinished daemon work into these fixes.
+
+## Current validation
+
+The home/memory/profile/cwd/resource slice passes 355 default Rust tests, the
+focused real-microVM house integration test (including cleanup), the profile UI
+behavioral test, 12 offline evals, and Clippy with warnings denied. The VM test uses
+a temporary house with no configured model and no secrets. Source and daemon work
+remain on separate branches; nothing is merged into main.
 
 ## Validation gates
 

@@ -6,6 +6,21 @@
 use super::profile::Profile;
 use crate::skills::Skill;
 
+/// Header snapshot for an arriving message. It is data, never raw markup.
+pub fn with_cwd(wrapped: &str, cwd: &str) -> String {
+    let cwd = cwd
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let header = format!("<cwd>{cwd}</cwd>\n");
+    if let Some(end) = wrapped.find("</timestamp>\n") {
+        let split = end + "</timestamp>\n".len();
+        format!("{}{header}{}", &wrapped[..split], &wrapped[split..])
+    } else {
+        format!("{header}{wrapped}")
+    }
+}
+
 pub fn timestamp_now() -> String {
     chrono::Local::now()
         .format("%A, %b %-d, %Y, %-I:%M %p (%Z)")
@@ -190,7 +205,7 @@ fn is_skill_name_char(b: u8) -> bool {
     b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'
 }
 
-/// House kernel. Goes *before* the bot's `instructions.md`.
+/// House kernel. Goes before the bot's SOUL.md.
 pub fn house_kernel(bot: &Profile, teammates: &[Profile]) -> String {
     let others: Vec<&Profile> = teammates.iter().filter(|p| p.id != bot.id).collect();
     let roster = if others.is_empty() {
@@ -251,7 +266,8 @@ to the turn. Follow them.
 
 ## Tools
 
-- `update_state` — your own name, title, description, avatar, group, model.
+- `update_state` — target `profile` for name/title/description/avatar/group/model/projects; target `memory` for exact write/forget facts with profile/log/note tiers and agent/user/project scopes.
+- `cd` — change this conversation's guest working directory and load all ancestor AGENTS.md files.
 - `CreateAgent` — a sibling under `/workspace/agents/`. Returns its id. Then message it.
 - `UpdateAgent` — merge-patch another bot's profile. Cannot delete.
 - `SendAgentMessage` — `id` + `text` (optional `priority`). Async.
@@ -261,9 +277,11 @@ You cannot delete a bot. The user does that in the sidebar.
 
 ## Files
 
-Your files: `/workspace/agents/{id}/` (`instructions.md`, `profile.json`,
-`memory/`, `skills/`). House mind: `/workspace/{{AGENTS,SOUL,KNOWLEDGE}}.md`.
-Do not write under `agents/*/sessions/`.
+Your home: `/workspace/agents/{id}/` (`SOUL.md`, `profile.json`, `memory/`, `skills/`).
+Your SOUL.md is your identity and standing remit. Your initial working directory is your home's `workspace/`.
+Private memory is yours only. Shared user memory requires explicit scope `user`; project memory requires explicit profile.projects membership.
+Only `/workspace/VM.md` is shared machine knowledge. Do not adopt other agents' projects from the roster.
+Use `cd` to change work location, not identity. Do not write under any agent's `sessions/`.
 
 {roster}
 ",
@@ -277,6 +295,17 @@ Do not write under `agents/*/sessions/`.
 mod tests {
     use super::*;
 
+    #[test]
+    fn cwd_is_an_escaped_message_header_not_part_of_the_user_query() {
+        let wrapped = with_cwd(
+            &wrap_user_turn_at("hello", &[], &[], &[], &[], "ts"),
+            "/repo/a&<b>",
+        );
+        assert!(wrapped.starts_with(
+            "<timestamp>ts</timestamp>\n<cwd>/repo/a&amp;&lt;b&gt;</cwd>\n<user_query>"
+        ));
+    }
+
     fn roster() -> Vec<Profile> {
         vec![
             Profile {
@@ -288,6 +317,7 @@ mod tests {
                 group: String::new(),
                 created_at: None,
                 model: None,
+                projects: Vec::new(),
             },
             Profile {
                 id: "qmd-hero".into(),
@@ -298,6 +328,7 @@ mod tests {
                 group: String::new(),
                 created_at: None,
                 model: None,
+                projects: Vec::new(),
             },
         ]
     }

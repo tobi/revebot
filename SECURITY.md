@@ -36,7 +36,7 @@ Reve deliberately fails closed:
   shim, no daemon, no CLI transport.
 - Only `workspace/` is bind-mounted into the VM, at `/workspace`, and set as the working
   directory. Host configuration and installed host tools stay outside the mount;
-  bot profiles, instructions and workspace Lua are editable inside it.
+  bot profiles, souls and workspace Lua are editable inside it.
 - Network access is the public internet by default (`NetworkProfile::Public` plus
   gateway DNS). `sandbox.lua` can set `open = false` and list hosts in `allow` to
   lock down; that path starts from `NetworkPolicy::none()`. Private/LAN and cloud
@@ -63,6 +63,9 @@ state. Workspace source is read beneath the house with descriptor-relative
 
 This restricts capabilities, not resources: pure Lua is not preemptively cancelled
 or CPU/memory-budgeted. It is not a hostile-code process sandbox; substantial
-computation belongs in the VM. Other shared-workspace risks (including bot-authored
-profile paths and writable session files) are separate from this Lua boundary.
+computation belongs in the VM. Bot/project ids are validated single directory components and profile ids must
+match their folders. Profile/memory reads and scaffold/session setup use rooted,
+no-symlink descriptors; session compaction stays on its held directory descriptor.
+Writable session files and non-cooperating concurrent guest edits remain shared-
+workspace integrity risks, separate from the Lua capability boundary.
 The complete supported API and current limits are in the `plugins` skill.

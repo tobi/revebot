@@ -55,6 +55,7 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/api/health", get(health))
+        .route("/api/events", get(house_events_ws))
         .route("/api/bots", get(list_bots).post(create_bot))
         .route(
             "/api/bots/{id}",
@@ -64,10 +65,7 @@ fn router(state: AppState) -> Router {
             "/api/bots/{id}/messages",
             get(list_messages).post(post_message),
         )
-        .route(
-            "/api/bots/{id}/instructions",
-            get(get_instructions).put(put_instructions),
-        )
+        .route("/api/bots/{id}/soul", get(get_soul).put(put_soul))
         .route("/api/bots/{id}/abort", post(abort_bot))
         .route("/api/models", get(list_models))
         .route("/api/bots/{id}/skills", get(list_skills))
@@ -127,7 +125,7 @@ async fn list_bots(
     if !authorized(&headers, &q, &state.house) {
         return deny();
     }
-    Json(json!({ "bots": state.house.ready_profiles() })).into_response()
+    Json(json!({ "bots": state.house.profile_views() })).into_response()
 }
 
 async fn get_bot(
@@ -141,48 +139,25 @@ async fn get_bot(
     }
     match state
         .house
-        .ready_profiles()
+        .profile_views()
         .into_iter()
-        .find(|p| p.id == id)
+        .find(|p| p["id"].as_str() == Some(id.as_str()))
     {
         Some(p) => Json(p).into_response(),
         None => (StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response(),
     }
 }
 
-#[derive(Deserialize)]
-struct CreateBody {
-    name: String,
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    description: String,
-    instructions: Option<String>,
-    model: Option<String>,
-    avatar: Option<String>,
-}
-
 async fn create_bot(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<QueryAuth>,
-    Json(body): Json<CreateBody>,
+    Json(body): Json<CreateSpec>,
 ) -> Response {
     if !authorized(&headers, &q, &state.house) {
         return deny();
     }
-    match state
-        .house
-        .create_bot(CreateSpec {
-            name: body.name,
-            title: body.title,
-            description: body.description,
-            instructions: body.instructions,
-            model: body.model,
-            avatar: body.avatar,
-        })
-        .await
-    {
+    match state.house.create_bot(body).await {
         Ok(profile) => (StatusCode::CREATED, Json(profile)).into_response(),
         Err(e) => (
             StatusCode::CONFLICT,
@@ -280,7 +255,7 @@ async fn list_messages(
     }
 }
 
-async fn get_instructions(
+async fn get_soul(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
@@ -289,7 +264,7 @@ async fn get_instructions(
     if !authorized(&headers, &q, &state.house) {
         return deny();
     }
-    match state.house.bot_instructions(&id) {
+    match state.house.bot_soul(&id) {
         Ok(text) => Json(json!({ "text": text })).into_response(),
         Err(e) => (
             StatusCode::NOT_FOUND,
@@ -300,21 +275,21 @@ async fn get_instructions(
 }
 
 #[derive(Deserialize)]
-struct InstructionsBody {
+struct SoulBody {
     text: String,
 }
 
-async fn put_instructions(
+async fn put_soul(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     Query(q): Query<QueryAuth>,
-    Json(body): Json<InstructionsBody>,
+    Json(body): Json<SoulBody>,
 ) -> Response {
     if !authorized(&headers, &q, &state.house) {
         return deny();
     }
-    match state.house.set_bot_instructions(&id, &body.text).await {
+    match state.house.set_bot_soul(&id, &body.text).await {
         Ok(()) => Json(json!({ "ok": true })).into_response(),
         Err(e) => (
             StatusCode::NOT_FOUND,
@@ -459,6 +434,19 @@ async fn abort_bot(
     }
 }
 
+async fn house_events_ws(
+    State(state): State<AppState>,
+    Query(q): Query<QueryAuth>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    if q.token.as_deref() != Some(state.house.token()) {
+        return deny();
+    }
+    let rx = state.house.subscribe_house();
+    ws.on_upgrade(move |socket| push_events(socket, rx))
+        .into_response()
+}
+
 async fn events_ws(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -489,7 +477,15 @@ async fn push_events(
                     break;
                 }
             }
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                if socket
+                    .send(Message::Text("{\"type\":\"lagged\"}".into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
             Err(_) => break,
         }
     }
@@ -542,7 +538,7 @@ async fn exec(
         return deny();
     }
     let timeout = body.timeout_seconds.map(std::time::Duration::from_secs);
-    match state
+    let result = state
         .house
         .sandbox()
         .exec(
@@ -554,8 +550,9 @@ async fn exec(
             },
             None,
         )
-        .await
-    {
+        .await;
+    state.house.external_effect_finished();
+    match result {
         Ok(out) => Json(json!({
             "stdout": out.stdout,
             "stderr": out.stderr,
@@ -587,13 +584,14 @@ async fn tool(
     if !authorized(&headers, &q, &state.house) {
         return deny();
     }
-    match state
+    let result = state
         .house
         .project()
         .runtime
         .call_tool(&body.name, body.args, state.house.sandbox())
-        .await
-    {
+        .await;
+    state.house.external_effect_finished();
+    match result {
         Ok(text) => Json(json!({ "result": text })).into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,

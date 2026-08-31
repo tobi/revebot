@@ -54,6 +54,16 @@ pub enum HarnessError {
     Invalid(String),
 }
 
+type ConfigurationSource =
+    Arc<dyn Fn() -> std::result::Result<LaneConfiguration, String> + Send + Sync>;
+type ModelSource = Arc<dyn Fn(&LaneConfiguration) -> Arc<dyn Model> + Send + Sync>;
+
+#[derive(Clone)]
+struct EnvironmentSources {
+    configuration: ConfigurationSource,
+    model: ModelSource,
+}
+
 /// Everything a lane needs to run, minus the per-operation cancellation.
 pub struct Harness {
     session: Session,
@@ -65,6 +75,7 @@ pub struct Harness {
     settings: RunSettings,
     retry: RetryPolicy,
     seed: LaneConfiguration,
+    sources: Mutex<Option<EnvironmentSources>>,
     /// One cancel channel per *running* operation. Purely an accelerator: the
     /// durable `Control::CancelRequested` is what an abort means, and this is
     /// how an in-flight request or tool learns about it without waiting.
@@ -95,8 +106,53 @@ impl Harness {
             settings: config.settings,
             retry: config.retry,
             seed: config.configuration,
+            sources: Mutex::new(None),
             cancels: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Optional house environment: refresh configuration only at idle admission;
+    /// each drive resolves and holds the model named by its captured configuration.
+    pub fn set_environment_sources(&self, configuration: ConfigurationSource, model: ModelSource) {
+        *self.sources.lock().unwrap() = Some(EnvironmentSources {
+            configuration,
+            model,
+        });
+    }
+
+    async fn refresh_idle_configuration(&self, lane: &str) -> Result<()> {
+        let sources = self.sources.lock().unwrap().clone();
+        let Some(sources) = sources else {
+            return Ok(());
+        };
+        self.session.ensure_lane(lane, None, &self.seed).await?;
+        let (state, state_seq) = self.session.lane_state(lane).await?.expect("ensured lane");
+        if state.current_operation_id.is_some() {
+            return Ok(());
+        }
+        let (current, config_seq) = self
+            .session
+            .lane_config(lane)
+            .await?
+            .expect("ensured configuration");
+        let desired = (sources.configuration)().map_err(HarnessError::Invalid)?;
+        if current == desired {
+            return Ok(());
+        }
+        let committed = self
+            .session
+            .commit_if(
+                vec![
+                    Expect::new(Namespace::LaneState, lane, Some(state_seq)),
+                    Expect::new(Namespace::LaneConfig, lane, Some(config_seq)),
+                ],
+                Transaction::new().with(Write::set(Namespace::LaneConfig, lane, desired)),
+            )
+            .await?;
+        if committed.is_none() {
+            return Err(HarnessError::Busy(lane.into()));
+        }
+        Ok(())
     }
 
     pub fn session(&self) -> &Session {
@@ -444,6 +500,7 @@ impl Harness {
         if prompts.is_empty() {
             return Err(HarnessError::Invalid("a run needs a prompt".into()));
         }
+        self.refresh_idle_configuration(lane).await?;
         // The id exists before the hook so the hook can name the run it is
         // deciding about, and so the intent it produces is committed under
         // exactly that id.
@@ -508,6 +565,7 @@ impl Harness {
     /// Sibling of `start_run`; must not call `start()` (that prepends the
     /// same ids onto `inbox.writes`).
     async fn start_pending(self: &Arc<Self>, lane: &str) -> Result<Current> {
+        self.refresh_idle_configuration(lane).await?;
         self.session.ensure_lane(lane, None, &self.seed).await?;
         let (lane_state, lane_state_seq) = self
             .session
@@ -708,16 +766,20 @@ impl Harness {
             tx.cancel();
         }
         self.cancels.lock().unwrap().insert(lane.clone(), tx);
-        let driver = self.driver(rx);
+        let driver = self.driver(rx, &current.configuration);
         let result = driver.drive(current).await;
         self.cancels.lock().unwrap().remove(&lane);
         Ok(result?)
     }
 
-    fn driver(&self, cancel: CancelRx) -> Driver {
+    fn driver(&self, cancel: CancelRx, configuration: &LaneConfiguration) -> Driver {
+        let sources = self.sources.lock().unwrap().clone();
+        let model = sources
+            .map(|sources| (sources.model)(configuration))
+            .unwrap_or_else(|| self.model.clone());
         Driver {
             session: self.session.clone(),
-            model: self.model.clone(),
+            model,
             tools: self.tools.clone(),
             hooks: self.hooks.clone(),
             events: self.events.clone(),

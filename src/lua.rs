@@ -24,7 +24,7 @@ use thiserror::Error;
 
 use crate::cron::Cron;
 use crate::hooks::{BeforeToolEvent, BeforeToolResult, Block};
-use crate::sandbox::{ExecOptions, Policy, Sandbox, Secret};
+use crate::sandbox::{Policy, Sandbox, Secret};
 use crate::state::Replay;
 
 #[derive(Debug, Error)]
@@ -181,12 +181,23 @@ pub struct Runtime {
     pub tools: Vec<ToolDef>,
     pub routines: Vec<RoutineDef>,
     pub guards: Vec<GuardDef>,
+    changes: Vec<ChangeDef>,
 }
 
 /// A `guard()` from a workspace plugin. Runs on `before_tool`, fail closed.
 pub struct GuardDef {
     pub id: String,
     pub tools: Vec<String>,
+    lua: Lua,
+    key: mlua::RegistryKey,
+}
+
+struct ChangeDef {
+    id: String,
+    paths: Vec<glob::Pattern>,
+    resources: Vec<String>,
+    include_unknown: bool,
+    owner: Option<String>,
     lua: Lua,
     key: mlua::RegistryKey,
 }
@@ -222,6 +233,7 @@ impl Runtime {
             tools: Vec::new(),
             routines: Vec::new(),
             guards: Vec::new(),
+            changes: Vec::new(),
         })
     }
 
@@ -372,6 +384,15 @@ impl Runtime {
             Ok(())
         })?;
         lua.globals().set("cron", cron_fn)?;
+        let changes: Arc<Mutex<Vec<(String, Table)>>> = Arc::default();
+        let change_sink = changes.clone();
+        lua.globals().set(
+            "on_change",
+            lua.create_function(move |_, (id, spec): (String, Table)| {
+                change_sink.lock().push((id, spec));
+                Ok(())
+            })?,
+        )?;
         for (path, source) in sources {
             Self::exec_source(&lua, &path, &source)?;
         }
@@ -396,6 +417,35 @@ impl Runtime {
                 def.bot = owner.map(str::to_string);
             }
             self.routines.push(def);
+        }
+        for (id, spec) in std::mem::take(&mut *changes.lock()) {
+            let paths = spec
+                .get::<Option<Vec<String>>>("paths")?
+                .unwrap_or_default()
+                .iter()
+                .map(|p| glob::Pattern::new(p).map_err(|e| invalid("on_change", e.to_string())))
+                .collect::<Result<Vec<_>>>()?;
+            let resources = spec
+                .get::<Option<Vec<String>>>("resources")?
+                .unwrap_or_default();
+            if resources
+                .iter()
+                .any(|r| !crate::house::resources::KINDS.contains(&r.as_str()))
+            {
+                return Err(invalid("on_change", "unknown resource kind"));
+            }
+            let run: mlua::Function = spec.get("run")?;
+            self.changes.push(ChangeDef {
+                id,
+                paths,
+                resources,
+                include_unknown: spec
+                    .get::<Option<bool>>("include_unknown")?
+                    .unwrap_or(false),
+                owner: owner.map(str::to_string),
+                lua: lua.clone(),
+                key: lua.create_registry_value(run)?,
+            });
         }
         Ok(())
     }
@@ -448,6 +498,73 @@ impl Runtime {
             self.routines.push(def);
         }
         Ok(())
+    }
+
+    /// Best-effort post-write observers. Errors cannot veto a completed write;
+    /// each callback's sends publish only if that callback returns successfully.
+    pub async fn run_changes(
+        &self,
+        event: &crate::house::resources::Change,
+    ) -> (Vec<(String, String)>, Vec<String>) {
+        let mut sends = Vec::new();
+        let mut errors = Vec::new();
+        for def in &self.changes {
+            if def.owner.as_ref().is_some_and(|id| id != &event.bot) {
+                continue;
+            }
+            if event.unknown {
+                if !def.include_unknown {
+                    continue;
+                }
+            } else {
+                if !def.paths.is_empty()
+                    && !event
+                        .paths
+                        .iter()
+                        .any(|p| def.paths.iter().any(|pattern| pattern.matches(p)))
+                {
+                    continue;
+                }
+                if !def.resources.is_empty()
+                    && !event.resources.iter().any(|r| def.resources.contains(r))
+                {
+                    continue;
+                }
+            }
+            let queued: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
+            let result: Result<()> = async {
+                let lua = &def.lua;
+                let ctx = lua.create_table()?;
+                if !event.bot.is_empty() {
+                    ctx.set("bot", event.bot.clone())?;
+                }
+                ctx.set("cwd", event.cwd.clone())?;
+                let sink = queued.clone();
+                ctx.set(
+                    "send",
+                    lua.create_function(move |_, (bot, text): (String, String)| {
+                        crate::house::profile::validate_id(&bot).map_err(mlua::Error::external)?;
+                        let mut sink = sink.lock();
+                        if sink.len() >= 32 {
+                            return Err(mlua::Error::external("observer send limit exceeded"));
+                        }
+                        sink.push((bot, text));
+                        Ok(())
+                    })?,
+                )?;
+                let callback: mlua::Function = lua.registry_value(&def.key)?;
+                callback
+                    .call_async::<()>((lua.to_value(event)?, ctx))
+                    .await?;
+                Ok(())
+            }
+            .await;
+            match result {
+                Ok(()) => sends.extend(std::mem::take(&mut *queued.lock())),
+                Err(error) => errors.push(format!("{}: {error}", def.id)),
+            }
+        }
+        (sends, errors)
     }
 
     pub fn routine(&self, id: &str) -> Option<&RoutineDef> {
@@ -584,6 +701,17 @@ impl Runtime {
         sandbox: Arc<Sandbox>,
         cancel: Option<crate::sandbox::tokio_util_lite::CancelRx>,
     ) -> Result<String> {
+        self.call_tool_in(name, args, sandbox, cancel, None).await
+    }
+
+    pub async fn call_tool_in(
+        &self,
+        name: &str,
+        args: Map<String, Value>,
+        sandbox: Arc<Sandbox>,
+        cancel: Option<crate::sandbox::tokio_util_lite::CancelRx>,
+        context: Option<crate::working_directory::Context>,
+    ) -> Result<String> {
         let def = self
             .tool(name)
             .ok_or_else(|| invalid("tool call", format!("no tool named {name:?}")))?;
@@ -592,12 +720,14 @@ impl Runtime {
         let ctx = lua.create_table()?;
         let sh_sandbox = sandbox.clone();
         let sh_cancel = cancel.clone();
+        let sh_context = context.clone();
         let sh = lua.create_async_function(move |_, command: String| {
             let sandbox = sh_sandbox.clone();
             let cancel = sh_cancel.clone();
+            let options = sh_context.as_ref().map(|c| c.options()).unwrap_or_default();
             async move {
                 let output = sandbox
-                    .exec(&command, ExecOptions::default(), cancel)
+                    .exec(&command, options, cancel)
                     .await
                     .map_err(|e| mlua::Error::external(e.to_string()))?;
                 // This API exposes text only, not exit/cancellation status.
@@ -610,8 +740,16 @@ impl Runtime {
             }
         })?;
         ctx.set("sh", sh)?;
-        ctx.set("workdir", sandbox.workdir().to_string())?;
-        if let Some(owner) = &def.owner {
+        let cwd = context
+            .as_ref()
+            .map(|c| c.cwd())
+            .unwrap_or_else(|| sandbox.workdir().to_string());
+        ctx.set("workdir", cwd.clone())?;
+        ctx.set("cwd", cwd)?;
+        if let Some(context) = &context {
+            ctx.set("bot", context.bot.clone())?;
+            ctx.set("home", context.home.clone())?;
+        } else if let Some(owner) = &def.owner {
             ctx.set("bot", owner.clone())?;
         }
         ctx.set(

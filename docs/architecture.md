@@ -60,8 +60,12 @@ src/
                       state; definitions retain their originating Lua state.
                       Workspace callbacks get explicit guest/messaging capabilities,
                       never ambient host IO/environment/module access.
-  script_fs.rs        descriptor-relative, NOFOLLOW workspace-source loading;
-                      no symlink traversal, regular UTF-8 text <= 1 MiB.
+  script_fs.rs        descriptor-relative NOFOLLOW source/profile/memory reads,
+                      missing-only scaffold creation and session-directory opens.
+                      Lua source is regular UTF-8 text <= 1 MiB.
+  working_directory.rs  per-conversation cwd + ancestor AGENTS.md snapshot in
+                      fact.custom/cwd/<lane>; fixed HOME, current cwd, guest-only
+                      canonicalization/full root-to-leaf instruction reads.
   cron.rs             five-field cron for house routines
   tools.rs            the Tools trait plus seven built-ins, replay declarations
   skills.rs           recursive SKILL.md catalog; workspace ∪ bot, bot shadows
@@ -71,12 +75,20 @@ src/
   heartbeat.rs        schedule reload and response-contract validation
   channels.rs         inbox broadcast and namespaced durable KV
   project.rs          house directory and `revebot init`; identity is
-                      workspace/agents/<id>/, never a root instructions.md
+                      workspace/agents/<id>/; SOUL.md is the sole prose identity,
+                      profile.json is authoritative metadata; HOME/workspace is cwd
   tui/                inline ratatui renderer and the terminal session
   house/              multi-bot house: roster, supervisors, HTTP/WS, routine ticker;
                       usage.jsonl in `.reve/` logs skill `/name` and Lua plugin
                       invocations (one JSON object per line) for later stats.
-                      wrap.rs timestamps + [agent] arrivals; kernel before instructions.md.
+                      wrap.rs timestamp/cwd headers + [agent] arrivals.
+                      profile.rs validates directory-owned ids and refreshes live
+                      metadata from disk. home.rs agent-specific SOUL scaffolding.
+                      memory.rs exact write/forget, agent/user/project scope,
+                      profile/log/note Markdown tiers and bounded prompt projection.
+                      files.rs serialised compare-before-replace guest writes.
+                      resources.rs shared post-write notifications; Lua on_change
+                      observes asynchronously, never vetoes writes.
                       SendUserMessage emits UserNotice on the bot harness
                       stream (the chat websocket), not only house_events.
                       @mention cards carry the bot's real id; `/skill` cards
@@ -88,6 +100,10 @@ src/
                       `content` is a part list (text + toolCall); the page
                       parses it into bubbles and compact tool cards, never
                       JSON.stringify. GET / is Cache-Control: no-store.
+                      House events refresh sidebar/header metadata from profile.json;
+                      invalid edits show a labelled last-good profile, not silent stale UI.
+                      Soul editor reads/writes SOUL.md through /api/bots/<id>/soul.
+                      Single-log rendering remains upcoming.
                       Compose autocomplete: `/` skills, `@` other bots.
                       AskUserForSecret renders an inline host-secret form.
                       SendUserMessage is hidden from Working… and live-pushed
@@ -136,7 +152,11 @@ reloaded state instead of writing something it decided under stale assumptions.
   write-once and form the conversation tree; registers are mutable state with no history;
   usage rows are separate. Payloads are flattened with reserved keys sanitised to
   `payload_*`. Flush every append; a torn last line is discarded whole on reopen; a
-  malformed line anywhere else is corruption and we refuse to open. Snapshot compaction
+  malformed line anywhere else is corruption and we refuse to open. Bot sessions
+  open relative to a held, no-symlink directory descriptor; replay uses the locked
+  file descriptor, not a second pathname lookup. Compaction creates/locks its new
+  inode before descriptor-relative rename, and owner drop explicitly releases
+  the lock even if a fork temporarily duplicated the fd. Snapshot compaction
   rewrites through a temp file and a rename, **in seq order** (not grouped by kind:
   entries-then-usage-then-registers would put an early usage `seq` after a later
   entry and fail the next open). A grouped snapshot from an earlier build is
@@ -176,6 +196,30 @@ reloaded state instead of writing something it decided under stale assumptions.
   with `O_NOFOLLOW`, so a source-file or ancestor symlink cannot import host data
   before Lua even starts. The complete implemented API is documented in the
   `plugins` skill, whose examples are exercised by tests.
+- **Agent identity and memory.** Each bot has SOUL.md, structured profile metadata,
+  private memory and a workspace in its own home. No global SOUL/KNOWLEDGE fallback.
+  SOUL.md is the only prose identity file. New homes receive agent-specific defaults;
+  edited files are never overwritten. VM.md is shared machine knowledge. AGENTS.md follows cwd's
+  ancestor chain (including any existing workspace-root rules), not persona.
+  Profile/log/note memory is Markdown with exact managed blocks; private by default,
+  explicit user sharing, project shards only for profile.projects members. Writes
+  preserve unmanaged prose, dedupe within scope, compare original bytes before
+  atomic guest replacement, and acknowledge success only after the VM result.
+  Prompts are bounded to 16 KiB of memory; older/omitted facts stay on disk.
+- **Live profile updates.** API views and prompts reread profile.json. Post-write
+  notifications refresh caches and publish roster changes for the web sidebar/header.
+  Model configuration refreshes conditionally only at idle run admission; a drive
+  resolves once from captured lane configuration and keeps that model throughout.
+  Invalid profile edits are visible and prevent using a substituted identity.
+- **Directory and resource changes.** The cd tool validates inside the VM, snapshots
+  all ancestor AGENTS.md files in full, and persists the total cwd state through
+  the session owner. HOME does not move. Built-in paths, bash and Lua ctx.sh follow
+  cwd. Known write/edit paths and conservative unknown shell/plugin effects enter
+  one ResourcesChanged notification path. Profile and directory-rule caches refresh;
+  soul/memory are read on the next request. on_change subscribers have path/kind
+  filters, owner scope and optional unknown-event handling; they can queue messages
+  but have no shell. Notifications are best-effort, in-memory observations, not a
+  durable exactly-once scheduler. No filesystem polling loop is added.
 - **The terminal.** Ratatui inline renderer driven by the passive event stream. A run is a
   spawned task, so a steer typed mid-run is a conditional commit rather than a message the
   loop has to be free to receive.
@@ -202,8 +246,14 @@ The specification describes more than this crate implements. These are choices, 
   files or expose host callbacks to the restricted state.
 - **Plugin/routine loading is startup-only for now.** No next-turn hot reload or
   last-good fallback yet; a broken file fails startup. Per-bot ownership filtering,
-  consistent duplicate resolution, complete messaging contexts and routine-chat
-  isolation remain follow-up work. The plugins skill states these limits.
+  consistent duplicate resolution, complete tool messaging contexts and routine-chat
+  isolation remain follow-up work. on_change is implemented, but its notifications
+  can be lost at crash/overflow; handlers must avoid self-triggering message loops.
+- **Memory manual-edit concurrency.** Runtime writers serialize and guest publication
+  checks the old content hash. Non-cooperating manual writers still have the normal
+  POSIX compare/rename race; arbitrary shared-VM filesystem mutation is not isolated.
+  Memory privacy is prompt separation, not filesystem access control. Managed facts
+  have TTL-based prompt inclusion; unmanaged log/notes prose is read on demand. The plugins skill states these limits.
 
 ## 5. Invariants, and the test that holds each one
 
@@ -245,6 +295,16 @@ Every row names a real test. A claim with no test says so instead of appearing c
 | Workspace source cannot traverse symlinks, load nonfiles/oversized files, or import bytecode | `script_fs::tests::{script_and_ancestor_symlinks_are_refused, traversal_nonfiles_and_oversized_sources_are_refused}`, `lua::workspace_tests::{symlinked_script_files_and_bot_directories_are_rejected_before_load, workspace_bytecode_is_never_loaded}` |
 | The complete plugins reference's examples load; pure callbacks execute | `lua::workspace_tests::plugins_skill_examples_load_and_pure_callbacks_execute` |
 | The documented workspace tool actually enters the microVM | `tests/workspace_microvm.rs::documented_workspace_tool_reads_a_note_inside_the_microvm` (opt-in) |
+| Directory/profile ids reject traversal, mismatches and symlinks | `house::profile::tests::{ids_are_directory_owned_and_paths_or_mismatches_are_rejected, profiles_refuse_file_and_parent_symlinks}` |
+| Session compaction stays on its held directory and lock ownership ends with Storage | `storage::jsonl::tests::{rooted_sessions_and_compaction_never_follow_replaced_paths, owner_drop_releases_the_lock_even_with_a_stray_descriptor}` |
+| Soul/private memory do not bleed between agents; disk profile changes reach prompts | `house::prompt::tests::souls_profiles_and_memory_do_not_bleed_across_agents` |
+| Agent-specific home scaffolding keeps edited souls and refuses symlink redirects | `project::tests::{each_agent_gets_its_own_home_and_edited_souls_are_kept, init_does_not_follow_a_symlinked_home_subdirectory}` |
+| Memory dedup/exact forget/scope/recency/bounds preserve manual prose | `house::memory::tests` |
+| Metadata refresh/error handling and UI header updates use current profiles | `house::profile::tests::direct_profile_edits_refresh_metadata_and_report_invalid_files`, `node tests/profile-ui.cjs` |
+| In-flight drives keep their model; new profiles affect the next run | `tests/configuration.rs::profile_model_changes_affect_the_next_run_not_the_running_drive` |
+| Cwd rules are full/root-to-leaf, HOME stays fixed, contexts and headers are isolated | `working_directory::tests`, `house::wrap::tests::cwd_is_an_escaped_message_header_not_part_of_the_user_query` |
+| Change observers are filtered/scoped and failures do not veto another observer | `lua::workspace_tests::change_observers_are_filtered_scoped_and_errors_do_not_veto_other_observers` |
+| Home/cwd/memory/profile effects work against the real VM | `house::microvm_tests::homes_cwd_memory_and_profile_notifications_work_in_the_guest` (opt-in) |
 | The default guest is pre-provisioned, and git reads its token from the environment | `sandbox::tests::{the_default_policy_boots_a_preprovisioned_guest, git_reads_its_token_from_the_environment_not_a_credential_store}` |
 | Every invokable tool is offered to the model | `tools::tests::the_active_tool_list_covers_every_builtin` |
 | An unmentioned Lua flag keeps its default | `lua::tests::an_unmentioned_flag_keeps_its_default` |

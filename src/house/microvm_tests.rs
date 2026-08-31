@@ -1,0 +1,88 @@
+//! End-to-end house effects: opt-in, always a real microVM, never host shells.
+use super::*;
+use crate::tools::Tools;
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real microVM"]
+async fn homes_cwd_memory_and_profile_notifications_work_in_the_guest() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    crate::project::init(dir.path())?;
+    let mut project = Project::load(dir.path())?;
+    let runtime = Arc::get_mut(&mut project.runtime).expect("unshared runtime");
+    let name = format!("reve-it-homes-{}", rand::random::<u32>());
+    runtime.policy.name = Some(name.clone());
+    runtime.policy.image = "alpine".into();
+    runtime.policy.cpus = 1;
+    runtime.policy.memory = 512;
+    runtime.policy.provision = false;
+    runtime.policy.secrets.clear();
+    runtime.agent.model = None;
+    runtime.policy.root_disk = 1024;
+    println!("isolated VM integration instance: {name}");
+    let house = House::boot(project, "127.0.0.1:0".into(), &crate::sandbox::Silent).await?;
+    let result: anyhow::Result<()> = async {
+        let first = "chief-of-staff";
+        let second = house.create_bot(CreateSpec { name:"Miku".into(), title:"Music".into(), description:"Compose music".into(), soul:Some("MUSIC_ONLY_SOUL".into()), model:None, avatar:None }).await?;
+        anyhow::ensure!(house.bot_soul(&second.id)?.contains("MUSIC_ONLY_SOUL"));
+        let context = house.inner.context(first)?;
+        let other = house.inner.context(&second.id)?;
+        anyhow::ensure!(context.cwd() == format!("{}/workspace", context.home));
+        let sandbox = house.sandbox();
+        let setup = sandbox.exec("mkdir -p /workspace/projects/qmd/sub; printf ROOT_RULE > /AGENTS.md; printf SHARED_RULE > /workspace/AGENTS.md; printf QMD_RULE > /workspace/projects/qmd/AGENTS.md; printf SUB_RULE > /workspace/projects/qmd/sub/AGENTS.md", crate::sandbox::ExecOptions::default(), None).await?;
+        anyhow::ensure!(setup.success);
+        let changed = house.inner.change_directory(first, "/workspace/projects/qmd/sub").await?;
+        for word in ["ROOT_RULE", "SHARED_RULE", "QMD_RULE", "SUB_RULE"] { anyhow::ensure!(changed.contains(word)); }
+        anyhow::ensure!(changed.find("ROOT_RULE") < changed.find("SUB_RULE"));
+        let tools = HouseTools { inner:Toolbox::for_context(sandbox.clone(), house.project().runtime_arc(), context.clone()), house:Arc::downgrade(&house.inner), bot_id:first.into() };
+        let output = tools.invoke("bash", serde_json::json!({"command":"printf '%s\\n' \"$HOME\"; pwd"}).as_object().unwrap().clone(), None).await.map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(output.contains("/workspace/agents/chief-of-staff\n/workspace/projects/qmd/sub"));
+        tools.invoke("write", serde_json::json!({"path":"note.txt","content":"working output"}).as_object().unwrap().clone(), None).await.map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(std::fs::read_to_string(dir.path().join("workspace/projects/qmd/sub/note.txt"))? == "working output");
+        anyhow::ensure!(other.cwd() == "/workspace/agents/miku/workspace");
+        anyhow::ensure!(house.inner.change_directory(first, "/directory-that-does-not-exist").await.is_err());
+        anyhow::ensure!(context.cwd() == "/workspace/projects/qmd/sub");
+        let harness = house.inner.ready_harness(first)?;
+        let restored = crate::working_directory::Context::new(first)?;
+        restored.restore(harness.session(), MAIN_LANE, &sandbox).await?;
+        anyhow::ensure!(restored.cwd() == context.cwd());
+        house.inner.change_directory(first, &context.home).await?;
+        anyhow::ensure!(!context.instructions().contains("QMD_RULE"));
+        let request = memory::Request::parse(serde_json::json!({"target":"memory","action":"write","fact":"PRIVATE_MUSIC_FACT","tier":"profile"}).as_object().unwrap())?;
+        house.inner.update_memory(&second.id, request.clone()).await?;
+        let duplicate = house.inner.update_memory(&second.id, request).await?;
+        anyhow::ensure!(duplicate.contains("Already remembered"));
+        let roster = house.ready_profiles();
+        anyhow::ensure!(!system_prompt(house.project(), &roster.iter().find(|p| p.id == first).unwrap().clone(), &roster).contains("PRIVATE_MUSIC_FACT"));
+        let mut events = house.subscribe_house();
+        let profile_path = format!("/workspace/agents/{}/profile.json", second.id);
+        tools.invoke("write", serde_json::json!({"path":profile_path,"content":serde_json::json!({"id":second.id,"name":"Miku Renamed","title":"Composer","avatar":"blue:blob"}).to_string()}).as_object().unwrap().clone(), None).await.map_err(anyhow::Error::msg)?;
+        let view = house.profile_views().into_iter().find(|p| p["id"] == second.id).unwrap();
+        anyhow::ensure!(view["name"] == "Miku Renamed");
+        anyhow::ensure!(matches!(events.recv().await?.kind, Kind::RosterChanged { .. }));
+        // A stale plan must not overwrite a newer user edit.
+        let relative = std::path::PathBuf::from("workspace/projects/qmd/sub/note.txt");
+        let stale = files::Change { relative:relative.clone(), before:Some("older bytes".into()), after:"bad overwrite".into() };
+        anyhow::ensure!(stale.apply(&sandbox).await.is_err());
+        anyhow::ensure!(std::fs::read_to_string(dir.path().join(relative))? == "working output");
+        Ok(())
+    }.await;
+    let sessions: Vec<_> = house
+        .inner
+        .snapshot
+        .read()
+        .values()
+        .filter_map(|slot| match slot {
+            BotSlot::Ready(rt) => Some(rt.session.clone()),
+            _ => None,
+        })
+        .collect();
+    for session in sessions {
+        session.close().await;
+    }
+    let stopped = house.shutdown().await;
+    let removed = microsandbox::Sandbox::remove(&name).await;
+    result?;
+    stopped?;
+    removed?;
+    Ok(())
+}

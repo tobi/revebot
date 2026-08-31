@@ -242,7 +242,15 @@ async fn plugins_skill_examples_load_and_pure_callbacks_execute() {
         }
         examples += 1;
     }
-    assert_eq!(examples, 4, "every executable example must be exercised");
+    assert_eq!(examples, 5, "every executable example must be exercised");
+    let event = crate::house::resources::Change::new(
+        "miku",
+        "/repo".into(),
+        vec!["/workspace/agents/miku/memory/profile.md".into()],
+        false,
+    );
+    let (sends, errors) = rt.run_changes(&event).await;
+    assert!(sends.is_empty() && errors.is_empty());
     assert!(rt.tool("read_note").is_some()); // Guest effect exercised by ignored microVM test.
     assert_eq!(
         rt.fire_routine("chief_weekday_briefing").await.unwrap(),
@@ -273,6 +281,53 @@ async fn plugins_skill_examples_load_and_pure_callbacks_execute() {
             .block
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn change_observers_are_filtered_scoped_and_errors_do_not_veto_other_observers() {
+    let dir = tempfile::tempdir().unwrap();
+    source(
+        dir.path(),
+        "workspace/plugins/changes.lua",
+        r#"
+        on_change('bad', {resources={'memory'}, run=function(event, ctx)
+            ctx.send(ctx.bot, 'must not leak'); error('broken observer')
+        end})
+        on_change('good', {paths={'/workspace/agents/*/memory/*'}, resources={'memory'}, run=function(event, ctx)
+            assert(io == nil and ctx.bot == 'miku' and ctx.cwd == '/repo')
+            ctx.send(ctx.bot, event.resources[1])
+        end})
+    "#,
+    );
+    source(
+        dir.path(),
+        "workspace/agents/qmd/plugins/private.lua",
+        r#"
+        on_change('private', {include_unknown=true, run=function() error('wrong owner called') end})
+    "#,
+    );
+    let mut rt = Runtime::new().unwrap();
+    rt.load_workspace_tools(dir.path(), Path::new("workspace/plugins"), None)
+        .unwrap();
+    rt.load_workspace_tools(
+        dir.path(),
+        Path::new("workspace/agents/qmd/plugins"),
+        Some("qmd"),
+    )
+    .unwrap();
+    let event = crate::house::resources::Change::new(
+        "miku",
+        "/repo".into(),
+        vec!["/workspace/agents/miku/memory/profile.md".into()],
+        false,
+    );
+    let (sends, errors) = rt.run_changes(&event).await;
+    assert_eq!(sends, vec![("miku".into(), "memory".into())]);
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("broken observer"));
+    let unknown = crate::house::resources::Change::new("miku", "/repo".into(), Vec::new(), true);
+    let (sends, errors) = rt.run_changes(&unknown).await;
+    assert!(sends.is_empty() && errors.is_empty());
 }
 
 #[test]

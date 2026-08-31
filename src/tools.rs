@@ -186,11 +186,42 @@ pub fn tool_names(runtime: &Runtime) -> Vec<String> {
 pub struct Toolbox {
     sandbox: Arc<Sandbox>,
     runtime: Arc<Runtime>,
+    context: Option<crate::working_directory::Context>,
 }
 
 impl Toolbox {
     pub fn new(sandbox: Arc<Sandbox>, runtime: Arc<Runtime>) -> Self {
-        Self { sandbox, runtime }
+        Self {
+            sandbox,
+            runtime,
+            context: None,
+        }
+    }
+
+    pub fn for_context(
+        sandbox: Arc<Sandbox>,
+        runtime: Arc<Runtime>,
+        context: crate::working_directory::Context,
+    ) -> Self {
+        Self {
+            sandbox,
+            runtime,
+            context: Some(context),
+        }
+    }
+
+    fn options(&self) -> ExecOptions {
+        self.context
+            .as_ref()
+            .map(|c| c.options())
+            .unwrap_or_default()
+    }
+
+    fn resolve(&self, path: &str) -> String {
+        match &self.context {
+            Some(context) => context.resolve(path),
+            None => crate::working_directory::normalize(self.sandbox.workdir(), path),
+        }
     }
 
     /// Everything the model may call: built-ins first, then this agent's own.
@@ -231,7 +262,13 @@ impl Toolbox {
         if self.runtime.tool(name).is_some() {
             let text = self
                 .runtime
-                .call_tool_cancelled(name, args, self.sandbox.clone(), cancel)
+                .call_tool_in(
+                    name,
+                    args,
+                    self.sandbox.clone(),
+                    cancel,
+                    self.context.clone(),
+                )
                 .await
                 .map_err(|e| e.to_string())?;
             return Ok(self.present_output(&text).await);
@@ -249,7 +286,7 @@ impl Toolbox {
                         &command,
                         ExecOptions {
                             timeout: Some(std::time::Duration::from_secs(timeout)),
-                            ..Default::default()
+                            ..self.options()
                         },
                         cancel,
                     )
@@ -270,7 +307,7 @@ impl Toolbox {
                 text
             }
             "read" => {
-                let path = string(&args, "path")?;
+                let path = self.resolve(&string(&args, "path")?);
                 let content = self
                     .sandbox
                     .read_file(&path)
@@ -281,7 +318,7 @@ impl Toolbox {
                 read_range(&content, offset, limit)?
             }
             "write" => {
-                let path = string(&args, "path")?;
+                let path = self.resolve(&string(&args, "path")?);
                 refuse_session_path(&path)?;
                 let content = string(&args, "content")?;
                 self.sandbox
@@ -291,7 +328,7 @@ impl Toolbox {
                 format!("wrote {} bytes to {path}", content.len())
             }
             "edit" => {
-                let path = string(&args, "path")?;
+                let path = self.resolve(&string(&args, "path")?);
                 refuse_session_path(&path)?;
                 let old = string(&args, "old")?;
                 let new = string(&args, "new")?;
@@ -347,7 +384,7 @@ impl Toolbox {
     async fn shell(&self, command: &str, cancel: Option<CancelRx>) -> Result<String, String> {
         let out = self
             .sandbox
-            .exec(command, ExecOptions::default(), cancel)
+            .exec(command, self.options(), cancel)
             .await
             .map_err(|e| e.to_string())?;
         let text = if out.stdout.trim().is_empty() {
@@ -401,6 +438,7 @@ impl Tools for Toolbox {
 /// Session JSONL lives under `agents/<id>/sessions/` on the shared computer.
 /// `write`/`edit` refuse those paths; `bash` can still tear them.
 pub fn is_session_path(path: &str) -> bool {
+    let path = crate::working_directory::normalize("/workspace", path);
     let trimmed = path.trim_start_matches('/');
     let trimmed = trimmed.strip_prefix("workspace/").unwrap_or(trimmed);
     let parts: Vec<&str> = trimmed.split('/').filter(|p| !p.is_empty()).collect();

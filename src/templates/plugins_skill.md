@@ -15,9 +15,9 @@ inside the mandatory microVM through `ctx.sh`. There is no host shell fallback.
 
 | Location | Declarations | Trust |
 |---|---|---|
-| `plugins/*.lua`, legacy `tools/*.lua` at the house root | `tool`, `guard`, `cron` | Trusted host-installed code; outside the VM mount |
-| `/workspace/plugins/*.lua` | `tool`, `guard`, `cron` | Restricted, bot-editable Lua |
-| `/workspace/agents/<id>/plugins/*.lua` | `tool`, `guard`, `cron` | Restricted; definitions carry that folder's bot id |
+| `plugins/*.lua`, `tools/*.lua` at the house root | `tool`, `guard`, `cron`, `on_change` | Trusted host-installed code; outside the VM mount |
+| `/workspace/plugins/*.lua` | `tool`, `guard`, `cron`, `on_change` | Restricted, bot-editable Lua |
+| `/workspace/agents/<id>/plugins/*.lua` | `tool`, `guard`, `cron`, `on_change` | Restricted; definitions carry that folder's bot id |
 | `/workspace/routines/*.lua` | `routine` | Restricted; specify `bot` or use `run` |
 | `/workspace/agents/<id>/routines/*.lua` | `routine` | Restricted; `bot` defaults to that folder's id |
 
@@ -37,7 +37,14 @@ is not accepted. Do not put secrets into source files.
 
 ## `tool(name, spec)`
 
-Registers a model-callable tool. `name` is a string; `spec` has:
+Registers a model-callable tool. Rust house names (`update_state`, `cd`,
+`CreateAgent`, `UpdateAgent`, `SendAgentMessage`, `SendUserMessage`,
+`AskUserForSecret`) cannot be replaced. `update_state` supports `target="profile"`
+(default) and `target="memory"`; the memory skill documents facts/tiers/scopes.
+These are model tools, not Lua globals or context functions. `CreateAgent` accepts
+`soul` for the initial SOUL.md, not a separate standing-instructions file.
+
+`name` is a string; `spec` has:
 
 | Field | Type | Default / meaning |
 |---|---|---|
@@ -88,8 +95,15 @@ Rust hooks and Lua defaults). The context is:
 |---|---|
 | `ctx.sh(command: string) -> string` | Execute in the house microVM, using default guest execution options. Returns stdout; appends stderr if nonempty. No options-table overload. |
 | `ctx.shellescape(value: string) -> string` | Quote one shell argument; concatenate only the quoted result into commands. |
-| `ctx.workdir: string` | Configured guest working directory, normally `/workspace`; **not a host path**. |
-| `ctx.bot: string \| nil` | Owning bot folder for bot-local definitions; nil for house/host definitions. Currently the definition owner, not necessarily the invoking bot. |
+| `ctx.workdir: string`, `ctx.cwd: string` | Current conversation's guest cwd. Starts at `/workspace/agents/<id>/workspace`; `cd` changes it. Unscoped CLI calls use the configured guest workdir. Never a host path. |
+| `ctx.home: string \| nil` | Fixed agent home `/workspace/agents/<id>` for bot calls; nil for unscoped calls. Shell `HOME` matches it even after `cd`. |
+| `ctx.bot: string \| nil` | Invoking bot's id in a house conversation, including for shared plugins. Unscoped calls retain definition-owner metadata when present. |
+
+`ctx.sh` and built-in relative-path tools follow the conversation cwd, not the
+host's directory. Use the Rust `cd` tool (not a persistent shell `cd`) to change
+it. The change survives restart, preserves HOME, and loads full ancestor
+`AGENTS.md` files root-to-leaf. Each incoming message has a `<cwd>` header snapshot.
+`SOUL.md` and memory remain anchored at HOME, independent of cwd.
 
 `ctx.sh` is asynchronous from Rust's perspective: Lua writes ordinary sequential
 code while the guest command runs. Sandbox/transport errors raise a Lua error.
@@ -156,6 +170,61 @@ guard("no_force_push", {
 This example is a heuristic for one tool name, not a complete security policy:
 other tools/commands can perform equivalent operations. Guards apply to harness
 calls, not every direct CLI/HTTP tool invocation.
+
+## `on_change(id, spec)` — post-write observations
+
+Registers an observer in a plugin file. This is notification **after** a write,
+not authorization; use `guard` for pre-tool policy.
+
+| Field | Type | Default / meaning |
+|---|---|---|
+| `paths` | string array | Empty matches any known path. Guest absolute glob patterns; any match passes. |
+| `resources` | string array | Empty matches any kind. Supported: `profile`, `soul`, `memory`, `directory_rules`, `skills`, `plugins`, `routines`, `vm`. |
+| `include_unknown` | boolean | `false`. Opt into shell/plugin effects whose changed paths are unknown. Those events bypass path/kind filters conservatively. |
+| `run` | `function(event, ctx)` | Required. Return value ignored. |
+
+Known events must pass both nonempty filters. Bot-local observers only receive
+events originating from their owning bot; house observers see all bots. Ordinary
+files can be watched by path even when they have no special resource kind.
+
+`event` contains `bot: string`, `cwd: string`, `paths: {string,...}`,
+`resources: {string,...}`, `unknown: boolean`. It contains **no file contents or
+credentials**. `unknown` means the tool may have written indirectly; it is not a
+claim that any particular file changed. `write`/`edit` supply known paths;
+shell/plugin effects are conservative unknown notifications. Supported structured
+profile/memory/SOUL writes also publish events.
+
+An unscoped HTTP/CLI exec/tool call has `event.bot = ""`; its `ctx.bot` is nil.
+Do not invent an originating bot. Bot-local observers do not receive those events.
+
+Observer context has `ctx.bot`, `ctx.cwd`, and
+`ctx.send(bot_id: string, text: string)`. Sends are collected, then queued durably
+for a later bot run only if that observer succeeds (max 32 sends per callback).
+No `ctx.sh`, `ctx.home`, `ctx.workdir`, `ctx.bots`, or direct mutation API is exposed
+here. Ask a bot to do work rather than blocking the write path.
+
+```lua
+-- example: plugin
+on_change("review_memory_updates", {
+  resources = { "memory" },
+  paths = { "/workspace/agents/*/memory/*" },
+  run = function(event, ctx)
+    -- Pure callback: an error here cannot undo the original write.
+    assert(event.unknown == false)
+    -- Optional: ctx.send("chief-of-staff", "Review the changed memory file.")
+    -- Only send when action is needed, to avoid self-triggering message loops.
+  end,
+})
+```
+
+Observers run asynchronously in registration order, outside the original tool's
+result path. An error discards that callback's sends and is logged; other
+observers still run. Delivery is **best effort, in memory**: events can be lost
+at crash or subscriber overflow, and repeated operations can produce repeated
+notifications. This is not an exactly-once job scheduler. There is no automatic
+observer replay or registration/unsubscribe API at runtime yet; definitions load
+at startup. External-editor changes are reread on the next API/model input; this
+facility is a write-path observer, not a continuously polling filesystem watcher.
 
 ## `routine(id, spec)` and `cron(id, spec)`
 

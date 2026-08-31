@@ -27,8 +27,8 @@ use crate::project::Project;
 use crate::provider::HttpModel;
 use crate::provider::config::Models;
 use crate::provider::discovery::{self, Discovered};
+use crate::sandbox::Sandbox;
 use crate::sandbox::tokio_util_lite::{CancelTx, channel};
-use crate::sandbox::{ExecOptions, Sandbox};
 use crate::session::Session;
 use crate::state::{LaneConfiguration, ModelRef, Outcome, RetryPolicy, RunSettings};
 use crate::storage::Storage;
@@ -56,6 +56,10 @@ impl Model for Unconfigured {
 
 /// Run the terminal until the user leaves.
 pub async fn run(project: Project, sandbox: Arc<Sandbox>) -> anyhow::Result<()> {
+    let profile =
+        crate::house::profile::Profile::load_for(&project.root, crate::house::profile::FIRST_BOT)?;
+    crate::house::home::ensure(&sandbox, &profile).await?;
+    let directory = crate::working_directory::Context::new(&profile.id)?;
     let (updates, updates_rx) = mpsc::channel(256);
     let (actions, mut actions_rx) = mpsc::channel(64);
 
@@ -80,7 +84,9 @@ pub async fn run(project: Project, sandbox: Arc<Sandbox>) -> anyhow::Result<()> 
         location,
     );
     app.set_commands(commands_for(&project));
-    app.set_files(file_candidates(&project.workspace()));
+    app.set_files(file_candidates(
+        &project.bot_dir(&profile.id).join("workspace"),
+    ));
 
     let tools: Vec<String> = project
         .runtime
@@ -134,11 +140,25 @@ pub async fn run(project: Project, sandbox: Arc<Sandbox>) -> anyhow::Result<()> 
     let worker = {
         let updates = updates.clone();
         tokio::spawn(async move {
-            let toolbox = Arc::new(Toolbox::new(sandbox.clone(), project.runtime_arc()));
-            let session_path = project
-                .latest_session(MAIN_LANE)
-                .unwrap_or_else(|| project.conversation_path(MAIN_LANE));
-            let storage = match Storage::open(&session_path, "main", Some("workspace".into())) {
+            let session_path = match project
+                .latest_bot_session_checked(crate::house::profile::FIRST_BOT, MAIN_LANE)
+            {
+                Ok(path) => path.unwrap_or_else(|| project.conversation_path(MAIN_LANE)),
+                Err(error) => {
+                    let _ = updates
+                        .send(Update::Item(Item::Notice(format!("session: {error}"))))
+                        .await;
+                    return;
+                }
+            };
+            let storage = match Storage::open_beneath(
+                &project.root,
+                session_path
+                    .strip_prefix(&project.root)
+                    .expect("project session"),
+                "main",
+                Some(directory.home.clone()),
+            ) {
                 Ok(storage) => storage,
                 Err(error) => {
                     let _ = updates
@@ -150,6 +170,17 @@ pub async fn run(project: Project, sandbox: Arc<Sandbox>) -> anyhow::Result<()> 
             // The owner task is the single writer; everything below holds a
             // handle and commits through it.
             let session = Session::spawn(storage);
+            if let Err(error) = directory.restore(&session, MAIN_LANE, &sandbox).await {
+                let _ = updates
+                    .send(Update::Item(Item::Notice(format!("cwd: {error}"))))
+                    .await;
+                return;
+            }
+            let toolbox = Arc::new(Toolbox::for_context(
+                sandbox.clone(),
+                project.runtime_arc(),
+                directory.clone(),
+            ));
             let model: Arc<dyn Model> = match model {
                 Ok(model) => model,
                 Err(why) => Arc::new(Unconfigured(why)),
@@ -162,9 +193,15 @@ pub async fn run(project: Project, sandbox: Arc<Sandbox>) -> anyhow::Result<()> 
                     hooks: Hooks::new(),
                     system_prompt: {
                         let project = project.clone();
-                        // Rebuilt per turn from workspace/agents/<id>/, which
-                        // the bot can edit.
-                        Arc::new(move || first_bot_system_prompt(&project))
+                        let directory = directory.clone();
+                        Arc::new(move || {
+                            format!(
+                                "{}\nCurrent directory: {}\n{}",
+                                first_bot_system_prompt(&project),
+                                directory.cwd(),
+                                directory.instructions()
+                            )
+                        })
                     },
                     settings: RunSettings::default(),
                     retry: RetryPolicy::default(),
@@ -199,6 +236,12 @@ pub async fn run(project: Project, sandbox: Arc<Sandbox>) -> anyhow::Result<()> 
                 },
             );
 
+            crate::house::bind_profile_environment(
+                &harness,
+                project.clone(),
+                crate::house::profile::FIRST_BOT.into(),
+                toolbox.tool_names(),
+            );
             let events = tokio::spawn(forward_events(harness.subscribe(), updates.clone()));
 
             // Whatever the last process was doing, finish it before taking
@@ -253,7 +296,8 @@ pub async fn run(project: Project, sandbox: Arc<Sandbox>) -> anyhow::Result<()> 
                         let (tx, rx) = channel();
                         *side_cancel.lock() = Some(tx);
                         let _ = updates.send(Update::Item(Item::User(text.clone()))).await;
-                        let item = run_command(&sandbox, text.trim()[1..].trim(), rx).await;
+                        let item =
+                            run_command(&sandbox, &directory, text.trim()[1..].trim(), rx).await;
                         side_cancel.lock().take();
                         let _ = updates.send(Update::Item(item)).await;
                     }
@@ -267,12 +311,22 @@ pub async fn run(project: Project, sandbox: Arc<Sandbox>) -> anyhow::Result<()> 
                         *side_cancel.lock() = Some(tx);
                         let _ = updates.send(Update::Item(Item::User(text.clone()))).await;
                         let rest = text.trim()[1..].to_string();
-                        let item = if let Some(argument) = rest.strip_prefix("compact") {
+                        let item = if let Some(argument) = rest.strip_prefix("cd ") {
+                            Some(
+                                match directory
+                                    .change(&session, MAIN_LANE, &sandbox, argument.trim())
+                                    .await
+                                {
+                                    Ok(text) => Item::Assistant(text),
+                                    Err(error) => Item::Notice(error.to_string()),
+                                },
+                            )
+                        } else if let Some(argument) = rest.strip_prefix("compact") {
                             Some(compact(&harness, argument.trim()).await)
                         } else if let Some(argument) = rest.strip_prefix("queue") {
                             Some(queue(&harness, argument.trim()).await)
                         } else {
-                            dispatch(&project, &sandbox, &rest, rx).await
+                            dispatch(&project, &sandbox, &directory, &rest, rx).await
                         };
                         side_cancel.lock().take();
                         if let Some(item) = item {
@@ -293,6 +347,15 @@ pub async fn run(project: Project, sandbox: Arc<Sandbox>) -> anyhow::Result<()> 
                         if echo {
                             let _ = updates.send(Update::Item(Item::User(text.clone()))).await;
                         }
+                        let roster = crate::house::profile::scan(&project.agents_dir());
+                        let skills = crate::skills::catalog_for(
+                            &project.workspace(),
+                            &project.bot_dir(crate::house::profile::FIRST_BOT),
+                        );
+                        let text = crate::house::wrap::with_cwd(
+                            &crate::house::wrap::wrap_user_turn(&text, &roster, &skills),
+                            &directory.cwd(),
+                        );
                         // A prompt while the lane is busy is a steer. The
                         // harness decides that, not this loop: it commits
                         // against the operation it read, so the race between
@@ -472,12 +535,13 @@ async fn queue(harness: &Arc<Harness>, text: &str) -> Item {
 /// The `!` escape: a command, in the microVM, right now.
 async fn run_command(
     sandbox: &Sandbox,
+    directory: &crate::working_directory::Context,
     command: &str,
     cancel: crate::sandbox::tokio_util_lite::CancelRx,
 ) -> Item {
     let started = Instant::now();
     match sandbox
-        .exec(command, ExecOptions::default(), Some(cancel))
+        .exec(command, directory.options(), Some(cancel))
         .await
     {
         Ok(output) => {
@@ -513,6 +577,7 @@ async fn run_command(
 async fn dispatch(
     project: &Arc<Project>,
     sandbox: &Arc<Sandbox>,
+    directory: &crate::working_directory::Context,
     rest: &str,
     cancel: crate::sandbox::tokio_util_lite::CancelRx,
 ) -> Option<Item> {
@@ -647,7 +712,7 @@ async fn dispatch(
         "quit" => return None,
         // Anything else is a tool, or nothing.
         other if project.runtime.tool(other).is_some() => {
-            return Some(run_tool(project, sandbox, other, cancel).await);
+            return Some(run_tool(project, sandbox, directory, other, cancel).await);
         }
         other => {
             return Some(Item::Notice(format!(
@@ -697,6 +762,7 @@ fn commands_with(project: &Project, discovered: &[Discovered]) -> Vec<Command> {
 
     let mut commands = vec![
         Command::new("help", "what these commands do"),
+        Command::new("cd", "change cwd and load ancestor AGENTS.md rules"),
         Command::new("model", "show or switch the model").with_arguments(models),
         Command::new("models", "list configured and discovered models").with_arguments(vec![
             Candidate {
@@ -848,17 +914,19 @@ fn escape_xml(text: &str, attribute: bool) -> String {
 async fn run_tool(
     project: &Project,
     sandbox: &Arc<Sandbox>,
+    directory: &crate::working_directory::Context,
     name: &str,
     cancel: crate::sandbox::tokio_util_lite::CancelRx,
 ) -> Item {
     let started = Instant::now();
     let result = project
         .runtime
-        .call_tool_cancelled(
+        .call_tool_in(
             name,
             serde_json::Map::new(),
             sandbox.clone(),
             Some(cancel.clone()),
+            Some(directory.clone()),
         )
         .await;
     let interrupted = cancel.is_cancelled();

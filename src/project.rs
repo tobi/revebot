@@ -15,7 +15,7 @@ use crate::lua::Runtime;
 #[derive(Debug, Error)]
 pub enum ProjectError {
     #[error(
-        "not a house directory: {0}\n\n  a house needs:\n    config.yml (or agent.lua)              house configuration\n    workspace/agents/<id>/instructions.md  standing instructions for each bot\n\n  run `revebot init` to scaffold one here"
+        "not a house directory: {0}\n\n  a house needs:\n    config.yml (or agent.lua)              house configuration\n    workspace/agents/<id>/SOUL.md          identity and standing remit for each bot\n\n  run `revebot init` to scaffold one here"
     )]
     NotAHouse(PathBuf),
     #[error("io error at {path}: {source}")]
@@ -26,6 +26,8 @@ pub enum ProjectError {
     },
     #[error(transparent)]
     Lua(#[from] crate::lua::LuaError),
+    #[error("invalid agent profile: {0}")]
+    Profile(String),
 }
 
 pub type Result<T, E = ProjectError> = std::result::Result<T, E>;
@@ -63,23 +65,18 @@ const TEMPLATES: &[(&str, &str)] = &[
         include_str!("templates/plugins_skill.md"),
     ),
     (
+        "workspace/skills/memory/SKILL.md",
+        include_str!("templates/memory_skill.md"),
+    ),
+    (
         "workspace/skills/secrets/SKILL.md",
         include_str!("templates/secrets_skill.md"),
     ),
     ("models.yml", include_str!("templates/models.yml")),
-    ("workspace/AGENTS.md", include_str!("templates/AGENTS.md")),
-    ("workspace/SOUL.md", include_str!("templates/SOUL.md")),
-    (
-        "workspace/KNOWLEDGE.md",
-        include_str!("templates/KNOWLEDGE.md"),
-    ),
+    ("workspace/VM.md", include_str!("templates/VM.md")),
     (
         "workspace/HEARTBEAT.yml",
         include_str!("templates/HEARTBEAT.yml"),
-    ),
-    (
-        "workspace/agents/chief-of-staff/instructions.md",
-        include_str!("templates/chief_of_staff_instructions.md"),
     ),
     (
         "workspace/agents/chief-of-staff/profile.json",
@@ -92,8 +89,8 @@ const KEEP_DIRS: &[&str] = &[
     "tools",
     "plugins",
     "channels",
-    "workspace/knowledge",
-    "workspace/notes",
+    "workspace/projects",
+    "workspace/memory/user",
     "workspace/skills",
     "workspace/plugins",
     "workspace/routines",
@@ -101,6 +98,11 @@ const KEEP_DIRS: &[&str] = &[
     "workspace/agents/chief-of-staff/skills",
     "workspace/agents/chief-of-staff/sessions",
     "workspace/agents/chief-of-staff/memory",
+    "workspace/agents/chief-of-staff/memory/log",
+    "workspace/agents/chief-of-staff/memory/notes",
+    "workspace/agents/chief-of-staff/workspace",
+    "workspace/agents/chief-of-staff/knowledge",
+    "workspace/agents/chief-of-staff/notes",
     "workspace/agents/chief-of-staff/routines",
     "workspace/agents/chief-of-staff/plugins",
 ];
@@ -123,32 +125,76 @@ pub fn init(root: impl AsRef<Path>) -> Result<InitReport> {
         ..Default::default()
     };
 
+    std::fs::create_dir_all(&root).map_err(|source| ProjectError::Io {
+        path: root.clone(),
+        source,
+    })?;
     for dir in KEEP_DIRS {
-        let path = root.join(dir);
-        std::fs::create_dir_all(&path).map_err(|source| ProjectError::Io { path, source })?;
+        crate::script_fs::ensure_dir(&root, Path::new(dir)).map_err(|source| ProjectError::Io {
+            path: root.join(dir),
+            source,
+        })?;
     }
     // `.reve` is durable state, not scaffold; it is created on first launch.
     for (name, body) in TEMPLATES {
-        let path = root.join(name);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| ProjectError::Io {
-                path: parent.to_path_buf(),
+        install_scaffold(&root, name, body, &mut report)?;
+    }
+    // Existing bots receive missing home files, never global persona/project
+    // copies. create_new preserves even intentionally empty edited files.
+    let profiles = crate::house::profile::scan_checked(&root)
+        .map_err(|e| ProjectError::Profile(e.to_string()))?;
+    for profile in profiles {
+        for directory in [
+            "workspace",
+            "memory/log",
+            "memory/notes",
+            "knowledge",
+            "notes",
+        ] {
+            let relative = Path::new("workspace/agents")
+                .join(&profile.id)
+                .join(directory);
+            crate::script_fs::ensure_dir(&root, &relative).map_err(|source| ProjectError::Io {
+                path: root.join(relative),
                 source,
             })?;
         }
-        match std::fs::read_to_string(&path) {
-            Ok(existing) if existing == *body => report.unchanged.push(name.to_string()),
-            Ok(_) => report.changed.push(name.to_string()),
-            Err(_) => {
-                std::fs::write(&path, body).map_err(|source| ProjectError::Io {
-                    path: path.clone(),
-                    source,
-                })?;
-                report.created.push(name.to_string());
-            }
+        for (name, body) in crate::house::home::defaults(&profile) {
+            install_scaffold(
+                &root,
+                &format!("workspace/agents/{}/{name}", profile.id),
+                &body,
+                &mut report,
+            )?;
         }
     }
     Ok(report)
+}
+
+fn install_scaffold(
+    root: &Path,
+    relative: &str,
+    body: &str,
+    report: &mut InitReport,
+) -> Result<()> {
+    let path = root.join(relative);
+    match crate::script_fs::create_new(root, Path::new(relative)) {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(body.as_bytes())
+                .map_err(|source| ProjectError::Io { path, source })?;
+            report.created.push(relative.into());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            match crate::script_fs::read_text(root, Path::new(relative), 1024 * 1024) {
+                Ok(existing) if existing == body => report.unchanged.push(relative.into()),
+                Ok(_) => report.changed.push(relative.into()),
+                Err(source) => return Err(ProjectError::Io { path, source }),
+            }
+        }
+        Err(source) => return Err(ProjectError::Io { path, source }),
+    }
+    Ok(())
 }
 
 /// A loaded agent directory.
@@ -174,6 +220,8 @@ impl Project {
         if !Self::is_house_dir(&root) {
             return Err(ProjectError::NotAHouse(root));
         }
+        crate::house::profile::scan_checked(&root)
+            .map_err(|e| ProjectError::Profile(e.to_string()))?;
         let mut runtime = Runtime::new()?;
         load_host_config(&root, &mut runtime)?;
         runtime.load_tools(&root.join("tools"))?;
@@ -242,7 +290,30 @@ impl Project {
     }
 
     pub fn latest_bot_session(&self, bot: &str, name: &str) -> Option<PathBuf> {
-        newest_named_jsonl(&self.bot_sessions_dir(bot), name)
+        self.latest_bot_session_checked(bot, name).ok().flatten()
+    }
+
+    pub fn latest_bot_session_checked(&self, bot: &str, name: &str) -> Result<Option<PathBuf>> {
+        crate::house::profile::validate_id(bot)
+            .and_then(|_| crate::house::profile::validate_id(name))
+            .map_err(|e| ProjectError::Profile(e.to_string()))?;
+        let relative = Path::new("workspace/agents").join(bot).join("sessions");
+        let mut files: Vec<_> = crate::script_fs::files(&self.root, &relative)
+            .map_err(|source| ProjectError::Io {
+                path: self.root.join(&relative),
+                source,
+            })?
+            .into_iter()
+            .filter(|path| {
+                path.extension().is_some_and(|e| e == "jsonl")
+                    && path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with(&format!("{name}-")))
+            })
+            .collect();
+        files.sort();
+        Ok(files.pop().map(|p| self.root.join(p)))
     }
 }
 
@@ -321,21 +392,6 @@ fn apply_config_yml(runtime: &mut Runtime, path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn newest_named_jsonl(dir: &Path, name: &str) -> Option<PathBuf> {
-    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
-        .ok()?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.extension().is_some_and(|e| e == "jsonl")
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with(&format!("{name}-")))
-        })
-        .collect();
-    found.sort();
-    found.pop()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,7 +431,7 @@ mod tests {
             report
                 .created
                 .iter()
-                .any(|n| n == "workspace/agents/chief-of-staff/instructions.md")
+                .any(|n| n == "workspace/agents/chief-of-staff/SOUL.md")
         );
         assert!(
             report
@@ -391,7 +447,7 @@ mod tests {
                 .is_dir()
         );
         assert!(
-            !dir.path().join("instructions.md").exists(),
+            !dir.path().join("SOUL.md").exists(),
             "bot identity lives under workspace/agents/, not the house root"
         );
         assert!(
@@ -408,18 +464,53 @@ mod tests {
                 "{skill} skill"
             );
         }
-        let edited = dir
-            .path()
-            .join("workspace/agents/chief-of-staff/instructions.md");
+        let edited = dir.path().join("workspace/agents/chief-of-staff/SOUL.md");
         std::fs::write(&edited, "# mine\n").unwrap();
         let again = init(dir.path()).unwrap();
         assert!(
             again
                 .changed
                 .iter()
-                .any(|n| n == "workspace/agents/chief-of-staff/instructions.md")
+                .any(|n| n == "workspace/agents/chief-of-staff/SOUL.md")
         );
         assert_eq!(std::fs::read_to_string(&edited).unwrap(), "# mine\n");
+    }
+
+    #[test]
+    fn each_agent_gets_its_own_home_and_edited_souls_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("workspace/agents/miku");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("profile.json"), r#"{"name":"Miku"}"#).unwrap();
+        std::fs::write(dir.path().join("workspace/SOUL.md"), "GLOBAL PERSONALITY").unwrap();
+        std::fs::write(dir.path().join("workspace/KNOWLEDGE.md"), "QMD KNOWLEDGE").unwrap();
+        init(dir.path()).unwrap();
+        let soul = std::fs::read_to_string(home.join("SOUL.md")).unwrap();
+        assert!(soul.contains("Miku"));
+        assert!(!soul.contains("GLOBAL PERSONALITY"));
+        assert!(!soul.contains("QMD KNOWLEDGE"));
+        assert!(home.join("workspace").is_dir());
+        assert!(home.join("memory/log").is_dir());
+        std::fs::write(home.join("SOUL.md"), "").unwrap();
+        init(dir.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(home.join("SOUL.md")).unwrap(), "");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("workspace/KNOWLEDGE.md")).unwrap(),
+            "QMD KNOWLEDGE"
+        );
+    }
+
+    #[test]
+    fn init_does_not_follow_a_symlinked_home_subdirectory() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path()).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let home = dir.path().join("workspace/agents/chief-of-staff");
+        std::fs::remove_dir_all(home.join("memory")).unwrap();
+        symlink(outside.path(), home.join("memory")).unwrap();
+        assert!(init(dir.path()).is_err());
+        assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
     }
 
     #[test]
@@ -461,25 +552,6 @@ mod tests {
             err.to_string().contains("revebot init"),
             "and it says how to fix that"
         );
-        assert!(
-            !err.to_string().contains("legacy"),
-            "the error must not offer a root instructions.md path"
-        );
-    }
-
-    #[test]
-    fn a_root_instructions_file_is_not_a_house() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("instructions.md"),
-            "old single-agent identity",
-        )
-        .unwrap();
-        assert!(!Project::is_house_dir(dir.path()));
-        assert!(matches!(
-            Project::load(dir.path()),
-            Err(ProjectError::NotAHouse(_))
-        ));
     }
 
     #[test]

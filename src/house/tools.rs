@@ -16,21 +16,33 @@ type HouseTool = (&'static str, &'static str, fn() -> Value);
 const HOUSE_TOOLS: &[HouseTool] = &[
     (
         "update_state",
-        "Update your own profile: name, title, description, avatar, model.",
+        "Update your profile (target=profile, default) or remember/forget an exact fact (target=memory). Memory defaults to agent scope and log tier; user scope is explicitly shared, project scope requires profile.projects membership.",
         || {
             json!({
                 "type": "object",
                 "properties": {
+                    "target": {"type": "string", "enum": ["profile", "memory"]},
                     "name": {"type": "string"},
                     "title": {"type": "string"},
                     "description": {"type": "string"},
                     "avatar": {"type": ["string", "null"]},
                     "group": {"type": "string"},
-                    "model": {"type": ["string", "null"]}
+                    "model": {"type": ["string", "null"]},
+                    "projects": {"type": "array", "items": {"type": "string"}},
+                    "action": {"type": "string", "enum": ["write", "forget"]},
+                    "fact": {"type": "string"},
+                    "tier": {"type": "string", "enum": ["profile", "log", "note"]},
+                    "scope": {"type": "string", "enum": ["agent", "user", "project"]},
+                    "project": {"type": "string"}
                 },
                 "additionalProperties": false
             })
         },
+    ),
+    (
+        "cd",
+        "Change this conversation's guest working directory. HOME stays fixed. Returns the canonical path and full root-to-leaf ancestor AGENTS.md instructions; saved across restarts.",
+        || json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}),
     ),
     (
         "CreateAgent",
@@ -42,8 +54,9 @@ const HOUSE_TOOLS: &[HouseTool] = &[
                     "name": {"type": "string"},
                     "title": {"type": "string"},
                     "description": {"type": "string"},
-                    "instructions": {"type": "string"},
-                    "model": {"type": "string"}
+                    "soul": {"type": "string", "description": "Identity, personality and standing remit for the new bot's SOUL.md"},
+                    "avatar": {"type": ["string", "null"]},
+                    "model": {"type": ["string", "null"]}
                 },
                 "required": ["name"],
                 "additionalProperties": false
@@ -168,6 +181,16 @@ impl Tools for HouseTools {
         Box::pin(async move {
             match name {
                 "update_state" => self.update_state(arguments).await,
+                "cd" => {
+                    let path = arguments
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .ok_or("cd requires path")?;
+                    self.house()?
+                        .change_directory(&self.bot_id, path)
+                        .await
+                        .map_err(|e| e.to_string())
+                }
                 "CreateAgent" => self.create_agent(arguments).await,
                 "UpdateAgent" => self.update_agent(arguments).await,
                 "SendAgentMessage" => self.send_agent(arguments).await,
@@ -187,7 +210,32 @@ impl Tools for HouseTools {
                             source,
                         ));
                     }
-                    self.inner.call_cancelled(other, arguments, cancel).await
+                    let path = arguments
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let mut result = self.inner.call_cancelled(other, arguments, cancel).await;
+                    if !matches!(other, "read" | "ls" | "glob" | "grep")
+                        && (result.is_ok() || !matches!(other, "write" | "edit"))
+                        && let Some(house) = self.house.upgrade()
+                    {
+                        let known = matches!(other, "write" | "edit");
+                        let paths = if known {
+                            match (path, house.context(&self.bot_id)) {
+                                (Some(path), Ok(context)) => vec![context.resolve(&path)],
+                                _ => Vec::new(),
+                            }
+                        } else {
+                            Vec::new()
+                        };
+                        if let Err(error) =
+                            house.workspace_changed(&self.bot_id, paths, !known).await
+                            && let Ok(text) = &mut result
+                        {
+                            text.push_str(&format!("\nSpecial-file refresh failed: {error}. Use cd to refresh directory rules."));
+                        }
+                    }
+                    result
                 }
             }
         })
@@ -201,8 +249,26 @@ impl HouseTools {
             .ok_or_else(|| "house is shutting down".into())
     }
 
-    async fn update_state(&self, args: Map<String, Value>) -> Result<String, String> {
+    async fn update_state(&self, mut args: Map<String, Value>) -> Result<String, String> {
         let house = self.house()?;
+        let target = match args.get("target") {
+            None => "profile",
+            Some(Value::String(target)) => target,
+            Some(_) => return Err("update_state target must be a string".into()),
+        };
+        match target {
+            "memory" => {
+                let request = super::memory::Request::parse(&args).map_err(|e| e.to_string())?;
+                return house
+                    .update_memory(&self.bot_id, request)
+                    .await
+                    .map_err(|e| e.to_string());
+            }
+            "profile" => {
+                args.remove("target");
+            }
+            other => return Err(format!("unknown update_state target {other:?}")),
+        }
         let patch = Value::Object(args);
         let profile = house
             .patch_profile(&self.bot_id, patch)
@@ -216,36 +282,8 @@ impl HouseTools {
 
     async fn create_agent(&self, args: Map<String, Value>) -> Result<String, String> {
         let house = self.house()?;
-        let name = args
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or("missing name")?
-            .to_string();
-        let spec = CreateSpec {
-            name,
-            title: args
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            description: args
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            instructions: args
-                .get("instructions")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            model: args
-                .get("model")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            avatar: args
-                .get("avatar")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-        };
+        let spec: CreateSpec =
+            serde_json::from_value(Value::Object(args)).map_err(|e| e.to_string())?;
         let profile = house.create_bot(spec).await.map_err(|e| e.to_string())?;
         Ok(format!("created {} (id: {})", profile.name, profile.id))
     }

@@ -1,12 +1,19 @@
 //! A house: one microVM, many bots, one shared `/workspace`.
 
+pub(crate) mod files;
+pub mod home;
+pub mod memory;
 pub mod profile;
 pub mod prompt;
+pub mod resources;
 pub mod secret;
 pub mod serve;
 pub mod tools;
 pub mod usage;
 pub mod wrap;
+
+#[cfg(test)]
+mod microvm_tests;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::OpenOptions;
@@ -34,7 +41,7 @@ use crate::state::{LaneConfiguration, ModelRef, PendingEntry, RetryPolicy, RunSe
 use crate::storage::Storage;
 use crate::tools::Toolbox;
 
-use profile::{BOT_CAP, FIRST_BOT, Profile, scan, slug_from_name, unique_slug};
+use profile::{BOT_CAP, Profile, scan_checked, slug_from_name, unique_slug};
 use prompt::system_prompt;
 use tools::HouseTools;
 use wrap::wrap_agent_arrival;
@@ -76,6 +83,8 @@ pub(crate) struct Inner {
     /// One in-flight AskUserForSecret per bot.
     secret_asks: Mutex<HashMap<String, tokio::sync::oneshot::Sender<SecretAskResult>>>,
     usage: usage::UsageLog,
+    memory_edits: tokio::sync::Mutex<()>,
+    profile_edits: tokio::sync::Mutex<()>,
 }
 
 #[derive(Debug, Clone)]
@@ -99,15 +108,19 @@ struct BotRuntime {
     harness: Arc<Harness>,
     session: Session,
     cmds: mpsc::Sender<BotCmd>,
-    model: Mutex<Arc<dyn Model>>,
+    context: crate::working_directory::Context,
+    profile_error: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateSpec {
     pub name: String,
+    #[serde(default)]
     pub title: String,
+    #[serde(default)]
     pub description: String,
-    pub instructions: Option<String>,
+    pub soul: Option<String>,
     pub model: Option<String>,
     pub avatar: Option<String>,
 }
@@ -208,28 +221,59 @@ impl House {
             skill_seen: Mutex::new(HashMap::new()),
             secret_asks: Mutex::new(HashMap::new()),
             usage: usage::UsageLog::open(&project.state_dir()),
+            memory_edits: tokio::sync::Mutex::new(()),
+            profile_edits: tokio::sync::Mutex::new(()),
         });
         *inner.me.lock() = Arc::downgrade(&inner);
 
-        let mut profiles = scan(&project.agents_dir());
-        if !profiles.iter().any(|p| p.id == FIRST_BOT) {
+        let mut profiles = scan_checked(&project.root)?;
+        if profiles.is_empty() {
             crate::project::init(&project.root)?;
-            profiles = scan(&project.agents_dir());
+            profiles = scan_checked(&project.root)?;
         }
         for profile in profiles {
-            inner.spawn_ready(profile).await?;
+            if let Err(error) = inner.spawn_ready(profile).await {
+                let _ = Self {
+                    inner: inner.clone(),
+                }
+                .shutdown()
+                .await;
+                return Err(error);
+            }
         }
         // Resume + kick are the supervisor's first job. Awaiting
         // `resume_all` here would block the HTTP server until every
         // in-flight run finished (a hung tool looks like a stuck boot).
 
         spawn_routines(inner.clone());
+        spawn_resource_observers(Arc::downgrade(&inner), inner.house_events.subscribe());
 
         Ok(Self { inner })
     }
 
     pub fn ready_profiles(&self) -> Vec<Profile> {
         self.inner.ready_profiles()
+    }
+
+    pub fn profile_views(&self) -> Vec<serde_json::Value> {
+        self.inner.refresh_profiles();
+        let mut views: Vec<_> = self
+            .inner
+            .snapshot
+            .read()
+            .values()
+            .filter_map(|slot| {
+                let BotSlot::Ready(rt) = slot else {
+                    return None;
+                };
+                let mut value = serde_json::to_value(&rt.profile).expect("profile JSON");
+                value["profile_error"] = serde_json::json!(rt.profile_error);
+                value["cwd"] = serde_json::json!(rt.context.cwd());
+                Some(value)
+            })
+            .collect();
+        views.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+        views
     }
 
     pub async fn prompt(&self, bot: &str, text: &str) -> anyhow::Result<PromptAck> {
@@ -255,22 +299,29 @@ impl House {
         Ok(page_transcript(entries, before, limit))
     }
 
-    pub fn bot_instructions(&self, bot: &str) -> anyhow::Result<String> {
-        let path = self.inner.project.bot_dir(bot).join("instructions.md");
-        match std::fs::read_to_string(&path) {
-            Ok(text) => Ok(text),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-            Err(e) => Err(e.into()),
-        }
+    pub fn bot_soul(&self, bot: &str) -> anyhow::Result<String> {
+        self.inner.ready_harness(bot)?;
+        Ok(files::read_optional(
+            &self.inner.project.root,
+            &home::relative(bot)?.join("SOUL.md"),
+        )?
+        .unwrap_or_default())
     }
 
-    pub async fn set_bot_instructions(&self, bot: &str, text: &str) -> anyhow::Result<()> {
+    pub async fn set_bot_soul(&self, bot: &str, text: &str) -> anyhow::Result<()> {
         self.inner.ready_harness(bot)?;
+        let _guard = self.inner.profile_edits.lock().await;
+        let relative = home::relative(bot)?.join("SOUL.md");
+        files::Change {
+            before: files::read_optional(&self.inner.project.root, &relative)?,
+            relative: relative.clone(),
+            after: text.into(),
+        }
+        .apply(&self.inner.sandbox)
+        .await?;
         self.inner
-            .sandbox
-            .write_file(&format!("agents/{bot}/instructions.md"), text)
-            .await?;
-        Ok(())
+            .workspace_changed(bot, vec![format!("/{}", relative.display())], false)
+            .await
     }
 
     pub fn configured_models(&self) -> Vec<String> {
@@ -302,6 +353,23 @@ impl House {
         self.inner.house_events.subscribe()
     }
 
+    /// Unscoped exec/tool clients can also write indirectly. No bot identity is
+    /// invented: only global observers opting into unknown effects receive it.
+    pub fn external_effect_finished(&self) {
+        self.inner.refresh_profiles();
+        let _ = self.inner.house_events.send(Event::new(
+            "house",
+            None,
+            Kind::ResourcesChanged {
+                bot: String::new(),
+                cwd: self.inner.sandbox.workdir().into(),
+                paths: Vec::new(),
+                resources: Vec::new(),
+                unknown: true,
+            },
+        ));
+    }
+
     pub async fn create_bot(&self, spec: CreateSpec) -> anyhow::Result<Profile> {
         self.inner.create_bot(spec).await
     }
@@ -323,6 +391,19 @@ impl House {
     }
 
     pub async fn shutdown(&self) -> anyhow::Result<()> {
+        let sessions: Vec<_> = self
+            .inner
+            .snapshot
+            .read()
+            .values()
+            .filter_map(|slot| match slot {
+                BotSlot::Ready(rt) => Some(rt.session.clone()),
+                _ => None,
+            })
+            .collect();
+        for session in sessions {
+            session.close().await;
+        }
         self.inner.sandbox.release_hold().await;
         self.inner.sandbox.stop().await?;
         let _ = std::fs::remove_file(self.inner.project.state_dir().join("house.json"));
@@ -346,7 +427,112 @@ impl House {
 }
 
 impl Inner {
+    pub(crate) async fn workspace_changed(
+        &self,
+        bot: &str,
+        paths: Vec<String>,
+        unknown: bool,
+    ) -> anyhow::Result<()> {
+        self.refresh_profiles();
+        let context = self.context(bot)?;
+        let change = resources::Change::new(bot, context.cwd(), paths, unknown);
+        if unknown || change.resources.iter().any(|r| r == "directory_rules") {
+            // Explicit paths refresh every affected conversation. Unknown shell
+            // paths refresh the originating conversation; others refresh on input.
+            let contexts: Vec<_> = self
+                .snapshot
+                .read()
+                .values()
+                .filter_map(|slot| {
+                    let BotSlot::Ready(rt) = slot else {
+                        return None;
+                    };
+                    (rt.profile.id == bot || change.paths.iter().any(|p| rt.context.inherits(p)))
+                        .then(|| (rt.context.clone(), rt.session.clone()))
+                })
+                .collect();
+            for (context, session) in contexts {
+                context
+                    .change(&session, MAIN_LANE, &self.sandbox, ".")
+                    .await?;
+            }
+        }
+        if unknown || !change.paths.is_empty() {
+            let _ = self.house_events.send(Event::new(
+                "house",
+                None,
+                Kind::ResourcesChanged {
+                    bot: change.bot,
+                    cwd: change.cwd,
+                    paths: change.paths,
+                    resources: change.resources,
+                    unknown,
+                },
+            ));
+        }
+        Ok(())
+    }
+
+    fn refresh_profiles(&self) {
+        let mut changed = false;
+        let mut snap = self.snapshot.write();
+        for (id, slot) in snap.iter_mut() {
+            let BotSlot::Ready(rt) = slot else {
+                continue;
+            };
+            changed |= profile::refresh(
+                &self.project.root,
+                id,
+                &mut rt.profile,
+                &mut rt.profile_error,
+            );
+        }
+        let ids = snap
+            .iter()
+            .filter_map(|(id, slot)| matches!(slot, BotSlot::Ready(_)).then_some(id.clone()))
+            .collect();
+        drop(snap);
+        if changed {
+            let _ = self
+                .house_events
+                .send(Event::new("house", None, Kind::RosterChanged { ids }));
+        }
+    }
+
+    fn context(&self, bot: &str) -> anyhow::Result<crate::working_directory::Context> {
+        profile::validate_id(bot)?;
+        match self.snapshot.read().get(bot) {
+            Some(BotSlot::Ready(rt)) => Ok(rt.context.clone()),
+            _ => anyhow::bail!("unknown bot {bot}"),
+        }
+    }
+
+    pub(crate) async fn change_directory(&self, bot: &str, path: &str) -> anyhow::Result<String> {
+        let harness = self.ready_harness(bot)?;
+        self.context(bot)?
+            .change(harness.session(), MAIN_LANE, &self.sandbox, path)
+            .await
+    }
+
+    pub(crate) async fn update_memory(
+        &self,
+        bot: &str,
+        request: memory::Request,
+    ) -> anyhow::Result<String> {
+        self.ready_harness(bot)?;
+        let _guard = self.memory_edits.lock().await;
+        let profile = Profile::load_for(&self.project.root, bot)?;
+        let planned = memory::plan(&self.project.root, &profile, &request, chrono::Utc::now())?;
+        if let Some(change) = planned.change {
+            change.apply(&self.sandbox).await?;
+            self.workspace_changed(bot, vec![format!("/{}", change.relative.display())], false)
+                .await?;
+        }
+        Ok(planned.result)
+    }
+
     fn ready_profiles(&self) -> Vec<Profile> {
+        self.refresh_profiles();
         let snap = self.snapshot.read();
         let mut out: Vec<Profile> = snap
             .values()
@@ -360,6 +546,7 @@ impl Inner {
     }
 
     fn ready_harness(&self, id: &str) -> anyhow::Result<Arc<Harness>> {
+        profile::validate_id(id)?;
         let snap = self.snapshot.read();
         match snap.get(id) {
             Some(BotSlot::Ready(rt)) => Ok(rt.harness.clone()),
@@ -368,6 +555,10 @@ impl Inner {
     }
 
     async fn prompt(&self, bot: &str, text: &str) -> anyhow::Result<PromptAck> {
+        let harness = self.ready_harness(bot)?;
+        self.context(bot)?
+            .change(harness.session(), MAIN_LANE, &self.sandbox, ".")
+            .await?;
         let tx = {
             let snap = self.snapshot.read();
             match snap.get(bot) {
@@ -401,6 +592,7 @@ impl Inner {
             &removed,
             &wrap::timestamp_now(),
         );
+        let wrapped = wrap::with_cwd(&wrapped, &self.context(bot)?.cwd());
         let (reply, rx) = tokio::sync::oneshot::channel();
         tx.send(BotCmd::UserText {
             text: wrapped,
@@ -498,15 +690,28 @@ impl Inner {
 
     async fn spawn_ready(self: &Arc<Self>, profile: Profile) -> anyhow::Result<()> {
         let id = profile.id.clone();
-        std::fs::create_dir_all(self.project.bot_sessions_dir(&id))?;
+        profile::validate_id(&id)?;
+        home::ensure(&self.sandbox, &profile).await?;
+        crate::script_fs::open_dir(&self.project.root, &home::relative(&id)?.join("sessions"))?;
         let session_path = self
             .project
-            .latest_bot_session(&id, MAIN_LANE)
+            .latest_bot_session_checked(&id, MAIN_LANE)?
             .unwrap_or_else(|| self.project.bot_conversation_path(&id, MAIN_LANE));
-        let storage = Storage::open(&session_path, &id, Some("workspace".into()))?;
+        let storage = Storage::open_beneath(
+            &self.project.root,
+            session_path.strip_prefix(&self.project.root)?,
+            &id,
+            Some(home::guest(&id)?),
+        )?;
         let session = Session::spawn(storage);
         let model = resolve_model(&self.project, profile.model.as_deref());
-        let toolbox = Toolbox::new(self.sandbox.clone(), self.project.runtime_arc());
+        let context = crate::working_directory::Context::new(&id)?;
+        context.restore(&session, MAIN_LANE, &self.sandbox).await?;
+        let toolbox = Toolbox::for_context(
+            self.sandbox.clone(),
+            self.project.runtime_arc(),
+            context.clone(),
+        );
         let house_tools = HouseTools {
             inner: toolbox,
             house: Arc::downgrade(self),
@@ -515,6 +720,7 @@ impl Inner {
         let active_tool_names = house_tools.tool_names();
         let tools = Arc::new(house_tools);
         let prompt_profile = profile.clone();
+        let prompt_context = context.clone();
         let prompt_house = Arc::downgrade(self);
         let runtime = self.project.runtime.clone();
         let hooks = Hooks::new().on_before_tool(Arc::new(move |event| {
@@ -531,7 +737,12 @@ impl Inner {
                     let Some(inner) = prompt_house.upgrade() else {
                         return String::new();
                     };
-                    system_prompt(&inner.project, &prompt_profile, &inner.ready_profiles())
+                    format!(
+                        "{}\n\nCurrent directory: {}\n{}",
+                        system_prompt(&inner.project, &prompt_profile, &inner.ready_profiles()),
+                        prompt_context.cwd(),
+                        prompt_context.instructions()
+                    )
                 }),
                 settings: RunSettings::default(),
                 retry: RetryPolicy::default(),
@@ -567,13 +778,20 @@ impl Inner {
             },
         );
 
+        bind_profile_environment(
+            &harness,
+            self.project.clone(),
+            id.clone(),
+            tools.tool_names(),
+        );
         let (cmds, cmd_rx) = mpsc::channel(32);
         let runtime = BotRuntime {
             profile: profile.clone(),
             harness: harness.clone(),
             session,
             cmds: cmds.clone(),
-            model: Mutex::new(model),
+            context,
+            profile_error: None,
         };
         {
             let mut snap = self.snapshot.write();
@@ -614,12 +832,23 @@ impl Inner {
     }
 
     fn reserve_create(&self, spec: CreateSpec) -> anyhow::Result<Profile> {
+        if spec.name.trim().is_empty() {
+            anyhow::bail!("agent name cannot be blank");
+        }
+        if spec.model.as_ref().is_some_and(|m| m.trim().is_empty()) {
+            anyhow::bail!("model cannot be blank; omit it for the house default");
+        }
+        if let Some(model) = &spec.model {
+            resolve_model_checked(&self.project, model).map_err(anyhow::Error::msg)?;
+        }
         let mut snap = self.snapshot.write();
         if snap.len() >= BOT_CAP {
             anyhow::bail!("bot cap ({BOT_CAP}) reached");
         }
         let base = slug_from_name(&spec.name);
-        let id = unique_slug(&base, |s| snap.contains_key(s));
+        let id = unique_slug(&base, |s| {
+            snap.contains_key(s) || self.project.bot_dir(s).try_exists().unwrap_or(true)
+        });
         let profile = Profile {
             id: id.clone(),
             name: spec.name.clone(),
@@ -629,6 +858,7 @@ impl Inner {
             group: String::new(),
             created_at: Some(chrono::Utc::now().to_rfc3339()),
             model: spec.model.clone(),
+            projects: Vec::new(),
         };
         snap.insert(
             id,
@@ -652,31 +882,26 @@ impl Inner {
         if !out.success || out.cancelled {
             anyhow::bail!("could not create bot directory");
         }
-        self.sandbox
-            .write_file(
-                &format!("agents/{}/profile.json", profile.id),
-                &profile.to_json(),
-            )
-            .await?;
-        let instructions = spec.instructions.clone().unwrap_or_else(|| {
-            include_str!("../templates/specialist_instructions.md")
-                .replace("{name}", &profile.name)
-                .replace("{title}", &profile.title)
-                .replace("{description}", &profile.description)
-        });
-        self.sandbox
-            .write_file(
-                &format!("agents/{}/instructions.md", profile.id),
-                &instructions,
-            )
-            .await?;
+        let relative = home::relative(&profile.id)?;
+        files::Change {
+            relative: relative.join("profile.json"),
+            before: None,
+            after: profile.to_json(),
+        }
+        .apply(&self.sandbox)
+        .await?;
+        files::Change {
+            relative: relative.join("SOUL.md"),
+            before: None,
+            after: spec.soul.clone().unwrap_or_else(|| home::soul(profile)),
+        }
+        .apply(&self.sandbox)
+        .await?;
         Ok(())
     }
 
     async fn finish_create(self: &Arc<Self>, id: &str) -> anyhow::Result<()> {
-        let path = self.project.bot_dir(id).join("profile.json");
-        let profile = Profile::load(&path)
-            .ok_or_else(|| anyhow::anyhow!("finish create: {id} has no parseable profile.json"))?;
+        let profile = Profile::load_for(&self.project.root, id)?;
         {
             let snap = self.snapshot.read();
             match snap.get(id) {
@@ -708,61 +933,31 @@ impl Inner {
         id: &str,
         patch: serde_json::Value,
     ) -> anyhow::Result<Profile> {
-        self.sweep_creating();
-        let mut profile = {
-            let snap = self.snapshot.read();
-            match snap.get(id) {
-                Some(BotSlot::Ready(rt)) => rt.profile.clone(),
-                _ => anyhow::bail!("unknown bot {id}"),
-            }
-        };
-        if let Some(name) = patch.get("name").and_then(|v| v.as_str()) {
-            if name.trim().is_empty() {
-                anyhow::bail!("name cannot be blank");
-            }
-            profile.name = name.to_string();
+        self.ready_harness(id)?;
+        let _guard = self.profile_edits.lock().await;
+        let relative = home::relative(id)?.join("profile.json");
+        let before = files::read_optional(&self.project.root, &relative)?
+            .ok_or_else(|| anyhow::anyhow!("profile.json is missing"))?;
+        let (profile, after) = profile::merge_patch(id, &before, &patch)?;
+        if patch.get("model").is_some()
+            && let Some(spec) = &profile.model
+        {
+            resolve_model_checked(&self.project, spec).map_err(|e| anyhow::anyhow!(e))?;
         }
-        if let Some(title) = patch.get("title").and_then(|v| v.as_str()) {
-            profile.title = title.to_string();
+        files::Change {
+            relative,
+            before: Some(before),
+            after,
         }
-        if let Some(description) = patch.get("description").and_then(|v| v.as_str()) {
-            profile.description = description.to_string();
-        }
-        if patch.get("avatar").is_some() {
-            profile.avatar = patch
-                .get("avatar")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-        }
-        if let Some(group) = patch.get("group").and_then(|v| v.as_str()) {
-            profile.group = group.to_string();
-        }
-        if patch.get("model").is_some() {
-            profile.model = patch
-                .get("model")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            if let Some(spec) = &profile.model {
-                resolve_model_checked(&self.project, spec).map_err(|e| anyhow::anyhow!(e))?;
-            }
-        }
-        self.sandbox
-            .write_file(&format!("agents/{id}/profile.json"), &profile.to_json())
-            .await?;
-        self.reload_profile(id).await?;
+        .apply(&self.sandbox)
+        .await?;
+        self.workspace_changed(
+            id,
+            vec![format!("/workspace/agents/{id}/profile.json")],
+            false,
+        )
+        .await?;
         Ok(profile)
-    }
-
-    async fn reload_profile(self: &Arc<Self>, id: &str) -> anyhow::Result<()> {
-        let path = self.project.bot_dir(id).join("profile.json");
-        let profile = Profile::load(&path).ok_or_else(|| anyhow::anyhow!("unreadable profile"))?;
-        let model = resolve_model(&self.project, profile.model.as_deref());
-        let mut snap = self.snapshot.write();
-        if let Some(BotSlot::Ready(rt)) = snap.get_mut(id) {
-            rt.profile = profile;
-            *rt.model.lock() = model;
-        }
-        Ok(())
     }
 
     async fn delete_bot(&self, id: &str) -> anyhow::Result<()> {
@@ -781,7 +976,18 @@ impl Inner {
         let _ = cmds.send(BotCmd::Abort).await;
         let _ = harness.abort(MAIN_LANE).await;
         session.close().await;
-        std::fs::remove_dir_all(self.project.bot_dir(id))?;
+        let path = home::guest(id)?;
+        let result = self
+            .sandbox
+            .exec(
+                &format!("rm -rf -- {}", shell_words::quote(&path)),
+                crate::sandbox::ExecOptions::default(),
+                None,
+            )
+            .await?;
+        if !result.success || result.cancelled {
+            anyhow::bail!("could not delete bot home: {}", result.stderr);
+        }
         self.snapshot.write().remove(id);
         Ok(())
     }
@@ -793,6 +999,7 @@ impl Inner {
         text: &str,
     ) -> anyhow::Result<String> {
         self.sweep_creating();
+        self.refresh_profiles();
         let (target_harness, target_cmds, from_name, to_name) = {
             let snap = self.snapshot.read();
             let from_rt = match snap.get(from) {
@@ -810,7 +1017,10 @@ impl Inner {
                 to_rt.profile.name.clone(),
             )
         };
-        let wake = wrap_agent_arrival(&from_name, from, text);
+        let wake = wrap::with_cwd(
+            &wrap_agent_arrival(&from_name, from, text),
+            &self.context(to)?.cwd(),
+        );
         let payload = serde_json::json!({
             "role": "user",
             "content": wake,
@@ -906,6 +1116,64 @@ impl Inner {
             }
         }
     }
+}
+
+fn spawn_resource_observers(house: Weak<Inner>, mut events: broadcast::Receiver<Event>) {
+    tokio::spawn(async move {
+        loop {
+            let event = match events.recv().await {
+                Ok(event) => event,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            };
+            let Kind::ResourcesChanged {
+                bot,
+                cwd,
+                paths,
+                resources,
+                unknown,
+            } = event.kind
+            else {
+                continue;
+            };
+            let Some(inner) = house.upgrade() else {
+                break;
+            };
+            let change = resources::Change {
+                bot,
+                cwd,
+                paths,
+                resources,
+                unknown,
+            };
+            let (sends, errors) = inner.project.runtime.run_changes(&change).await;
+            for error in errors {
+                eprintln!("revebot: change observer: {error}");
+            }
+            for (target, text) in sends {
+                let result = async {
+                    let harness = inner.ready_harness(&target)?;
+                    let wrapped = wrap::wrap_user_turn(
+                        &format!("[plugin] Resource-change notification\n\n{text}"),
+                        &inner.ready_profiles(),
+                        &[],
+                    );
+                    let content = wrap::with_cwd(&wrapped, &inner.context(&target)?.cwd());
+                    harness.next_run(MAIN_LANE, &content).await?;
+                    let cmds = match inner.snapshot.read().get(&target) {
+                        Some(BotSlot::Ready(rt)) => rt.cmds.clone(),
+                        _ => anyhow::bail!("unknown observer recipient"),
+                    };
+                    let _ = cmds.send(BotCmd::KickNow).await;
+                    Ok::<_, anyhow::Error>(())
+                }
+                .await;
+                if let Err(error) = result {
+                    eprintln!("revebot: observer delivery: {error}");
+                }
+            }
+        }
+    });
 }
 
 fn spawn_routines(inner: Arc<Inner>) {
@@ -1060,6 +1328,41 @@ fn hex_token() -> String {
     digest.iter().take(16).map(|b| format!("{b:02x}")).collect()
 }
 
+pub(crate) fn bind_profile_environment(
+    harness: &Harness,
+    project: Arc<Project>,
+    id: String,
+    tool_names: Vec<String>,
+) {
+    let model_project = project.clone();
+    harness.set_environment_sources(
+        Arc::new(move || {
+            let profile = Profile::load_for(&project.root, &id).map_err(|e| e.to_string())?;
+            let spec = profile
+                .model
+                .or_else(|| project.runtime.agent.model.clone())
+                .unwrap_or_else(|| "none".into());
+            Ok(LaneConfiguration {
+                model: ModelRef {
+                    provider: spec.clone(),
+                    model_id: spec,
+                },
+                thinking_level: project
+                    .runtime
+                    .agent
+                    .thinking
+                    .clone()
+                    .unwrap_or_else(|| "default".into()),
+                active_tool_names: tool_names.clone(),
+            })
+        }),
+        Arc::new(move |configuration| {
+            resolve_model_checked(&model_project, &configuration.model.model_id)
+                .unwrap_or_else(|why| Arc::new(Unconfigured(why)))
+        }),
+    );
+}
+
 fn resolve_model(project: &Project, spec: Option<&str>) -> Arc<dyn Model> {
     match resolve_model_checked(project, spec.unwrap_or("")) {
         Ok(model) => model,
@@ -1091,7 +1394,7 @@ fn resolve_model_checked(project: &Project, spec: &str) -> Result<Arc<dyn Model>
 
 #[cfg(test)]
 mod tests {
-    use super::page_transcript;
+    use super::{CreateSpec, page_transcript};
     use crate::entry::Entry;
     use serde_json::json;
 
@@ -1099,6 +1402,21 @@ mod tests {
         let mut entry = Entry::message(json!({"role": "user", "content": seq.to_string()}));
         entry.seq = seq;
         entry
+    }
+
+    #[test]
+    fn creation_uses_one_closed_typed_contract() {
+        let spec: CreateSpec =
+            serde_json::from_value(serde_json::json!({"name":"Miku","soul":"Music remit"}))
+                .unwrap();
+        assert_eq!(spec.soul.as_deref(), Some("Music remit"));
+        assert!(spec.title.is_empty());
+        for value in [
+            serde_json::json!({"name":"Miku","unexpected":true}),
+            serde_json::json!({"name":"Miku","soul":42}),
+        ] {
+            assert!(serde_json::from_value::<CreateSpec>(value).is_err());
+        }
     }
 
     #[test]

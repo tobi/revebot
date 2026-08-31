@@ -288,7 +288,7 @@
     width: 100%; background: var(--panel); color: var(--text); border: 1px solid var(--line);
     border-radius: 10px; padding: 9px 12px; font: inherit;
   }
-  .sheet textarea.instr { min-height: 180px; font-family: ui-monospace, SFMono-Regular, monospace;
+  .sheet textarea.soul-editor { min-height: 180px; font-family: ui-monospace, SFMono-Regular, monospace;
     font-size: 13px; line-height: 1.45; resize: vertical; }
   .sheet .row { display: flex; gap: 10px; }
   .sheet .row > * { flex: 1; }
@@ -386,8 +386,8 @@
     <input id="f-desc" autocomplete="off">
     <label>Model</label>
     <select id="f-model"></select>
-    <label>Instructions</label>
-    <textarea class="instr" id="f-instr" spellcheck="false"></textarea>
+    <label>Soul — identity, voice, and standing remit</label>
+    <textarea class="soul-editor" id="f-soul" spellcheck="false"></textarea>
     <div class="actions">
       <button class="ghost" type="button" id="sheet-cancel">Cancel</button>
       <button class="primary" type="submit" id="sheet-save">Save</button>
@@ -403,6 +403,18 @@ let current = null;
 let bots = [];
 let skills = [];
 let ws = null;
+let houseWs = null;
+function ensureHouseEvents() {
+  if (houseWs && (houseWs.readyState === 0 || houseWs.readyState === 1)) return;
+  houseWs = new WebSocket((location.protocol === "https:" ? "wss:" : "ws:") + "//" + location.host +
+    "/api/events?token=" + encodeURIComponent(TOKEN));
+  houseWs.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    if (data.type === "roster_changed" || data.type === "lagged") loadBots().catch(console.error);
+  };
+  houseWs.onopen = () => loadBots().catch(console.error);
+  houseWs.onclose = () => { setTimeout(ensureHouseEvents, 1500); };
+}
 let toolsStarted = false;
 let pin = true;
 let unread = 0;
@@ -1035,6 +1047,7 @@ function groupOf(bot) {
 }
 
 async function loadBots() {
+  ensureHouseEvents();
   const data = await api("/api/bots");
   bots = data.bots || [];
   const q = (document.getElementById("q").value || "").toLowerCase();
@@ -1063,7 +1076,7 @@ async function loadBots() {
       const badge = modelBadge(bot.model);
       if (badge) l1.appendChild(el("span", "badge", badge));
       meta.appendChild(l1);
-      meta.appendChild(el("div", "prev", bot.title || bot.description || bot.id));
+      meta.appendChild(el("div", "prev", bot.profile_error ? "Profile error: " + bot.profile_error : (bot.title || bot.description || bot.id)));
       d.appendChild(meta);
       d.onclick = () => select(bot.id);
       box.appendChild(d);
@@ -1078,6 +1091,7 @@ async function loadBots() {
       setRoute(bots[0].id);
     }
   }
+  if (current) paintHead(bots.find((bot) => bot.id === current));
   if (toolsStarted) setWorking(true);
 }
 
@@ -1086,7 +1100,7 @@ function paintHead(bot) {
   av.innerHTML = "";
   if (bot) av.appendChild(avatar(bot.id, bot.avatar, 36));
   document.getElementById("head-name").textContent = bot ? bot.name : "revebot";
-  document.getElementById("head-sub").textContent = bot ? (bot.title || bot.description || "") : "";
+  document.getElementById("head-sub").textContent = bot ? (bot.profile_error ? "Profile error: " + bot.profile_error : (bot.title || bot.description || "")) : "";
   document.getElementById("screen-title").textContent = bot ? bot.name + "'s screen" : "Screen";
 }
 
@@ -1381,12 +1395,12 @@ async function openSheet(mode, bot) {
   document.getElementById("f-name").value = bot ? bot.name : "";
   document.getElementById("f-title").value = bot ? (bot.title || "") : "";
   document.getElementById("f-desc").value = bot ? (bot.description || "") : "";
-  document.getElementById("f-instr").value = "";
+  document.getElementById("f-soul").value = "";
   await fillModels(bot && bot.model);
   if (mode === "edit" && bot) {
     try {
-      const data = await api("/api/bots/" + encodeURIComponent(bot.id) + "/instructions");
-      document.getElementById("f-instr").value = data.text || "";
+      const data = await api("/api/bots/" + encodeURIComponent(bot.id) + "/soul");
+      document.getElementById("f-soul").value = data.text || "";
     } catch (_) {}
   }
   paintPickers();
@@ -1416,18 +1430,20 @@ document.getElementById("bot-form").onsubmit = async (ev) => {
     description: document.getElementById("f-desc").value.trim(),
     avatar: avatarSpec(),
     model: document.getElementById("f-model").value || null,
-    instructions: document.getElementById("f-instr").value
+    soul: document.getElementById("f-soul").value
   };
   if (!body.name) return;
   if (sheetMode === "new") {
+    if (!body.soul.trim()) delete body.soul;
     const created = await api("/api/bots", { method: "POST", body: JSON.stringify(body) });
     closeSheet();
     await loadBots();
     if (created && created.id) select(created.id);
   } else {
-    await api("/api/bots/" + encodeURIComponent(current), { method: "PATCH", body: JSON.stringify(body) });
-    await api("/api/bots/" + encodeURIComponent(current) + "/instructions", {
-      method: "PUT", body: JSON.stringify({ text: body.instructions })
+    const { soul, ...profile } = body;
+    await api("/api/bots/" + encodeURIComponent(current), { method: "PATCH", body: JSON.stringify(profile) });
+    await api("/api/bots/" + encodeURIComponent(current) + "/soul", {
+      method: "PUT", body: JSON.stringify({ text: soul })
     });
     closeSheet();
     await loadBots();

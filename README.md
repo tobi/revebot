@@ -87,15 +87,15 @@ initialised /home/you/my-agent
   + config.yml
   + tools/example.lua
   + models.yml
-  + workspace/AGENTS.md
-  + workspace/SOUL.md
-  + workspace/KNOWLEDGE.md
+  + workspace/VM.md
   + workspace/HEARTBEAT.yml
-  + workspace/agents/chief-of-staff/instructions.md
+  + workspace/agents/chief-of-staff/SOUL.md
+  + workspace/agents/chief-of-staff/AGENTS.md
   + workspace/agents/chief-of-staff/profile.json
+  + workspace/agents/chief-of-staff/memory/profile.md
   + .gitignore
 
-  edit workspace/agents/chief-of-staff/instructions.md, then run revebot here
+  edit workspace/agents/chief-of-staff/SOUL.md, then run revebot here
 
 $ reve info
 root      /home/you/my-agent
@@ -134,7 +134,7 @@ highlighted path.
 
 ## Agent directory
 
-`reve init` writes exactly these files, and nothing outside the target root:
+`revebot init` scaffolds this layout without overwriting edited files:
 
 ```text
 my-house/                      the house root
@@ -142,41 +142,48 @@ my-house/                      the house root
 ├── tools/
 │   └── example.lua            a host-trusted Lua tool
 ├── models.yml                 provider catalog
-├── workspace/                 the VM-visible, agent-editable mind and worktree
-│   ├── AGENTS.md              abbreviated stateful-agent kernel
-│   ├── SOUL.md                identity, voice, and boundaries
-│   ├── KNOWLEDGE.md           index into knowledge/
-│   ├── HEARTBEAT.yml          background task schedule
-│   ├── knowledge/             mutable durable facts
-│   ├── notes/                 append-only daily narrative
-│   ├── skills/                house-level skills
-│   ├── plugins/               bot-editable Lua tools (e.g. web_fetch)
+├── workspace/                 the shared VM filesystem, not a shared persona
+│   ├── VM.md                  machine facts only
+│   ├── memory/user/           intentionally shared user facts
+│   ├── projects/              shared project work and explicitly scoped memory
+│   ├── skills/                house-level skills, including memory and plugins
+│   ├── plugins/               restricted Lua plugins (e.g. web_fetch)
 │   └── agents/
-│       └── chief-of-staff/
-│           ├── instructions.md   standing orders (self-editable)
-│           ├── profile.json      name, title, optional model
-│           ├── skills/           bot skills
-│           ├── memory/           durable notes
-│           ├── routines/         this bot's cron jobs
-│           ├── plugins/          this bot's Lua tools
-│           └── sessions/         JSONL (gitignored)
+│       └── chief-of-staff/    this bot's fixed HOME
+│           ├── SOUL.md        sole identity, voice and standing remit
+│           ├── AGENTS.md      neutral inherited home operating rules
+│           ├── profile.json   authoritative name/title/avatar/model/projects
+│           ├── workspace/     initial working directory
+│           ├── skills/        bot skills
+│           ├── memory/
+│           │   ├── profile.md       enduring facts
+│           │   ├── log/YYYY-MM.md   dated history (created on first write)
+│           │   └── notes/YYYY-MM.md short-lived notes (created on first write)
+│           ├── knowledge/     longer reference material, read on demand
+│           ├── notes/         working notebook, read on demand
+│           ├── routines/      this bot's cron definitions
+│           ├── plugins/       this bot's restricted Lua definitions
+│           └── sessions/      durable JSONL (gitignored)
 ├── .gitignore                 ignores .reve/ and bot sessions
 └── .reve/                     durable host state (created on first launch)
 ```
 
 `reve init` is idempotent: a file that matches the template is left `unchanged`; a file you
 have edited is reported as `changed` and kept as you wrote it; a missing file is created.
-It also creates the empty `tools/`, `channels/`, `workspace/knowledge/`,
-`workspace/notes/`, and `workspace/skills/` directories.
+Every agent has its own SOUL.md. Missing home files are scaffolded; edited files stay
+unchanged. Shared context comes from VM.md and explicitly shared memory, not a global
+personality or project-knowledge file.
 
 `revebot` refuses to run in a directory that is not a house. A house directory needs
-`config.yml` (or a leftover `agent.lua`). Standing instructions live under
-`workspace/agents/<id>/instructions.md`, not at the house root.
+`config.yml` (or a leftover `agent.lua`). Each bot's personality and standing remit live
+in `workspace/agents/<id>/SOUL.md`. Its metadata is reread from `profile.json`; tool writes
+trigger sidebar/header refresh, and malformed edits produce a visible error.
 
 ### House config
 
 `config.yml` selects the house model, thinking level, and sandbox. Each bot's prose
-identity is its own `workspace/agents/<id>/instructions.md`. The real template:
+identity is its own `workspace/agents/<id>/SOUL.md`. Model changes take effect at the
+next idle run boundary; an in-flight drive keeps its captured model. The real template:
 
 ```yaml
 model: openrouter/x-ai/grok-4.6
@@ -191,6 +198,24 @@ sandbox:
 ```
 
 There is no `host-exec`, and omitting a secret does not create an invisible host fallback.
+
+### Working directories and memory
+
+Every bot starts at `$HOME/workspace`, where HOME is `/workspace/agents/<id>`.
+The `cd` tool changes the conversation's cwd without moving HOME. Relative filesystem
+tools, bash and Lua `ctx.sh` follow cwd. Each incoming message carries a `<cwd>` header.
+`cd` reads the full guest ancestor chain of AGENTS.md files, root-to-leaf; nearest rules
+win. Existing workspace-root AGENTS.md still applies by ancestry, not as a persona file.
+Directory state is persisted in the conversation's session and refreshed on restore.
+
+`update_state` supports `target: "memory"`, `action: "write" | "forget"`, exact `fact`,
+`profile | log | note` tiers and `agent | user | project` scopes. Private by default;
+project context requires explicit `profile.projects` membership. Read with ordinary
+filesystem tools. The `memory` skill documents dedupe, recency, limits and exact forget.
+
+Write/edit and indirect shell/plugin effects share a resource-change notification path.
+Lua plugins can subscribe with `on_change`; this is best-effort observation, not a durable
+scheduler. See the complete API and executable examples in the `plugins` skill.
 
 ### Add a tool by dropping in one Lua file
 

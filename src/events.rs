@@ -109,6 +109,13 @@ pub enum Kind {
     RosterChanged {
         ids: Vec<String>,
     },
+    ResourcesChanged {
+        bot: String,
+        cwd: String,
+        paths: Vec<String>,
+        resources: Vec<String>,
+        unknown: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
