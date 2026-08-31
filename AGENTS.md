@@ -80,7 +80,15 @@ touches — configuration, project tools, sandbox policy — is Lua.
 - **Never silently overwrite files a user has edited.** `reve init` is idempotent: a
   matching file is left `unchanged`, an edited file is reported `changed` and kept, a
   missing file is created.
-- Every new behaviour gets a test. Keep `cargo test` green; the microVM tests stay opt-in.
+- **Strict lint policy is a merge gate.** `Cargo.toml` defines Rust/Clippy lints;
+  `make clippy` checks all targets with `-D warnings`. Production unwrap/expect,
+  panic, unchecked indexing/string slicing/time subtraction, debugging placeholders,
+  undocumented unsafe and synchronous locks across await are flagged. `clippy.toml`
+  contains narrow test exemptions. Fix violations; do not add blanket allows or
+  weaken the gate. Any genuinely necessary exception must be narrowly scoped and
+  explain the invariant/safety argument. A SAFETY comment is not proof by itself.
+- Every new behaviour gets a test. Keep `make ci` green (format, rustc warnings,
+  strict Clippy, tests); the microVM tests stay opt-in.
 
 ## Commands
 
@@ -90,9 +98,12 @@ touches — configuration, project tools, sandbox policy — is Lua.
                                              binaries out of ~/.cargo/bin; `--locked`
                                              uses Cargo.lock so yanked transitive crates
                                              do not break the install)
-    cargo test                               run the unit test suite
+    make ci                                  run the same strict gate as CI
+    make warnings                            reject rustc warnings on all targets
+    make clippy                              strict Cargo.toml policy, -D warnings
+    make test                                run the locked test suite
     make eval                                offline eval catalog (no VM, no model)
     make eval ARGS='--live'                  live cases; OPENROUTER_API_KEY by default
     cargo test --test microvm -- --ignored   opt-in microVM integration tests
-    cargo clippy                             lint
+    make fmt-check                           check formatting without changing files
     cargo fmt                                format

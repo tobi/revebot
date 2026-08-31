@@ -72,6 +72,14 @@ const TEMPLATES: &[(&str, &str)] = &[
         "workspace/skills/secrets/SKILL.md",
         include_str!("templates/secrets_skill.md"),
     ),
+    (
+        "workspace/skills/browser/SKILL.md",
+        include_str!("templates/browser_skill.md"),
+    ),
+    (
+        "workspace/skills/computer/SKILL.md",
+        include_str!("templates/computer_skill.md"),
+    ),
     ("models.yml", include_str!("templates/models.yml")),
     ("workspace/VM.md", include_str!("templates/VM.md")),
     (
@@ -94,6 +102,7 @@ const KEEP_DIRS: &[&str] = &[
     "workspace/skills",
     "workspace/plugins",
     "workspace/routines",
+    "workspace/tmp",
     "workspace/agents",
     "workspace/agents/chief-of-staff/skills",
     "workspace/agents/chief-of-staff/sessions",
@@ -456,7 +465,15 @@ mod tests {
                 .is_file()
         );
         assert!(dir.path().join("workspace/plugins/web_fetch.lua").is_file());
-        for skill in ["create-skill", "vm", "routines", "plugins", "secrets"] {
+        for skill in [
+            "create-skill",
+            "vm",
+            "routines",
+            "plugins",
+            "secrets",
+            "browser",
+            "computer",
+        ] {
             assert!(
                 dir.path()
                     .join(format!("workspace/skills/{skill}/SKILL.md"))

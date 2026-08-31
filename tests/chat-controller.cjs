@@ -14,7 +14,7 @@ const ctx=vm.createContext({ReveLog:R,WebSocket:Socket,Promise,Map,Set,JSON,cons
   location:{protocol:'http:',host:'fixture'},TOKEN:'fixture',PAGE:80,
   document:{getElementById(id){if(!elements.has(id))elements.set(id,node());return elements.get(id);}},
   api(url){trace.push('snapshot');return new Promise((resolve,reject)=>requests.push({url,resolve,reject}));},
-  requestAnimationFrame(){},setTimeout(fn){timers.push(fn);},setBusy(){},setRoute(){},resetTranscript(){},paintHead(){},
+  requestAnimationFrame(){},setTimeout(fn){timers.push(fn);},setBusy(){},setRoute(){},resetTranscript(){},paintHead(){},closeDrawers(){},
   el:(t,c,text)=>({textContent:text}),loadBots:async()=>{},loadSkills:async()=>{},loadRoutines:async()=>{},
 });
 vm.runInContext(fs.readFileSync(require('node:path').join(__dirname,'../src/web/chat.js'),'utf8'),ctx);

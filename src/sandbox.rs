@@ -15,6 +15,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use microsandbox::sandbox::StatVirtualization;
 use microsandbox::size::SizeExt;
 use microsandbox::{Sandbox as MsbSandbox, SandboxModificationBuilder, SecretSource};
 use microsandbox_network::policy::{NetworkPolicy, NetworkProfile, Rule};
@@ -35,16 +36,24 @@ pub enum SandboxError {
 
 pub type Result<T, E = SandboxError> = std::result::Result<T, E>;
 
-/// The default guest: an Arch image that already contains the toolchain an
-/// agent reaches for, with mise pinned to absolute paths under `/opt` so the
-/// shims work whatever `HOME` ends up being.
+/// The default guest: wrap's desktop image. Toolchain at absolute paths under
+/// `/opt`, unprivileged `user` (`HOME=/home/user`), and a headless XFCE desktop
+/// with VNC/noVNC plus a shared Chrome that `agent-browser` attaches to.
 ///
 /// Baking the toolchain into the image rather than installing it on first boot
 /// is the difference between a cold start of seconds and one of minutes, and it
 /// removes the failure mode where the agent's first turn depends on a package
 /// mirror being up. It is also why [`Policy::provision`] defaults to `false`:
 /// there is nothing left to provision.
-pub const DEFAULT_IMAGE: &str = "ghcr.io/tobi/wrap:latest";
+pub const DEFAULT_IMAGE: &str = "ghcr.io/tobi/wrap:desktop";
+
+/// Guest Unix account for wrap images. Agent identity home stays
+/// `/workspace/agents/<id>/`; this is the OS user Chrome and git see.
+pub const GUEST_USER: &str = "user";
+pub const GUEST_HOME: &str = "/home/user";
+pub const DESKTOP_DISPLAY: &str = ":1";
+const DESKTOP_VNC_GUEST_PORT: u16 = 5900;
+const DESKTOP_NOVNC_GUEST_PORT: u16 = 6080;
 
 /// The image ships a full Rust, Go, Node, and Python toolchain, so the
 /// writable rootfs layer has to be big enough for a real build tree.
@@ -74,12 +83,11 @@ const PROVISION_MARKER: &str = "/var/lib/reve/provisioned";
 
 /// Teach git to read the token straight from the environment.
 ///
-/// The old form shelled out to `gh auth git-credential`, which the default
-/// image does not contain. A store-free helper is better anyway: the token is
-/// already in the guest environment as a microsandbox-resolved secret, so this
-/// writes no credential file and leaves nothing behind on the disk.
+/// `--global` writes the user's `~/.gitconfig` so this works as unprivileged
+/// `user`. A store-free helper: the token is already in the guest environment
+/// as a microsandbox-resolved secret, so this leaves nothing extra on disk.
 const GIT_CREDENTIAL_SETUP: &str = "if command -v git >/dev/null; then \
-git config --system credential.https://github.com.helper \
+git config --global credential.https://github.com.helper \
 '!f() { test \"$1\" = get && printf \"username=x-access-token\\npassword=%s\\n\" \
 \"$GITHUB_TOKEN\"; }; f'; fi";
 
@@ -141,7 +149,7 @@ impl Default for Policy {
             image: DEFAULT_IMAGE.into(),
             root_disk: DEFAULT_ROOT_DISK_MIB,
             cpus: 2,
-            memory: 2048,
+            memory: 8192,
             workdir: "/workspace".into(),
             mount_workspace: true,
             // The default image is already provisioned. An agent that points
@@ -321,6 +329,27 @@ pub struct ExecOptions {
     pub timeout: Option<std::time::Duration>,
 }
 
+/// Host-side VNC/noVNC listeners for a desktop guest. CDP stays on guest
+/// localhost:9222; it is not published to the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Desktop {
+    pub novnc_port: u16,
+    pub vnc_port: u16,
+}
+
+impl Desktop {
+    pub fn novnc_url(&self) -> String {
+        format!(
+            "http://127.0.0.1:{}/vnc.html?autoconnect=1&resize=scale&reconnect=1",
+            self.novnc_port
+        )
+    }
+
+    pub fn vnc_addr(&self) -> String {
+        format!("127.0.0.1:{}", self.vnc_port)
+    }
+}
+
 /// A microVM that starts on its first effect and stops after a short idle
 /// window. `start` still boots once up front, so Reve fails closed when the VM
 /// runtime or policy is unavailable.
@@ -333,6 +362,7 @@ pub struct Sandbox {
     /// here so a save takes effect without rebuilding the VM fingerprint.
     secrets: parking_lot::Mutex<Vec<Secret>>,
     name: String,
+    desktop: Option<Desktop>,
     vm: Arc<Mutex<VmState>>,
 }
 
@@ -421,6 +451,7 @@ impl Sandbox {
             }
             progress.stage(&format!("restarting microVM {name}"));
             if let Ok(vm) = MsbSandbox::start(&name).await {
+                let desktop = desktop_from_config(vm.config());
                 let secret_digests = runtime_secret_digests(&policy.secrets, &secret_root);
                 let sandbox = Self {
                     secrets: parking_lot::Mutex::new(policy.secrets.clone()),
@@ -428,6 +459,7 @@ impl Sandbox {
                     policy,
                     host_workspace,
                     name,
+                    desktop,
                     vm: Arc::new(Mutex::new(VmState {
                         vm: Some(vm),
                         active: 0,
@@ -435,14 +467,14 @@ impl Sandbox {
                         secret_digests,
                     })),
                 };
-                sandbox.configure_git_credentials().await;
+                sandbox.prepare_guest().await?;
                 progress.finish("sandbox ready");
                 return Ok(sandbox);
             }
         }
 
         progress.stage(&format!("building microVM {name} from {}", policy.image));
-        let vm = build(&policy, &name, &host_workspace, &secret_root).await?;
+        let (vm, desktop) = build(&policy, &name, &host_workspace, &secret_root).await?;
         let secret_digests = runtime_secret_digests(&policy.secrets, &secret_root);
         let sandbox = Self {
             secrets: parking_lot::Mutex::new(policy.secrets.clone()),
@@ -450,6 +482,7 @@ impl Sandbox {
             policy,
             host_workspace,
             name,
+            desktop,
             vm: Arc::new(Mutex::new(VmState {
                 vm: Some(vm),
                 active: 0,
@@ -495,7 +528,7 @@ impl Sandbox {
             }
             let _ = tokio::fs::write(&fingerprint_path, format!("{fingerprint}\n")).await;
         }
-        sandbox.configure_git_credentials().await;
+        sandbox.prepare_guest().await?;
         progress.finish(if ok {
             "sandbox ready"
         } else {
@@ -518,6 +551,11 @@ impl Sandbox {
 
     pub fn host_workspace(&self) -> &Path {
         &self.host_workspace
+    }
+
+    /// Published desktop ports, if this guest is a wrap desktop image.
+    pub fn desktop(&self) -> Option<Desktop> {
+        self.desktop
     }
 
     /// Keep the guest from idle-stopping for the lifetime of the house.
@@ -573,7 +611,8 @@ impl Sandbox {
                 .clone()
                 .unwrap_or_else(|| self.policy.workdir.clone());
             let script = command.to_string();
-            let mut env = self.policy.env.clone();
+            let mut env = guest_unix_env(&self.policy.image);
+            env.extend(self.policy.env.clone());
             env.extend(options.env.clone());
             let timeout = options.timeout;
 
@@ -679,6 +718,9 @@ impl Sandbox {
         }
         extras.push(format!("net {}", self.policy.egress_summary()));
         extras.push(format!("idle {}s", IDLE_TIMEOUT.as_secs()));
+        if let Some(desktop) = self.desktop {
+            extras.push(format!("novnc {}", desktop.novnc_url()));
+        }
         let secrets = self.secrets();
         if !secrets.is_empty() {
             let names: Vec<&str> = secrets.iter().map(|s| s.env.as_str()).collect();
@@ -831,12 +873,100 @@ impl Sandbox {
         }
     }
 
+    async fn prepare_guest(&self) -> Result<()> {
+        self.align_guest_identity().await?;
+        self.configure_git_credentials().await;
+        self.ensure_desktop().await;
+        Ok(())
+    }
+
     async fn configure_git_credentials(&self) {
         let options = ExecOptions {
             cwd: Some("/".into()),
             ..Default::default()
         };
         let _ = self.exec(GIT_CREDENTIAL_SETUP, options, None).await;
+    }
+
+    /// Realign guest `user` to the host owner of `/workspace` so the virtiofs
+    /// bind (stat virtualization off) is writable without chowning host files.
+    async fn align_guest_identity(&self) -> Result<()> {
+        if !is_wrap_image(&self.policy.image) {
+            return Ok(());
+        }
+        let Some((uid, gid)) = host_identity(&self.host_workspace) else {
+            return Ok(());
+        };
+        if uid == 0 {
+            return Ok(());
+        }
+        let script = format!(
+            "set -eu\n\
+             uid={uid}; gid={gid}\n\
+             cur_gid=$(getent group {user} | cut -d: -f3)\n\
+             if [ \"$cur_gid\" != \"$gid\" ]; then\n\
+               if getent group \"$gid\" >/dev/null; then groupmod -o -g \"$gid\" {user}; else groupmod -g \"$gid\" {user}; fi\n\
+             fi\n\
+             cur_uid=$(id -u {user})\n\
+             if [ \"$cur_uid\" != \"$uid\" ]; then usermod -o -u \"$uid\" -g \"$gid\" {user}; fi\n\
+             if [ \"$cur_uid\" != \"$uid\" ] || [ \"$cur_gid\" != \"$gid\" ]; then\n\
+               chown -R \"$uid:$gid\" {home} /opt/mise\n\
+             fi\n",
+            user = GUEST_USER,
+            home = GUEST_HOME,
+        );
+        let output = self.exec_as("root", &script).await?;
+        if !output.success {
+            return Err(SandboxError::Failed(format!(
+                "align guest user identity exited {}: {}",
+                output.exit_code,
+                output.stderr.trim()
+            )));
+        }
+        Ok(())
+    }
+
+    async fn ensure_desktop(&self) {
+        if self.desktop.is_none() {
+            return;
+        }
+        let options = ExecOptions {
+            cwd: Some("/".into()),
+            timeout: Some(Duration::from_secs(45)),
+            ..Default::default()
+        };
+        let _ = self
+            .exec(
+                "command -v wrap-desktop >/dev/null && wrap-desktop start --quiet || true",
+                options,
+                None,
+            )
+            .await;
+    }
+
+    async fn exec_as(&self, user: &str, command: &str) -> Result<Output> {
+        let vm = self.acquire().await?;
+        let owned_user = user.to_string();
+        let owned_cmd = command.to_string();
+        let result = async {
+            let mut handle = vm
+                .exec_stream_with("sh", move |e| {
+                    e.args(["-c", owned_cmd.as_str()])
+                        .user(owned_user.as_str())
+                        .cwd("/")
+                        .stdin_null()
+                })
+                .await
+                .map_err(|e| SandboxError::Failed(e.to_string()))?;
+            let output = handle
+                .collect()
+                .await
+                .map_err(|e| SandboxError::Failed(e.to_string()))?;
+            Ok(encode(&output, false))
+        }
+        .await;
+        self.release().await;
+        result
     }
 }
 
@@ -1134,13 +1264,80 @@ fn format_missing_secret_warning(secret: &Secret) -> String {
     warning
 }
 
+fn is_wrap_image(image: &str) -> bool {
+    image.contains("tobi/wrap") || image == DEFAULT_IMAGE
+}
+
+fn is_desktop_image(image: &str) -> bool {
+    image.contains("wrap:desktop") || image == DEFAULT_IMAGE
+}
+
+fn guest_unix_env(image: &str) -> BTreeMap<String, String> {
+    if !is_wrap_image(image) {
+        return BTreeMap::new();
+    }
+    BTreeMap::from([
+        ("HOME".into(), GUEST_HOME.into()),
+        ("USER".into(), GUEST_USER.into()),
+        ("DISPLAY".into(), DESKTOP_DISPLAY.into()),
+        ("XDG_SESSION_TYPE".into(), "x11".into()),
+    ])
+}
+
+fn host_identity(path: &Path) -> Option<(u32, u32)> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.uid(), meta.gid()))
+}
+
+fn reserve_localhost_ports(count: usize) -> Result<Vec<u16>> {
+    let mut held = Vec::with_capacity(count);
+    for _ in 0..count {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| {
+            SandboxError::Unavailable(format!("cannot reserve localhost port: {e}"))
+        })?;
+        let _ = listener.set_nonblocking(true);
+        held.push(listener);
+    }
+    let mut ports = Vec::with_capacity(count);
+    for listener in &held {
+        ports.push(
+            listener
+                .local_addr()
+                .map_err(|e| SandboxError::Unavailable(format!("cannot read reserved port: {e}")))?
+                .port(),
+        );
+    }
+    Ok(ports)
+}
+
+fn desktop_from_config(config: &microsandbox::SandboxConfig) -> Option<Desktop> {
+    let mut novnc = None;
+    let mut vnc = None;
+    for port in &config.spec.network.ports {
+        match port.guest_port {
+            DESKTOP_NOVNC_GUEST_PORT => novnc = Some(port.host_port),
+            DESKTOP_VNC_GUEST_PORT => vnc = Some(port.host_port),
+            _ => {}
+        }
+    }
+    Some(Desktop {
+        novnc_port: novnc?,
+        vnc_port: vnc?,
+    })
+}
+
 /// Turn a [`Policy`] into a booted VM.
 async fn build(
     policy: &Policy,
     name: &str,
     host_workspace: &Path,
     secret_root: &Path,
-) -> Result<MsbSandbox> {
+) -> Result<(MsbSandbox, Option<Desktop>)> {
+    let wrap = is_wrap_image(&policy.image);
+    let host_uid = host_identity(host_workspace)
+        .map(|(uid, _)| uid)
+        .unwrap_or(0);
     let mut builder = MsbSandbox::builder(name.to_string())
         .image(policy.image.clone())
         .root_disk(policy.root_disk.mib())
@@ -1149,12 +1346,33 @@ async fn build(
         .workdir(policy.workdir.clone())
         .replace();
 
+    if wrap && host_uid != 0 {
+        builder = builder.user(GUEST_USER);
+    }
+
     // Ordinary environment values are exec-time parameters, not VM state.
 
     if policy.mount_workspace {
         let host = host_workspace.to_path_buf();
-        builder = builder.volume(policy.workdir.clone(), move |m| m.bind(host));
+        builder = builder.volume(policy.workdir.clone(), move |m| {
+            let mounted = m.bind(host);
+            if wrap {
+                mounted.stat_virtualization(StatVirtualization::Off)
+            } else {
+                mounted
+            }
+        });
     }
+
+    let desktop_ports = if is_desktop_image(&policy.image) {
+        let ports = reserve_localhost_ports(2)?;
+        Some(Desktop {
+            novnc_port: ports[0],
+            vnc_port: ports[1],
+        })
+    } else {
+        None
+    };
 
     // Open (the default): public internet + gateway DNS.
     // Locked down: deny both directions, gateway DNS, then named hosts.
@@ -1171,6 +1389,13 @@ async fn build(
             .map_err(|e| SandboxError::Policy(format!("invalid allowed host: {e}")))?;
     }
     builder = builder.network(move |n| n.enabled(true).policy(network));
+    if let Some(desktop) = desktop_ports {
+        // After network(): `.network()` replaces the local config, so ports
+        // have to land on the builder afterwards.
+        builder = builder
+            .port(desktop.novnc_port, DESKTOP_NOVNC_GUEST_PORT)
+            .port(desktop.vnc_port, DESKTOP_VNC_GUEST_PORT);
+    }
 
     // Only host environment references enter the durable definition. Values
     // are resolved by microsandbox when the VM starts and remain host-side.
@@ -1191,10 +1416,11 @@ async fn build(
             entry
         });
     }
-    builder
+    let vm = builder
         .create()
         .await
-        .map_err(|e| SandboxError::Unavailable(e.to_string()))
+        .map_err(|e| SandboxError::Unavailable(e.to_string()))?;
+    Ok((vm, desktop_ports))
 }
 
 /// Startup happens before the TUI exists, so a long image pull needs somewhere
@@ -1529,6 +1755,10 @@ mod tests {
     fn git_reads_its_token_from_the_environment_not_a_credential_store() {
         assert!(GIT_CREDENTIAL_SETUP.contains("credential.https://github.com.helper"));
         assert!(
+            GIT_CREDENTIAL_SETUP.contains("--global"),
+            "unprivileged user cannot write git's system config"
+        );
+        assert!(
             GIT_CREDENTIAL_SETUP.contains("$GITHUB_TOKEN"),
             "the default image has no gh, so the token comes from the environment"
         );
@@ -1543,6 +1773,10 @@ mod tests {
         let policy = Policy::default();
         assert_eq!(policy.image, DEFAULT_IMAGE);
         assert!(
+            DEFAULT_IMAGE.contains("wrap:desktop"),
+            "the default guest is wrap's desktop image, not the CLI-only tag"
+        );
+        assert!(
             !policy.provision,
             "the image already has the toolchain; installing it again is minutes of nothing"
         );
@@ -1550,6 +1784,39 @@ mod tests {
             policy.root_disk >= 8 * 1024,
             "a rust build tree does not fit in a default rootfs"
         );
+        assert!(
+            policy.memory >= 8192,
+            "XFCE + Chrome + a real build needs more than a headless shell"
+        );
+        assert!(is_wrap_image(&policy.image));
+        assert!(is_desktop_image(&policy.image));
+        assert!(!is_wrap_image("alpine"));
+        assert!(!is_desktop_image("ghcr.io/tobi/wrap:latest"));
+    }
+
+    #[test]
+    fn wrap_images_get_a_unix_user_and_desktop_display() {
+        let env = guest_unix_env(DEFAULT_IMAGE);
+        assert_eq!(env.get("HOME").map(String::as_str), Some(GUEST_HOME));
+        assert_eq!(env.get("USER").map(String::as_str), Some(GUEST_USER));
+        assert_eq!(
+            env.get("DISPLAY").map(String::as_str),
+            Some(DESKTOP_DISPLAY)
+        );
+        assert!(guest_unix_env("alpine").is_empty());
+    }
+
+    #[test]
+    fn a_novnc_url_points_at_localhost_and_autoconnects() {
+        let desktop = Desktop {
+            novnc_port: 7608,
+            vnc_port: 7590,
+        };
+        assert_eq!(
+            desktop.novnc_url(),
+            "http://127.0.0.1:7608/vnc.html?autoconnect=1&resize=scale&reconnect=1"
+        );
+        assert_eq!(desktop.vnc_addr(), "127.0.0.1:7590");
     }
 
     #[tokio::test]

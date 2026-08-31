@@ -7,6 +7,15 @@ cut is recorded here.
 
 Reve is one Rust crate (edition 2024, version 0.1.0) with Lua for scripting.
 
+**Quality gate.** Package-wide `[lints.rust]` / `[lints.clippy]` in `Cargo.toml`
+apply to the library and every binary/test/example target. The policy includes
+pedantic checks, production panic paths and unchecked slicing, unsafe hygiene,
+debugging placeholders, and synchronous locks/refcell borrows across await.
+`clippy.toml` grants the narrow test panic/debug exemptions. `make ci` is the
+single local/CI definition: formatting, rustc warnings-as-errors, strict Clippy
+with `-D warnings`, and locked tests. MicroVM tests are not enabled by this gate.
+Violations fail the gate; no baseline or blanket suppression hides existing debt.
+
 ## 0. Why Rust, and what the type system is doing for us
 
 The specification's central structural claim is **one writer per session**. In most
@@ -116,6 +125,17 @@ src/
                       switches. Markdown uses one `formatText` for drafts and
                       committed replies. Tools collapse to one Activity row with
                       an updating Working… line. GET / is Cache-Control: no-store.
+                      PWA: manifest, SVG icon, service worker (shell only;
+                      HTML stays uncached because the token is embedded).
+                      Phone layout is 100dvh + safe-area; drawers are CSS
+                      radios/:has(); the bot sheet is a popover with
+                      ::backdrop and @starting-style; bot switches use the
+                      View Transition API; compose uses field-sizing and CSS
+                      anchor positioning. Attachments POST to
+                      /api/bots/<id>/attachments and land in
+                      workspace/tmp/{id}/{name} (guest /workspace/tmp/…);
+                      the message names them as <file/> pills. Large pastes
+                      and dropped/picked files take the same path.
                       House events refresh sidebar/header metadata from profile.json;
                       invalid edits show a labelled last-good profile, not silent stale UI.
                       Soul editor reads/writes SOUL.md through /api/bots/<id>/soul.
@@ -131,6 +151,8 @@ src/
                       guides, arrows / Enter / typeahead, Collapse All +
                       Refresh. Rooted at the mount. Omits agents/*/sessions
                       JSONL. Paths stay under the mount.
+                      The Screen tab is a live noVNC preview of the guest
+                      desktop; click takes over (keyboard/mouse), Esc gives back.
                       Rail working-dots follow house `bot_busy` events, not
                       which chat is open. GET /api/bots includes `busy`.
   eval/               catalog runner for evals/cases (offline / live / microvm);
@@ -200,13 +222,14 @@ reloaded state instead of writing something it decided under stale assumptions.
   is re-executed only when the recorded *and* current replay declarations both say `safe`,
   and otherwise gets a synthetic result that admits the effect may or may not have
   happened. A prompt that was still a reservation is placed exactly once.
-- **The sandbox.** Links `microsandbox =0.6.8` directly. The default guest is a
-  pre-provisioned Arch image (`ghcr.io/tobi/wrap:latest`) whose toolchain lives at absolute
-  paths under `/opt`, so the first command runs at boot instead of after minutes of package
-  installation; provisioning is therefore off by default and exists for agents that point
-  at a bare distro. Public-internet egress by default (`NetworkProfile::Public`);
+- **The sandbox.** Links `microsandbox =0.6.8` directly. The default guest is wrap's
+  desktop image (`ghcr.io/tobi/wrap:desktop`): toolchain at absolute paths under `/opt`,
+  unprivileged `user` (`HOME=/home/user`) with uid/gid realigned to the host workspace
+  owner and virtiofs stat virtualization off, XFCE on `:1`, noVNC/VNC published on
+  localhost, and a shared Chrome that `agent-browser` attaches to. Provisioning is off
+  by default. Public-internet egress by default (`NetworkProfile::Public`);
   `open = false` plus `allow` is the lock-down. Scoped source-backed secrets, fail-closed boot,
-  idle shutdown, workspace bind mount at `/workspace`.
+  idle shutdown, workspace bind mount at `/workspace`. Default memory is 8192 MiB.
 - **The scripting surface.** Trusted host `agent { }`, `sandbox { }` and installed
   tools use one Lua state. Bot-editable plugins/routines use a **separate** state
   with an allowlist of pure libraries/base functions: no `io`, `os`, `package`,
@@ -333,12 +356,13 @@ Every row names a real test. A claim with no test says so instead of appearing c
 | Roster tokens, last-bot floor, and capacity include creating/deleting slots | `house::roster::tests` |
 | Supervisor stop seals persistence and waits for owned effects | `house::lifecycle_tests::supervisor_stop_seals_the_session_and_waits_for_owned_effects` |
 | Concurrent create/delete/recreate isolation holds in the guest | `house::microvm_tests::homes_cwd_memory_and_profile_notifications_work_in_the_guest` (opt-in) |
-| The default guest is pre-provisioned, and git reads its token from the environment | `sandbox::tests::{the_default_policy_boots_a_preprovisioned_guest, git_reads_its_token_from_the_environment_not_a_credential_store}` |
+| The default guest is wrap desktop, unprivileged, and git reads its token from the environment | `sandbox::tests::{the_default_policy_boots_a_preprovisioned_guest, wrap_images_get_a_unix_user_and_desktop_display, git_reads_its_token_from_the_environment_not_a_credential_store}` |
 | Every invokable tool is offered to the model | `tools::tests::the_active_tool_list_covers_every_builtin` |
 | An unmentioned Lua flag keeps its default | `lua::tests::an_unmentioned_flag_keeps_its_default` |
 | Model discovery contacts only upstreams whose key is set, and never fails the agent | `provider::discovery::tests::{only_upstreams_that_have_a_key_are_probed, an_unreachable_upstream_is_recorded_not_fatal, a_missing_or_corrupt_cache_is_simply_absent}` |
 | A namespaced model id survives discovery intact (`openrouter/x-ai/grok-4.6`) | `provider::discovery::tests::the_openrouter_shape_yields_a_pasteable_reference` |
 | Public-internet egress by default; lock-down is `open = false` | `sandbox::tests::default_egress_is_the_public_internet`, `tests/microvm.rs` (opt-in) |
+| Chat attachments stay under `workspace/tmp/{id}/` and are named in the message | `house::attach::tests::{save_writes_under_workspace_tmp_id_and_tags_the_guest_path, names_are_basenames_without_traversal, read_refuses_traversal_and_bad_ids}` |
 
 **Not covered yet.** Standalone `compact()` and `navigate()` have no end-to-end test — the
 machinery is shared with the in-run compaction path, which is exercised only through the

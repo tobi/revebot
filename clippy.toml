@@ -1,0 +1,7 @@
+# Tests may use panic paths to assert failures. These do not exempt production
+# code, unsafe blocks, placeholders, or synchronous locks held across await.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-dbg-in-tests = true

@@ -12,6 +12,11 @@ starts in microseconds. Concurrency is tokio tasks over single-owner session sta
 
 ### Added
 
+- Default guest is [`ghcr.io/tobi/wrap:desktop`](https://github.com/tobi/wrap): unprivileged
+  `user`, XFCE on `:1`, noVNC/VNC on localhost, shared Chrome with `agent-browser` on CDP
+  9222. The house Screen panel is a live preview; click takes over the desktop. House
+  skills `/browser` and `/computer` teach the bot to steer Chrome and other GUI. Default
+  memory is 8192 MiB.
 - Direct dependency on the [`microsandbox`](https://github.com/superradcompany/microsandbox)
   Rust crate (pinned `=0.6.8` in `Cargo.toml`) and `microsandbox-network`. No FFI shim, no
   CLI, no daemon, no host shell: the crate is linked and called directly. Mandatory microVM

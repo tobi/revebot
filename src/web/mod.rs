@@ -83,10 +83,33 @@ mod tests {
         assert!(html.contains("/api/bots/"));
         assert!(html.contains("/skills"));
         assert!(html.contains("id=\"ac\""));
+        assert!(html.contains("manifest.webmanifest"));
+        assert!(html.contains("apple-mobile-web-app-capable"));
+        assert!(html.contains("viewport-fit=cover"));
+        assert!(html.contains("popover=\"auto\""));
+        assert!(html.contains("field-sizing: content"));
+        assert!(html.contains("@view-transition"));
+        assert!(html.contains("startViewTransition"));
+        assert!(html.contains("position-anchor"));
+        assert!(html.contains(":popover-open"));
+        assert!(html.contains("@starting-style"));
+        assert!(html.contains("serviceWorker"));
+        assert!(html.contains("enterkeyhint=\"send\""));
+        assert!(html.contains("for=\"file\""));
+        assert!(html.contains("function queueFile"));
+        assert!(html.contains("<file"));
+        assert!(html.contains("file-pill"));
+        assert!(html.contains("safe-area-inset-bottom"));
+        assert!(html.contains(":has(#nav-toggle:checked)"));
         assert!(!html.contains("prompt(\"Name"));
         assert!(html.contains("tool-name"));
         assert!(html.contains("Plugins"));
         assert!(html.contains("Search"));
+        assert!(html.contains("id=\"desktop\""));
+        assert!(html.contains("function loadDesktop"));
+        assert!(html.contains("function takeOverDesktop"));
+        assert!(html.contains("/api/desktop"));
+        assert!(html.contains("click to take over"));
         assert!(
             !html.contains("JSON.stringify(content)"),
             "assistant content parts must be parsed, not stringified"

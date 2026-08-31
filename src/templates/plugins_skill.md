@@ -300,7 +300,7 @@ to workspace Lua. Do not modify host launch code through a bot plugin.
 |---|---|
 | `image` | string; guest image |
 | `cpus` | unsigned 8-bit integer; default 2 |
-| `memory` | unsigned 32-bit integer, MiB; default 2048 |
+| `memory` | unsigned 32-bit integer, MiB; default 8192 |
 | `root_disk` | unsigned 32-bit integer, MiB |
 | `workdir` | string; default `/workspace` |
 | `name` | string; explicit sandbox name |

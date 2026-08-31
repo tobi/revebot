@@ -3,9 +3,10 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Path, Query, State, WebSocketUpgrade};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State, WebSocketUpgrade};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -54,6 +55,9 @@ pub async fn serve(house: House) -> anyhow::Result<()> {
 fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/manifest.webmanifest", get(manifest))
+        .route("/sw.js", get(service_worker))
+        .route("/icon.svg", get(icon))
         .route("/api/health", get(health))
         .route("/api/events", get(house_events_ws))
         .route("/api/bots", get(list_bots).post(create_bot))
@@ -66,6 +70,11 @@ fn router(state: AppState) -> Router {
             get(list_messages).post(post_message),
         )
         .route("/api/bots/{id}/messages/{entry}", get(get_log_record))
+        .route("/api/bots/{id}/attachments", post(post_attachment))
+        .route(
+            "/api/bots/{id}/attachments/{uid}/{name}",
+            get(get_attachment),
+        )
         .route("/api/bots/{id}/soul", get(get_soul).put(put_soul))
         .route("/api/bots/{id}/abort", post(abort_bot))
         .route("/api/models", get(list_models))
@@ -77,8 +86,12 @@ fn router(state: AppState) -> Router {
         .route("/api/bots/{id}/events", get(events_ws))
         .route("/api/exec", post(exec))
         .route("/api/tool", post(tool))
+        .route("/api/desktop", get(desktop))
         .route("/api/routines", get(list_routines))
         .route("/api/routines/{id}/run", post(run_routine))
+        .layer(DefaultBodyLimit::max(
+            super::attach::MAX_BYTES as usize + 1024 * 1024,
+        ))
         .with_state(state)
 }
 
@@ -109,8 +122,78 @@ async fn index(State(state): State<AppState>) -> impl IntoResponse {
     )
 }
 
+async fn manifest() -> impl IntoResponse {
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/manifest+json"),
+            ),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
+        ],
+        include_str!("../web/manifest.webmanifest"),
+    )
+}
+
+async fn service_worker() -> impl IntoResponse {
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/javascript; charset=utf-8"),
+            ),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
+            (
+                HeaderName::from_static("service-worker-allowed"),
+                HeaderValue::from_static("/"),
+            ),
+        ],
+        include_str!("../web/sw.js"),
+    )
+}
+
+async fn icon() -> impl IntoResponse {
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("image/svg+xml"),
+            ),
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=86400"),
+            ),
+        ],
+        include_str!("../web/icon.svg"),
+    )
+}
+
 async fn health(State(_state): State<AppState>) -> Json<Value> {
     Json(json!({ "ok": true }))
+}
+
+async fn desktop(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<QueryAuth>,
+) -> Response {
+    if !authorized(&headers, &q, &state.house) {
+        return deny();
+    }
+    match state.house.sandbox().desktop() {
+        Some(d) => Json(json!({
+            "novnc": d.novnc_url(),
+            "vnc": d.vnc_addr(),
+            "display": crate::sandbox::DESKTOP_DISPLAY,
+        }))
+        .into_response(),
+        None => Json(json!({
+            "novnc": Value::Null,
+            "vnc": Value::Null,
+            "display": crate::sandbox::DESKTOP_DISPLAY,
+        }))
+        .into_response(),
+    }
 }
 
 fn deny() -> Response {
@@ -491,6 +574,145 @@ async fn post_message(
             .into_response(),
         Err(e) => (
             StatusCode::CONFLICT,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn post_attachment(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<QueryAuth>,
+    mut multipart: Multipart,
+) -> Response {
+    if !authorized(&headers, &q, &state.house) {
+        return deny();
+    }
+    let mut name = String::from("file");
+    let mut mime: Option<String> = None;
+    let mut bytes: Option<Vec<u8>> = None;
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response();
+            }
+        };
+        if field.name() != Some("file") && bytes.is_some() {
+            continue;
+        }
+        if let Some(file_name) = field.file_name() {
+            name = file_name.to_string();
+        }
+        if let Some(ct) = field.content_type() {
+            mime = Some(ct.to_string());
+        }
+        match field.bytes().await {
+            Ok(buf) => bytes = Some(buf.to_vec()),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response();
+            }
+        }
+    }
+    let Some(bytes) = bytes else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "file required" })),
+        )
+            .into_response();
+    };
+    match state
+        .house
+        .save_attachment(&id, &name, &bytes, mime.as_deref())
+    {
+        Ok(saved) => (
+            StatusCode::CREATED,
+            Json(json!({
+                "id": saved.id,
+                "name": saved.name,
+                "path": saved.path,
+                "bytes": saved.bytes,
+                "mime": saved.mime,
+                "tag": super::attach::tag(&saved),
+                "url": format!(
+                    "/api/bots/{}/attachments/{}/{}",
+                    urlencoding_path(&id),
+                    urlencoding_path(&saved.id),
+                    urlencoding_path(&saved.name)
+                )
+            })),
+        )
+            .into_response(),
+        Err(e) => {
+            let status = if e.to_string().contains("not found") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (status, Json(json!({ "error": e.to_string() }))).into_response()
+        }
+    }
+}
+
+fn urlencoding_path(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+async fn get_attachment(
+    State(state): State<AppState>,
+    Path((id, uid, name)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    Query(q): Query<QueryAuth>,
+) -> Response {
+    if !authorized(&headers, &q, &state.house) {
+        return deny();
+    }
+    match state.house.read_attachment(&id, &uid, &name) {
+        Ok((saved, bytes)) => {
+            let mut response = Response::new(Body::from(bytes));
+            let headers = response.headers_mut();
+            if let Ok(value) = HeaderValue::from_str(&saved.mime) {
+                headers.insert(header::CONTENT_TYPE, value);
+            }
+            headers.insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("private, max-age=3600"),
+            );
+            let disp = if saved.mime.starts_with("image/") {
+                "inline"
+            } else {
+                "attachment"
+            };
+            if let Ok(value) = HeaderValue::from_str(&format!(
+                "{disp}; filename=\"{}\"",
+                saved.name.replace('"', "")
+            )) {
+                headers.insert(header::CONTENT_DISPOSITION, value);
+            }
+            response
+        }
+        Err(e) => (
+            StatusCode::NOT_FOUND,
             Json(json!({ "error": e.to_string() })),
         )
             .into_response(),

@@ -225,7 +225,7 @@ function connectLog(id, epoch) {
 
 async function select(id, fromRoute) {
   if (!id) return;
-  if (current === id) { if (!fromRoute) setRoute(id); return; }
+  if (current === id) { if (!fromRoute) setRoute(id); closeDrawers(); return; }
   if (current) composeDrafts.set(current, document.getElementById('text').value);
   current = id; const epoch = ++connection;
   document.getElementById('text').value = composeDrafts.get(id) || '';
@@ -233,8 +233,12 @@ async function select(id, fromRoute) {
   if (!fromRoute) setRoute(id);
   if (ws) { ws.onclose = null; ws.close(); }
   rowCache.clear(); loadingOlder = false; resetTranscript();
-  paintHead(bots.find(b => b.id === id));
-  queueLogRender(id);
+  const paint = () => {
+    paintHead(bots.find(b => b.id === id));
+    queueLogRender(id);
+    closeDrawers();
+  };
+  if (document.startViewTransition) document.startViewTransition(paint); else paint();
   const profile = bots.find(bot => bot.id === id);
   if (profile && profile.status !== 'ready') {
     document.getElementById('status').textContent = profile.profile_error || 'Bot is unavailable';
