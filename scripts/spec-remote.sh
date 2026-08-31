@@ -30,7 +30,7 @@ command -v tla >/dev/null || cargo install tla-checker@0.6.11 --bin tla
 
 if ! command -v herdr >/dev/null || ! herdr status server 2>/dev/null | grep -q '^status: running'; then
   echo "no herdr server on $(hostname); running inline" >&2
-  cd "$dir" && exec make "$target" TLA=tla
+  cd "$dir" && exec make -j4 "$target" TLA=tla
 fi
 
 # Reuse the labelled workspace when it exists, otherwise create it.
@@ -46,7 +46,7 @@ fi
 
 log="$dir/target/spec-$target.log"
 mkdir -p "$dir/target"
-herdr pane run "$pane" "cd $dir && export PATH=\"\$HOME/.cargo/bin:\$PATH\" && make $target TLA=tla 2>&1 | tee $log; rc=\${PIPESTATUS[0]}; printf 'HERDR_DONE_%s\n' \"\$rc\""
+herdr pane run "$pane" "cd $dir && export PATH=\"\$HOME/.cargo/bin:\$PATH\" && make -j4 $target TLA=tla 2>&1 | tee $log; rc=\${PIPESTATUS[0]}; printf 'HERDR_DONE_%s\n' \"\$rc\""
 echo "running make $target in herdr workspace '$label' ($ws), pane $pane on $(hostname); log: $log" >&2
 herdr pane wait-output "$pane" --regex 'HERDR_DONE_[0-9]+' --source recent-unwrapped --lines 40 --timeout 86400000 >/dev/null
 rc=$(herdr pane read "$pane" --source recent-unwrapped --lines 40 | grep -o 'HERDR_DONE_[0-9]*' | tail -1 | sed 's/HERDR_DONE_//')

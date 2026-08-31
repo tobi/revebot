@@ -35,7 +35,7 @@ test:
 # (docs/harness.md) and the shared microVM lifecycle (src/sandbox.rs) — with
 # tla-rs (`cargo install tla-checker --bin tla`). `spec` is the CI size and is
 # what `make ci` runs (`tla` is its alias); `spec-full` uses the deep bounds and
-# prints coverage counts, and can take an hour.
+# prints coverage counts, and can take hours; `make -j4 spec-full` parallelises.
 #
 # Either runs on another machine when REMOTE_HOST is set to host:dir, e.g.
 #     make spec-full REMOTE_HOST=gb300:~/src/tries/revebot
@@ -61,11 +61,29 @@ spec:
 	$(TLA) docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.small.cfg $(SYM_HARNESS) --max-states 3000000
 	$(TLA) docs/tla/VmLifecycle.tla --config docs/tla/VmLifecycle.cfg $(SYM_VM) --max-states 3000000
 
-spec-full:
-	$(TLA) docs/tla/DurableLog.tla --config docs/tla/DurableLog.cfg --max-states 50000000
-	$(TLA) docs/tla/VmLifecycle.tla --config docs/tla/VmLifecycle.cfg $(SYM_VM) --max-states 50000000 $(COV_VM)
-	$(TLA) docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.small.cfg $(SYM_HARNESS) --max-states 50000000 $(COV_HARNESS)
-	$(TLA) docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.cfg $(SYM_HARNESS) --max-states 200000000 $(COV_HARNESS)
+# Four independent checks; `make -j4 spec-full` runs them side by side (the
+# checker is single-threaded). Each writes target/spec-<name>.log.
+spec-full: spec-full-log spec-full-vm spec-full-harness spec-full-harness-six spec-full-harness-deep
+	@for f in log vm harness harness-six harness-deep; do echo "== $$f"; grep -E "Reachable states|Time:|Cov|violated|error" target/spec-$$f.log; done
+
+.PHONY: spec-full-log spec-full-vm spec-full-harness spec-full-harness-six spec-full-harness-deep
+spec-full-log:
+	@mkdir -p target
+	$(TLA) docs/tla/DurableLog.tla --config docs/tla/DurableLog.cfg --max-states 50000000 > target/spec-log.log 2>&1
+spec-full-vm:
+	@mkdir -p target
+	$(TLA) docs/tla/VmLifecycle.tla --config docs/tla/VmLifecycle.cfg $(SYM_VM) --max-states 50000000 $(COV_VM) > target/spec-vm.log 2>&1
+spec-full-harness:
+	@mkdir -p target
+	$(TLA) docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.small.cfg $(SYM_HARNESS) --max-states 50000000 $(COV_HARNESS) > target/spec-harness.log 2>&1
+# CI-sizing candidate: the small configuration one commit shorter.
+spec-full-harness-six:
+	@mkdir -p target
+	sed 's/MaxSeq = 7/MaxSeq = 6/' docs/tla/DurableHarness.small.cfg > target/DurableHarness.six.cfg
+	$(TLA) docs/tla/DurableHarness.tla --config target/DurableHarness.six.cfg $(SYM_HARNESS) --max-states 50000000 $(COV_HARNESS) > target/spec-harness-six.log 2>&1
+spec-full-harness-deep:
+	@mkdir -p target
+	$(TLA) docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.cfg $(SYM_HARNESS) --max-states 200000000 $(COV_HARNESS) > target/spec-harness-deep.log 2>&1
 else
 # scripts/spec-remote.sh rsyncs the tree, then runs the target inside a herdr
 # workspace labelled REMOTE_LABEL on the remote's herdr server (watch it with
