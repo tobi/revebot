@@ -20,6 +20,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 /// Serve one request, then stop. Returns the address and the request body.
+#[expect(
+    clippy::unwrap_used,
+    reason = "test server: a loopback bind/accept failure is the test failing"
+)]
 async fn serve(status: &'static str, body: &'static str) -> (String, Arc<Mutex<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -30,7 +34,7 @@ async fn serve(status: &'static str, body: &'static str) -> (String, Arc<Mutex<S
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut buffer = vec![0u8; 64 * 1024];
         let read = socket.read(&mut buffer).await.unwrap_or(0);
-        *captured.lock() = String::from_utf8_lossy(&buffer[..read]).into_owned();
+        *captured.lock() = String::from_utf8_lossy(buffer.get(..read).unwrap_or(&[])).into_owned();
 
         let response = format!(
             "HTTP/1.1 {status}\r\ncontent-type: text/event-stream\r\n\

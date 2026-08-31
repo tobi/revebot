@@ -82,9 +82,10 @@ pub fn render(source: &str, width: usize, indent: &str) -> Vec<Line<'static>> {
 
 fn heading(line: &str) -> Option<&str> {
     let hashes = line.len() - line.trim_start_matches('#').len();
-    (1..=6)
-        .contains(&hashes)
-        .then(|| line[hashes..].trim_start())
+    if !(1..=6).contains(&hashes) {
+        return None;
+    }
+    Some(line.get(hashes..)?.trim_start())
 }
 
 /// `- x`, `* x`, `• x`, or `1. x` → the marker we will draw, and the content.
@@ -96,7 +97,7 @@ fn bullet(line: &str) -> Option<(String, &str)> {
     }
     let digits: String = line.chars().take_while(char::is_ascii_digit).collect();
     if !digits.is_empty() {
-        let rest = &line[digits.len()..];
+        let rest = line.get(digits.len()..)?;
         if let Some(rest) = rest.strip_prefix(". ") {
             return Some((format!("{digits}. "), rest));
         }
@@ -126,8 +127,7 @@ fn code_block(body: &[String], indent: &str, width: usize) -> Vec<Line<'static>>
 pub fn inline(text: &str, base: Style) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut buffer = String::new();
-    let chars: Vec<char> = text.chars().collect();
-    let mut i = 0;
+    let mut rest = text;
 
     let flush = |buffer: &mut String, spans: &mut Vec<Span<'static>>| {
         if !buffer.is_empty() {
@@ -135,29 +135,31 @@ pub fn inline(text: &str, base: Style) -> Vec<Span<'static>> {
         }
     };
 
-    while i < chars.len() {
-        let rest: String = chars[i..].iter().collect();
-        if let Some(end) = delimited(&rest, "`") {
+    while !rest.is_empty() {
+        if let Some((code, after)) = delimited(rest, "`") {
             flush(&mut buffer, &mut spans);
-            spans.push(Span::styled(rest[1..end].to_string(), theme::code()));
-            i += rest[..=end].chars().count();
-        } else if let Some(end) = delimited(&rest, "**") {
+            spans.push(Span::styled(code.to_string(), theme::code()));
+            rest = after;
+        } else if let Some((bold, after)) = delimited(rest, "**") {
             flush(&mut buffer, &mut spans);
             spans.push(Span::styled(
-                rest[2..end].to_string(),
+                bold.to_string(),
                 base.add_modifier(Modifier::BOLD),
             ));
-            i += rest[..end + 2].chars().count();
-        } else if let Some(end) = delimited(&rest, "*") {
+            rest = after;
+        } else if let Some((italic, after)) = delimited(rest, "*") {
             flush(&mut buffer, &mut spans);
             spans.push(Span::styled(
-                rest[1..end].to_string(),
+                italic.to_string(),
                 base.add_modifier(Modifier::ITALIC),
             ));
-            i += rest[..=end].chars().count();
+            rest = after;
         } else {
-            buffer.push(chars[i]);
-            i += 1;
+            let Some(c) = rest.chars().next() else {
+                break;
+            };
+            buffer.push(c);
+            rest = rest.get(c.len_utf8()..).unwrap_or_default();
         }
     }
     flush(&mut buffer, &mut spans);
@@ -167,15 +169,17 @@ pub fn inline(text: &str, base: Style) -> Vec<Span<'static>> {
     spans
 }
 
-/// Byte index of the closing `marker`, if this text opens with one and closes
-/// it on the same line with something in between.
-fn delimited(text: &str, marker: &str) -> Option<usize> {
-    if !text.starts_with(marker) {
+/// Content between the markers and the text after the closing one, if this text
+/// opens with `marker` and closes it on the same line with something in between.
+fn delimited<'a>(text: &'a str, marker: &str) -> Option<(&'a str, &'a str)> {
+    let body = text.strip_prefix(marker)?;
+    let end = body.find(marker)?;
+    if end == 0 {
         return None;
     }
-    let body = &text[marker.len()..];
-    let end = body.find(marker)?;
-    (end > 0).then_some(marker.len() + end)
+    // `find` yields a char boundary; the closing marker starts there.
+    let (content, closing) = body.split_at(end);
+    Some((content, closing.strip_prefix(marker)?))
 }
 
 /// Wrap styled spans, breaking on spaces and preserving style runs.
@@ -237,15 +241,19 @@ fn split_keeping_spaces(text: &str) -> Vec<&str> {
         match in_space {
             None => in_space = Some(space),
             Some(previous) if previous != space => {
-                out.push(&text[start..i]);
+                if let Some(piece) = text.get(start..i) {
+                    out.push(piece);
+                }
                 start = i;
                 in_space = Some(space);
             }
             _ => {}
         }
     }
-    if start < text.len() {
-        out.push(&text[start..]);
+    if start < text.len()
+        && let Some(piece) = text.get(start..)
+    {
+        out.push(piece);
     }
     out
 }

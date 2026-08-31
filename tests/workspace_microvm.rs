@@ -28,7 +28,7 @@ async fn documented_workspace_tool_reads_a_note_inside_the_microvm() {
         .unwrap();
     let name = format!("reve-it-workspace-lua-{}", rand::random::<u32>());
     let sandbox = Arc::new(
-        Sandbox::start(
+        Box::pin(Sandbox::start(
             Policy {
                 name: Some(name.clone()),
                 image: "alpine".into(),
@@ -40,7 +40,7 @@ async fn documented_workspace_tool_reads_a_note_inside_the_microvm() {
             &workspace,
             dir.path().join(".reve"),
             &Silent,
-        )
+        ))
         .await
         .expect("mandatory VM boots"),
     );

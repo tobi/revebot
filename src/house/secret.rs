@@ -46,7 +46,9 @@ pub fn validate_env(name: &str) -> Result<(), String> {
         return Err("env name must be 1–64 characters".into());
     }
     let mut chars = n.chars();
-    let first = chars.next().unwrap();
+    let Some(first) = chars.next() else {
+        return Err("env name must be 1–64 characters".into());
+    };
     if !first.is_ascii_alphabetic() && first != '_' {
         return Err("env must start with a letter or underscore".into());
     }

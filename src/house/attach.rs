@@ -31,9 +31,10 @@ pub fn sanitize_name(name: &str) -> String {
         .unwrap_or("file");
     let mut out = String::new();
     for c in base.chars() {
-        if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
-            out.push(c);
-        } else if !c.is_ascii() && !c.is_control() {
+        if c.is_ascii_alphanumeric()
+            || matches!(c, '.' | '-' | '_')
+            || (!c.is_ascii() && !c.is_control())
+        {
             out.push(c);
         } else {
             out.push('_');
@@ -203,7 +204,12 @@ mod tests {
     #[test]
     fn oversize_is_refused() {
         let root = tempfile::tempdir().unwrap();
-        let big = vec![0u8; (MAX_BYTES as usize) + 1];
+        let big = vec![
+            0u8;
+            usize::try_from(MAX_BYTES)
+                .unwrap_or(usize::MAX)
+                .saturating_add(1)
+        ];
         assert!(save(root.path(), "big.bin", &big, None).is_err());
     }
 }

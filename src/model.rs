@@ -112,7 +112,12 @@ impl Assistant {
             tool_calls: calls
                 .into_iter()
                 .map(|(name, arguments)| ToolCall {
-                    id: format!("tc_{}", &crate::ids::uuid_v7(crate::ids::now_ms())[..8]),
+                    id: format!(
+                        "tc_{}",
+                        crate::ids::uuid_v7(crate::ids::now_ms())
+                            .get(..8)
+                            .unwrap_or_default()
+                    ),
                     name,
                     arguments: arguments.as_object().cloned().unwrap_or_default(),
                 })
@@ -203,8 +208,10 @@ impl Assistant {
             "stopReason": self.stop_reason,
             "usage": self.usage,
         });
-        if let Some(error) = &self.error_message {
-            message["errorMessage"] = Value::String(error.clone());
+        if let Some(error) = &self.error_message
+            && let Some(obj) = message.as_object_mut()
+        {
+            obj.insert("errorMessage".into(), Value::String(error.clone()));
         }
         message
     }

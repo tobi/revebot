@@ -54,7 +54,8 @@ impl Drop for Sink {
 
 impl Sink {
     pub fn append(&mut self, line: &Line) -> Result<()> {
-        let mut text = serde_json::to_string(line).expect("a session line must serialise");
+        let mut text = serde_json::to_string(line)
+            .map_err(|e| StorageError::Invalid(format!("a session line must serialise: {e}")))?;
         text.push('\n');
         self.file.write_all(text.as_bytes())?;
         self.file.flush()?;
@@ -206,7 +207,9 @@ impl Storage {
                 storage.compact_file()?;
             }
         } else {
-            let sink = storage.sink.as_mut().expect("sink");
+            let Some(sink) = storage.sink.as_mut() else {
+                return Err(StorageError::Invalid("fresh session has no sink".into()));
+            };
             sink.append(&Line::header(header))?;
         }
         Ok(storage)
@@ -242,7 +245,9 @@ impl Storage {
         let result = (|| -> Result<()> {
             let mut out = std::io::BufWriter::new(&mut file);
             let mut line = |line: &Line| -> Result<()> {
-                let mut text = serde_json::to_string(line).expect("serialise");
+                let mut text = serde_json::to_string(line).map_err(|e| {
+                    StorageError::Invalid(format!("a session line must serialise: {e}"))
+                })?;
                 text.push('\n');
                 out.write_all(text.as_bytes())?;
                 Ok(())
@@ -274,7 +279,12 @@ impl Storage {
                 &directory,
                 &temp,
                 &directory,
-                path.file_name().expect("session filename"),
+                path.file_name().ok_or_else(|| {
+                    StorageError::Invalid(format!(
+                        "session path {} has no filename",
+                        path.display()
+                    ))
+                })?,
             )
             .map_err(std::io::Error::from)?;
             Ok(())
@@ -315,8 +325,8 @@ fn read_lines(source: &File) -> Result<Replay> {
     let mut number = 0usize;
     let mut last_seq = 0u64;
     let mut seen = HashSet::new();
-    let mut live: std::collections::HashMap<(crate::entry::Namespace, String), ()> =
-        std::collections::HashMap::new();
+    let mut live: std::collections::HashSet<(crate::entry::Namespace, String)> =
+        std::collections::HashSet::new();
 
     loop {
         raw.clear();
@@ -384,15 +394,15 @@ fn read_lines(source: &File) -> Result<Replay> {
             last_seq = last_seq.max(seq);
             if let Write::Register(r) = write {
                 let key = match r {
-                    RegisterWrite::Set { namespace, key, .. } => (*namespace, key.clone()),
-                    RegisterWrite::Delete { namespace, key, .. } => (*namespace, key.clone()),
+                    RegisterWrite::Set { namespace, key, .. }
+                    | RegisterWrite::Delete { namespace, key, .. } => (*namespace, key.clone()),
                 };
-                if live.remove(&key).is_some() {
+                if live.remove(&key) {
                     replay.dead_writes += 1;
                 }
                 match r {
                     RegisterWrite::Set { .. } => {
-                        live.insert(key, ());
+                        live.insert(key);
                     }
                     RegisterWrite::Delete { .. } => {
                         replay.dead_writes += 1;

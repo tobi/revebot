@@ -11,6 +11,7 @@
 //! *conditional commit* against the running operation, not a message this loop
 //! has to be free to receive.
 
+use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -106,7 +107,7 @@ pub async fn run(project: Project, sandbox: Arc<Sandbox>) -> anyhow::Result<()> 
     if tools.is_empty() {
         banner.push('.');
     } else {
-        banner.push_str(&format!(", or `/{}` to run a tool.", tools.join("`, `/")));
+        let _ = write!(banner, ", or `/{}` to run a tool.", tools.join("`, `/"));
     }
     let _ = updates.send(Update::Item(Item::Assistant(banner))).await;
 
@@ -152,9 +153,17 @@ pub async fn run(project: Project, sandbox: Arc<Sandbox>) -> anyhow::Result<()> 
             };
             let storage = match Storage::open_beneath(
                 &project.root,
-                session_path
-                    .strip_prefix(&project.root)
-                    .expect("project session"),
+                {
+                    let Ok(relative) = session_path.strip_prefix(&project.root) else {
+                        let _ = updates
+                            .send(Update::Item(Item::Notice(
+                                "session: path is outside the project".into(),
+                            )))
+                            .await;
+                        return;
+                    };
+                    relative
+                },
                 "main",
                 Some(directory.home.clone()),
             ) {
@@ -295,8 +304,13 @@ pub async fn run(project: Project, sandbox: Arc<Sandbox>) -> anyhow::Result<()> 
                         let (tx, rx) = channel();
                         *side_cancel.lock() = Some(tx);
                         let _ = updates.send(Update::Item(Item::User(text.clone()))).await;
-                        let item =
-                            run_command(&sandbox, &directory, text.trim()[1..].trim(), rx).await;
+                        let item = run_command(
+                            &sandbox,
+                            &directory,
+                            text.trim().get(1..).unwrap_or_default().trim(),
+                            rx,
+                        )
+                        .await;
                         side_cancel.lock().take();
                         let _ = updates.send(Update::Item(item)).await;
                     }
@@ -309,7 +323,7 @@ pub async fn run(project: Project, sandbox: Arc<Sandbox>) -> anyhow::Result<()> 
                         let (tx, rx) = channel();
                         *side_cancel.lock() = Some(tx);
                         let _ = updates.send(Update::Item(Item::User(text.clone()))).await;
-                        let rest = text.trim()[1..].to_string();
+                        let rest = text.trim().get(1..).unwrap_or_default().to_string();
                         let item = if let Some(argument) = rest.strip_prefix("cd ") {
                             Some(
                                 match directory
@@ -844,9 +858,20 @@ fn file_size(bytes: u64) -> String {
     if bytes < 1_024 {
         format!("{bytes} B")
     } else if bytes < 1_048_576 {
-        format!("{:.1} KB", bytes as f64 / 1_024.0)
+        // File sizes stay far below 2^53, so the cast is exact at one decimal.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "file sizes are << 2^53; one-decimal display only"
+        )]
+        let size = bytes as f64;
+        format!("{:.1} KB", size / 1_024.0)
     } else {
-        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "file sizes are << 2^53; one-decimal display only"
+        )]
+        let size = bytes as f64;
+        format!("{:.1} MB", size / 1_048_576.0)
     }
 }
 

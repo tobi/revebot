@@ -1,4 +1,5 @@
 //! One log across streaming, durable acceptance, settlement and reopen.
+use parking_lot::Mutex;
 use reve::{
     entry::{MAIN_LANE, Namespace},
     events::Kind,
@@ -14,7 +15,7 @@ use reve::{
 };
 use serde_json::{Map, Value, json};
 use std::sync::{
-    Arc, Mutex, Weak,
+    Arc, Weak,
     atomic::{AtomicUsize, Ordering},
 };
 use tokio::sync::Notify;
@@ -42,7 +43,11 @@ impl Tools for Notices {
     ) -> BoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let harness = self.harness.lock().unwrap().upgrade().unwrap();
+            let harness = self
+                .harness
+                .lock()
+                .upgrade()
+                .ok_or_else(|| "harness is gone".to_string())?;
             let id = harness
                 .write_once(
                     MAIN_LANE,
@@ -103,7 +108,7 @@ fn setup(session: Session, model: Arc<dyn Model>) -> (Arc<Harness>, Arc<Notices>
             event_capacity: 512,
         },
     );
-    *tools.harness.lock().unwrap() = Arc::downgrade(&harness);
+    *tools.harness.lock() = Arc::downgrade(&harness);
     (harness, tools)
 }
 

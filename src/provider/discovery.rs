@@ -201,7 +201,7 @@ pub fn parse(value: &Value, provider: &str) -> Vec<Discovered> {
                 .get("context_length")
                 .or_else(|| row.get("context_window"))
                 .and_then(Value::as_u64)
-                .map(|n| n.min(u64::from(u32::MAX)) as u32);
+                .map(|n| u32::try_from(n).unwrap_or(u32::MAX));
             let reasoning = row
                 .get("supported_parameters")
                 .and_then(Value::as_array)

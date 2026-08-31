@@ -61,7 +61,9 @@ impl StreamState {
                 }
             }
             "content_block_start" => {
-                let index = payload.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let index =
+                    usize::try_from(payload.get("index").and_then(Value::as_u64).unwrap_or(0))
+                        .unwrap_or(0);
                 let block = payload.get("content_block");
                 let new = match block.and_then(|b| b.get("type")).and_then(Value::as_str) {
                     Some("text") => Block::Text,
@@ -88,10 +90,14 @@ impl StreamState {
                 while self.blocks.len() <= index {
                     self.blocks.push(Block::Ignored);
                 }
-                self.blocks[index] = new;
+                if let Some(slot) = self.blocks.get_mut(index) {
+                    *slot = new;
+                }
             }
             "content_block_delta" => {
-                let index = payload.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let index =
+                    usize::try_from(payload.get("index").and_then(Value::as_u64).unwrap_or(0))
+                        .unwrap_or(0);
                 let delta = payload.get("delta")?;
                 match delta.get("type").and_then(Value::as_str) {
                     Some("text_delta") => {
@@ -110,7 +116,9 @@ impl StreamState {
                 }
             }
             "content_block_stop" => {
-                let index = payload.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let index =
+                    usize::try_from(payload.get("index").and_then(Value::as_u64).unwrap_or(0))
+                        .unwrap_or(0);
                 if let Some(block) = self.blocks.get_mut(index)
                     && let Block::Tool { call, partial } = block
                 {
@@ -196,7 +204,7 @@ fn read_usage(usage: &Value, previous: Usage) -> Usage {
 pub fn build_body(
     resolved: &Resolved,
     system: &str,
-    messages: Vec<Value>,
+    messages: &[Value],
     tools: &[ToolSchema],
 ) -> Value {
     let mut body = json!({
@@ -204,7 +212,9 @@ pub fn build_body(
         "messages": messages,
         "stream": true,
     });
-    let map = body.as_object_mut().expect("object");
+    let Some(map) = body.as_object_mut() else {
+        return body;
+    };
     // Anthropic always calls it max_tokens, but the name still comes from the
     // compat block so there is exactly one place it is decided.
     map.insert(
@@ -392,7 +402,7 @@ event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,
             description: "run".into(),
             schema: json!({"type": "object"}),
         }];
-        let body = build_body(&resolved(false), "be terse", vec![], &tools);
+        let body = build_body(&resolved(false), "be terse", &[], &tools);
         assert_eq!(body["max_tokens"], 8192);
         assert_eq!(
             body["system"], "be terse",
@@ -408,7 +418,7 @@ event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,
 
     #[test]
     fn a_reasoning_model_gets_a_thinking_budget() {
-        let body = build_body(&resolved(true), "", vec![], &[]);
+        let body = build_body(&resolved(true), "", &[], &[]);
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 4096);
     }

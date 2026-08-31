@@ -225,7 +225,19 @@ impl Usage {
         if self.input == 0 {
             return 0.0;
         }
-        1.0 - (self.cached_input as f32 / self.input as f32)
+        // A coarse display ratio, not an accounting figure: token counts may
+        // exceed f32's exact integer range.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "coarse 0..1 display ratio; token counts may exceed 2^24"
+        )]
+        let cached = self.cached_input as f32;
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "coarse 0..1 display ratio; token counts may exceed 2^24"
+        )]
+        let input = self.input as f32;
+        1.0 - (cached / input)
     }
 
     pub fn add(&mut self, other: &Usage) {
@@ -373,7 +385,11 @@ impl Write {
             seq: 0,
             namespace,
             key: key.into(),
-            value: serde_json::to_value(value).expect("register values serialise"),
+            value: serde_json::to_value(value).unwrap_or_else(|error| {
+                // Register writes carry JSON-shaped payloads; a Serialize impl
+                // that fails here is a programming error, surfaced in-band.
+                serde_json::Value::String(format!("unserialisable register value: {error}"))
+            }),
         })
     }
     pub fn delete(namespace: Namespace, key: impl Into<String>) -> Self {
@@ -415,6 +431,7 @@ impl Transaction {
     pub fn new() -> Self {
         Self::default()
     }
+    #[must_use]
     pub fn with(mut self, write: Write) -> Self {
         self.writes.push(write);
         self
@@ -472,8 +489,8 @@ impl Line {
     }
 
     pub fn commit(writes: &[Write]) -> Self {
-        if writes.len() == 1 {
-            Self::Single(writes[0].clone())
+        if let [single] = writes {
+            Self::Single(single.clone())
         } else {
             Self::Batch(writes.to_vec())
         }

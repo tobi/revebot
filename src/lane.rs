@@ -138,11 +138,13 @@ fn tool_result_message(
         "content": [{"type": "text", "text": content}],
         "isError": is_error,
     });
-    if terminate {
-        message["terminate"] = Value::Bool(true);
-    }
-    if let Some(kind) = synthetic {
-        message["synthetic"] = Value::String(kind.into());
+    if let Some(obj) = message.as_object_mut() {
+        if terminate {
+            obj.insert("terminate".into(), Value::Bool(true));
+        }
+        if let Some(kind) = synthetic {
+            obj.insert("synthetic".into(), Value::String(kind.into()));
+        }
     }
     message
 }
@@ -256,7 +258,17 @@ impl Driver {
             None => None,
         })
     }
+}
 
+/// Whether an operation's terminal transaction moves the lane leaf.
+enum LeafUpdate {
+    /// Leave `lane.leaf` untouched.
+    Keep,
+    /// Overwrite `lane.leaf` (possibly clearing it).
+    Set(Option<EntryId>),
+}
+
+impl Driver {
     /// The terminal transaction (§3.13): delete every register the operation
     /// owns, record `lane.lastResult`, clear `currentOperationId`.
     async fn terminal(
@@ -265,14 +277,14 @@ impl Driver {
         outcome: Outcome,
         error: Option<OperationError>,
         publication: Vec<Write>,
-        new_leaf: Option<Option<EntryId>>,
+        new_leaf: LeafUpdate,
         result_entry_id: Option<EntryId>,
     ) -> Result<Step> {
         let op = current.operation.operation_id.clone();
         let lane = current.operation.lane.clone();
         let leaf_id = match &new_leaf {
-            Some(leaf) => leaf.clone(),
-            None => current.leaf.clone(),
+            LeafUpdate::Set(leaf) => leaf.clone(),
+            LeafUpdate::Keep => current.leaf.clone(),
         };
 
         let (final_assistant, run_completion) = match &current.state {
@@ -282,7 +294,7 @@ impl Driver {
                         Continuation::MayFinish {
                             include_final_assistant,
                         } => include_final_assistant,
-                        _ => true,
+                        Continuation::NeedAssistant { .. } => true,
                     },
                     _ => true,
                 };
@@ -317,7 +329,7 @@ impl Driver {
             })
             .await?;
         let mut writes = publication;
-        if let Some(leaf) = &new_leaf {
+        if let LeafUpdate::Set(leaf) = &new_leaf {
             writes.push(Write::set(Namespace::LaneLeaf, &lane, leaf));
         }
         writes.push(Write::delete(Namespace::OpMeta, op.as_str()));
@@ -451,7 +463,7 @@ impl Driver {
         Ok(())
     }
 
-    fn run_with(&self, run: &RunState, phase: RunPhase) -> OperationState {
+    fn run_with(run: &RunState, phase: RunPhase) -> OperationState {
         OperationState::Run(RunState {
             phase,
             ..run.clone()
@@ -543,7 +555,7 @@ impl Driver {
             {
                 let task_id = crate::ids::short_id("t");
                 let key = StructuralDecision::preparation_key(&op, &task_id);
-                let next = self.run_with(
+                let next = Self::run_with(
                     run,
                     RunPhase::Compaction {
                         reason: CompactionReason::Threshold,
@@ -567,7 +579,7 @@ impl Driver {
                 }
                 return Ok(Step::Continue(reload));
             }
-            let next = self.run_with(run, RunPhase::Checkpoint(checked));
+            let next = Self::run_with(run, RunPhase::Checkpoint(checked));
             return Ok(Step::Continue(
                 self.transition(current, next, vec![]).await?.1,
             ));
@@ -585,7 +597,7 @@ impl Driver {
                 retry_policy: self.retry,
                 overflow_recovery_used,
             };
-            let next = self.run_with(
+            let next = Self::run_with(
                 run,
                 RunPhase::Assistant {
                     generation: Generation::Ready {
@@ -627,7 +639,7 @@ impl Driver {
                 .with_parent(current.leaf.clone());
             let mut next_cp = CheckpointPhase::need_assistant(entry.id.clone());
             next_cp.skip_inbox_once = true;
-            let next = self.run_with(run, RunPhase::Checkpoint(next_cp));
+            let next = Self::run_with(run, RunPhase::Checkpoint(next_cp));
             let extra = vec![
                 Write::entry(entry.clone()),
                 Write::set(Namespace::LaneLeaf, &lane, Some(entry.id.clone())),
@@ -639,8 +651,15 @@ impl Driver {
             return Ok(Step::Continue(reload));
         }
 
-        self.terminal(current, Outcome::Completed, None, vec![], None, None)
-            .await
+        self.terminal(
+            current,
+            Outcome::Completed,
+            None,
+            vec![],
+            LeafUpdate::Keep,
+            None,
+        )
+        .await
     }
 
     async fn apply_inbox(
@@ -699,8 +718,15 @@ impl Driver {
 
     /// Cancelled control with writes drained: finish aborted.
     async fn abort_finish(&self, current: &Current) -> Result<Step> {
-        self.terminal(current, Outcome::Aborted, None, vec![], None, None)
-            .await
+        self.terminal(
+            current,
+            Outcome::Aborted,
+            None,
+            vec![],
+            LeafUpdate::Keep,
+            None,
+        )
+        .await
     }
 
     async fn failure_drain(
@@ -729,8 +755,15 @@ impl Driver {
                 .apply_inbox(current, run, follow_up, InboxKind::FollowUp)
                 .await;
         }
-        self.terminal(current, Outcome::Failed, Some(error), vec![], None, None)
-            .await
+        self.terminal(
+            current,
+            Outcome::Failed,
+            Some(error),
+            vec![],
+            LeafUpdate::Keep,
+            None,
+        )
+        .await
     }
 
     // ── assistant generation ─────────────────────────────────────────────
@@ -760,7 +793,7 @@ impl Driver {
                     response_entry_id: response_entry_id.clone(),
                     usage_id: usage_id.clone(),
                 };
-                let next = self.run_with(
+                let next = Self::run_with(
                     run,
                     RunPhase::Assistant {
                         generation: pending,
@@ -809,7 +842,7 @@ impl Driver {
                         } = &next_run.phase
                         && pending == &response_entry_id
                     {
-                        planned = next.clone();
+                        planned.clone_from(next);
                         continue;
                     }
                     return Ok(step);
@@ -841,7 +874,7 @@ impl Driver {
                         .await;
                 }
                 if *attempt < context.retry_policy.max_attempts {
-                    let next = self.run_with(
+                    let next = Self::run_with(
                         run,
                         RunPhase::Assistant {
                             generation: Generation::Ready {
@@ -879,7 +912,9 @@ impl Driver {
                 }
                 let now = crate::ids::now_ms();
                 if now < *not_before {
-                    let wait = std::time::Duration::from_millis((*not_before - now) as u64);
+                    let wait = std::time::Duration::from_millis(
+                        u64::try_from(*not_before - now).unwrap_or(0),
+                    );
                     let mut cancel = self.cancel.clone();
                     tokio::select! {
                         () = tokio::time::sleep(wait) => {}
@@ -887,7 +922,7 @@ impl Driver {
                     }
                     return Ok(Step::Continue(self.reload(current).await?));
                 }
-                let next = self.run_with(
+                let next = Self::run_with(
                     run,
                     RunPhase::Assistant {
                         generation: Generation::Ready {
@@ -970,11 +1005,11 @@ impl Driver {
             },
         );
         let order = current.state_seq;
-        let accumulated = std::sync::Mutex::new(String::new());
+        let accumulated = parking_lot::Mutex::new(String::new());
         let events = self.events.clone();
         let (lane_for, op_for) = (lane.clone(), op.clone());
         let on_delta = move |delta: &str| {
-            let mut text = accumulated.lock().unwrap();
+            let mut text = accumulated.lock();
             text.push_str(delta);
             let mut entry = prototype.clone();
             entry
@@ -1132,7 +1167,8 @@ impl Driver {
                     generation: Generation::RetryWait {
                         context: context.clone(),
                         next_attempt: attempt + 1,
-                        not_before: crate::ids::now_ms().saturating_add(delay as i64),
+                        not_before: crate::ids::now_ms()
+                            .saturating_add(i64::try_from(delay).unwrap_or(i64::MAX)),
                         error_message: assistant.error_message.clone().unwrap_or_default(),
                     },
                 }
@@ -1285,7 +1321,7 @@ impl Driver {
                 .into_iter()
                 .map(|k| Write::delete(Namespace::OpToolArgs, k))
                 .collect();
-            let next = self.run_with(run, RunPhase::Checkpoint(cp));
+            let next = Self::run_with(run, RunPhase::Checkpoint(cp));
             let (ok, reload) = self.transition(current, next, extra).await?;
             if ok {
                 self.emit(
@@ -1578,7 +1614,7 @@ impl Driver {
                 && let OperationState::Run(next_run) = &next.state
                 && let RunPhase::Tools { batch } = &next_run.phase
                 && batch.calls.iter().any(|c| matches!(c, ToolCallState::EffectPending { result_entry_id: id, .. } if id == result_entry_id)) {
-                planned = (**next).clone();
+                planned.clone_from(&(**next));
                 continue;
             }
             return Ok(step);
@@ -1604,7 +1640,9 @@ impl Driver {
             .calls
             .iter()
             .find(|c| c.result_entry_id() == result_entry_id)
-            .expect("planned result")
+            .ok_or_else(|| {
+                SessionError::Corrupt(format!("planned result {result_entry_id} missing"))
+            })?
             .source_index();
         let key = ToolBatch::args_key(&op, &batch.turn_id, index);
         let args = self
@@ -1669,7 +1707,6 @@ impl Driver {
 
     /// What the compaction produces, once a summary exists.
     fn compaction_publication(
-        &self,
         lane: &str,
         leaf: Option<EntryId>,
         preparation: &CompactionPreparation,
@@ -1753,7 +1790,7 @@ impl Driver {
                     return Ok(Structural::Declined);
                 }
                 if let Some(summary) = decision.value.summary {
-                    let (entry, writes) = self.compaction_publication(
+                    let (entry, writes) = Self::compaction_publication(
                         &lane,
                         current.leaf.clone(),
                         &preparation,
@@ -1812,7 +1849,9 @@ impl Driver {
                 } => {
                     let now = crate::ids::now_ms();
                     if now < *not_before {
-                        let wait = std::time::Duration::from_millis((*not_before - now) as u64);
+                        let wait = std::time::Duration::from_millis(
+                            u64::try_from(*not_before - now).unwrap_or(0),
+                        );
                         let mut cancel = self.cancel.clone();
                         tokio::select! {
                             () = tokio::time::sleep(wait) => {}
@@ -1855,7 +1894,7 @@ impl Driver {
             .await
         {
             Ok((summary, usage)) => {
-                let (entry, mut writes) = self.compaction_publication(
+                let (entry, mut writes) = Self::compaction_publication(
                     &current.operation.lane,
                     current.leaf.clone(),
                     &preparation,
@@ -1885,7 +1924,8 @@ impl Driver {
                                 generation: SummaryGeneration::RetryWait {
                                     context: context.clone(),
                                     next_attempt: attempt + 1,
-                                    not_before: crate::ids::now_ms().saturating_add(delay as i64),
+                                    not_before: crate::ids::now_ms()
+                                        .saturating_add(i64::try_from(delay).unwrap_or(i64::MAX)),
                                     error_message: message,
                                 },
                             },
@@ -1959,7 +1999,7 @@ impl Driver {
                     )),
                 };
                 let (ok, reload) = self
-                    .transition(current, self.run_with(run, phase), vec![])
+                    .transition(current, Self::run_with(run, phase), vec![])
                     .await?;
                 if ok {
                     finish(self, None, Outcome::Declined);
@@ -1968,7 +2008,7 @@ impl Driver {
             }
             Structural::Published { entry, writes } => {
                 let (ok, reload) = self
-                    .transition(current, self.run_with(run, resume(resume_after)), writes)
+                    .transition(current, Self::run_with(run, resume(resume_after)), writes)
                     .await?;
                 if ok {
                     self.publish_entry(&lane, &op, &entry.id).await?;
@@ -1983,7 +2023,7 @@ impl Driver {
                     resume_after: resume_after.clone(),
                 };
                 Ok(Step::Continue(
-                    self.transition(current, self.run_with(run, phase), vec![])
+                    self.transition(current, Self::run_with(run, phase), vec![])
                         .await?
                         .1,
                 ))
@@ -1996,7 +2036,7 @@ impl Driver {
                     resume_after: resume_after.clone(),
                 };
                 let (ok, reload) = self
-                    .transition(current, self.run_with(run, phase), vec![])
+                    .transition(current, Self::run_with(run, phase), vec![])
                     .await?;
                 let Reload::Current(committed) = reload else {
                     return Ok(Step::Continue(reload));
@@ -2072,7 +2112,7 @@ impl Driver {
                     ))
                 };
                 Ok(Step::Continue(
-                    self.transition(current, self.run_with(run, phase), vec![])
+                    self.transition(current, Self::run_with(run, phase), vec![])
                         .await?
                         .1,
                 ))
@@ -2097,7 +2137,7 @@ impl Driver {
                 let (ok, reload) = self
                     .transition(
                         current,
-                        self.run_with(run, RunPhase::Checkpoint(resume_after.clone())),
+                        Self::run_with(run, RunPhase::Checkpoint(resume_after.clone())),
                         writes,
                     )
                     .await?;
@@ -2122,7 +2162,7 @@ impl Driver {
                     resume_after: resume_after.clone(),
                 };
                 Ok(Step::Continue(
-                    self.transition(current, self.run_with(run, phase), vec![usage])
+                    self.transition(current, Self::run_with(run, phase), vec![usage])
                         .await?
                         .1,
                 ))
@@ -2137,7 +2177,7 @@ impl Driver {
                 let (ok, reload) = self
                     .transition(
                         current,
-                        self.run_with(run, phase),
+                        Self::run_with(run, phase),
                         usage.into_iter().collect(),
                     )
                     .await?;
@@ -2165,7 +2205,14 @@ impl Driver {
         };
         if state.control.is_cancelled() {
             return self
-                .terminal(current, Outcome::Aborted, None, vec![], None, None)
+                .terminal(
+                    current,
+                    Outcome::Aborted,
+                    None,
+                    vec![],
+                    LeafUpdate::Keep,
+                    None,
+                )
                 .await;
         }
         let op = current.operation.operation_id.clone();
@@ -2194,8 +2241,15 @@ impl Driver {
         };
         match outcome {
             Structural::Declined => {
-                self.terminal(current, Outcome::Declined, None, vec![], None, None)
-                    .await
+                self.terminal(
+                    current,
+                    Outcome::Declined,
+                    None,
+                    vec![],
+                    LeafUpdate::Keep,
+                    None,
+                )
+                .await
             }
             Structural::Published { entry, writes } => {
                 let id = entry.id.clone();
@@ -2205,7 +2259,7 @@ impl Driver {
                         Outcome::Completed,
                         None,
                         writes,
-                        Some(Some(id.clone())),
+                        LeafUpdate::Set(Some(id.clone())),
                         Some(id),
                     )
                     .await?;
@@ -2261,7 +2315,7 @@ impl Driver {
                                 Outcome::Completed,
                                 None,
                                 writes,
-                                Some(Some(id.clone())),
+                                LeafUpdate::Set(Some(id.clone())),
                                 Some(id),
                             )
                             .await?;
@@ -2282,7 +2336,7 @@ impl Driver {
                             Outcome::Failed,
                             Some(error),
                             usage.into_iter().collect(),
-                            None,
+                            LeafUpdate::Keep,
                             None,
                         )
                         .await
@@ -2322,7 +2376,7 @@ impl Driver {
                         "interrupted and the retry policy allows no more",
                     )),
                     vec![],
-                    None,
+                    LeafUpdate::Keep,
                     None,
                 )
                 .await
@@ -2340,7 +2394,14 @@ impl Driver {
         };
         if state.control.is_cancelled() {
             return self
-                .terminal(current, Outcome::Aborted, None, vec![], None, None)
+                .terminal(
+                    current,
+                    Outcome::Aborted,
+                    None,
+                    vec![],
+                    LeafUpdate::Keep,
+                    None,
+                )
                 .await;
         }
         let mut publication = Vec::new();
@@ -2352,7 +2413,7 @@ impl Driver {
             Outcome::Completed,
             None,
             publication,
-            Some(state.target_id.clone()),
+            LeafUpdate::Set(state.target_id.clone()),
             None,
         )
         .await

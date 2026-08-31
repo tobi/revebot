@@ -169,6 +169,10 @@ struct World {
 }
 
 impl World {
+    #[expect(
+        clippy::unwrap_used,
+        reason = "test scaffolding: a tempdir that cannot be created is the test failing"
+    )]
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         Self {
@@ -179,13 +183,16 @@ impl World {
         }
     }
 
+    #[expect(
+        clippy::unwrap_used,
+        reason = "test scaffolding: a session that cannot open is the test failing"
+    )]
     fn session(&self) -> Session {
         Session::spawn(Storage::open(&self.path, "test", None).unwrap())
     }
 
     /// A harness over a freshly opened session. Dropping it is a crash.
     fn harness(
-        &self,
         session: &Session,
         model: Arc<dyn Model>,
         tools: Arc<dyn Tools>,
@@ -218,11 +225,19 @@ impl World {
     }
 
     /// Every message entry on the lane's current branch, as role/text pairs.
+    #[expect(
+        clippy::unwrap_used,
+        reason = "test helper: an unreadable transcript is the test failing"
+    )]
     async fn transcript(&self, session: &Session) -> Vec<(String, String)> {
         Self::pairs(session.transcript(MAIN_LANE).await.unwrap())
     }
 
     /// What the model would actually be shown.
+    #[expect(
+        clippy::unwrap_used,
+        reason = "test helper: an unreadable context is the test failing"
+    )]
     async fn context(&self, session: &Session) -> Vec<(String, String)> {
         Self::pairs(session.context(MAIN_LANE).await.unwrap())
     }
@@ -264,7 +279,7 @@ fn assistant_text(text: &str) -> Assistant {
     Assistant::text(text)
 }
 
-fn assistant_call(name: &str, args: Value) -> Assistant {
+fn assistant_call(name: &str, args: &Value) -> Assistant {
     let mut a = Assistant {
         text: String::new(),
         tool_calls: vec![ToolCall {
@@ -273,7 +288,7 @@ fn assistant_call(name: &str, args: Value) -> Assistant {
             arguments: args.as_object().cloned().unwrap_or_default(),
         }],
         stop_reason: reve::model::StopReason::ToolUse,
-        usage: Default::default(),
+        usage: reve::model::Usage::default(),
         error_message: None,
     };
     a.usage.input = 10;
@@ -281,6 +296,10 @@ fn assistant_call(name: &str, args: Value) -> Assistant {
     a
 }
 
+#[expect(
+    clippy::panic,
+    reason = "test double: an unexpected tool call is the test failing"
+)]
 fn no_tools() -> Arc<dyn Tools> {
     let (tools, _) = FakeTools::new(&[], |name, _| panic!("unexpected tool {name}"));
     tools
@@ -292,7 +311,7 @@ fn no_tools() -> Arc<dyn Tools> {
 async fn a_prompt_becomes_a_user_entry_and_an_assistant_reply() {
     let world = World::new();
     let session = world.session();
-    let harness = world.harness(
+    let harness = World::harness(
         &session,
         world.scripted(vec![assistant_text("hello back")]),
         no_tools(),
@@ -330,10 +349,10 @@ async fn a_tool_call_runs_and_the_model_is_asked_again() {
     let (tools, calls) = FakeTools::new(&[("look", Replay::Safe)], |_, args| {
         Ok(format!("looked at {}", args["at"].as_str().unwrap()))
     });
-    let harness = world.harness(
+    let harness = World::harness(
         &session,
         world.scripted(vec![
-            assistant_call("look", json!({"at": "the sky"})),
+            assistant_call("look", &json!({"at": "the sky"})),
             assistant_text("it is blue"),
         ]),
         tools,
@@ -357,7 +376,7 @@ async fn a_tool_call_runs_and_the_model_is_asked_again() {
 async fn a_second_operation_on_a_busy_lane_is_refused() {
     let world = World::new();
     let session = world.session();
-    let harness = world.harness(
+    let harness = World::harness(
         &session,
         world.scripted(vec![assistant_text("one")]),
         no_tools(),
@@ -370,7 +389,7 @@ async fn a_second_operation_on_a_busy_lane_is_refused() {
     // Now a *stuck* operation: start one and abandon the driver.
     let world2 = World::new();
     let session2 = world2.session();
-    let stuck = world2.harness(&session2, Arc::new(NeverAnswers), no_tools(), Hooks::new());
+    let stuck = World::harness(&session2, Arc::new(NeverAnswers), no_tools(), Hooks::new());
     let running = {
         let stuck = stuck.clone();
         tokio::spawn(async move { stuck.prompt(MAIN_LANE, "hangs").await })
@@ -410,6 +429,10 @@ async fn current_operation(session: &Session) -> Option<reve::ids::OpId> {
         .and_then(|(s, _)| s.current_operation_id)
 }
 
+#[expect(
+    clippy::panic,
+    reason = "test helper: a condition that never becomes true is the test failing"
+)]
 async fn wait_until<F, Fut>(mut check: F)
 where
     F: FnMut() -> Fut,
@@ -434,10 +457,10 @@ async fn a_steer_is_placed_before_the_next_generation() {
     // must land after the tool result and before the second generation.
     let steered = Arc::new(tokio::sync::Notify::new());
     let (tools, _) = FakeTools::new(&[("slow", Replay::Safe)], |_, _| Ok("done".into()));
-    let harness = world.harness(
+    let harness = World::harness(
         &session,
         world.scripted(vec![
-            assistant_call("slow", json!({})),
+            assistant_call("slow", &json!({})),
             assistant_text("acknowledged"),
         ]),
         tools,
@@ -469,7 +492,7 @@ async fn a_steer_is_placed_before_the_next_generation() {
 async fn an_abort_ends_the_run_aborted_and_drops_queued_input() {
     let world = World::new();
     let session = world.session();
-    let harness = world.harness(&session, Arc::new(NeverAnswers), no_tools(), Hooks::new());
+    let harness = World::harness(&session, Arc::new(NeverAnswers), no_tools(), Hooks::new());
     let mut events = harness.subscribe();
     let running = {
         let harness = harness.clone();
@@ -514,10 +537,10 @@ async fn before_tool_rewrites_the_arguments_that_get_persisted() {
             }))
         })
     }));
-    let harness = world.harness(
+    let harness = World::harness(
         &session,
         world.scripted(vec![
-            assistant_call("echo", json!({"text": "original"})),
+            assistant_call("echo", &json!({"text": "original"})),
             assistant_text("ok"),
         ]),
         tools,
@@ -550,10 +573,10 @@ async fn a_blocked_tool_never_executes_but_still_answers_the_model() {
             }))
         })
     }));
-    let harness = world.harness(
+    let harness = World::harness(
         &session,
         world.scripted(vec![
-            assistant_call("danger", json!({})),
+            assistant_call("danger", &json!({})),
             assistant_text("fine"),
         ]),
         tools,
@@ -580,10 +603,10 @@ async fn a_throwing_before_tool_hook_fails_the_call_closed() {
     let hooks = Hooks::new().on_before_tool(Arc::new(|_: reve::hooks::BeforeToolEvent| {
         Box::pin(async move { Err("the policy service is down".to_string()) })
     }));
-    let harness = world.harness(
+    let harness = World::harness(
         &session,
         world.scripted(vec![
-            assistant_call("danger", json!({})),
+            assistant_call("danger", &json!({})),
             assistant_text("fine"),
         ]),
         tools,
@@ -611,10 +634,10 @@ async fn after_tool_rewrites_the_result_that_gets_persisted() {
             }))
         })
     }));
-    let harness = world.harness(
+    let harness = World::harness(
         &session,
         world.scripted(vec![
-            assistant_call("secret", json!({})),
+            assistant_call("secret", &json!({})),
             assistant_text("ok"),
         ]),
         tools,
@@ -638,7 +661,7 @@ async fn a_retryable_provider_failure_is_retried_then_succeeds() {
         retryable: true,
         then: ScriptedModel::new(vec![assistant_text("eventually")], &world.cursor),
     });
-    let harness = world.harness(&session, model, no_tools(), Hooks::new());
+    let harness = World::harness(&session, model, no_tools(), Hooks::new());
     let result = harness.prompt(MAIN_LANE, "go").await.unwrap();
     assert_eq!(result.outcome, Outcome::Completed);
     assert_eq!(result.final_text.as_deref(), Some("eventually"));
@@ -655,7 +678,7 @@ async fn an_exhausted_retry_budget_fails_the_run_and_keeps_the_prompt() {
         retryable: true,
         then: ScriptedModel::new(vec![], &world.cursor),
     });
-    let harness = world.harness(&session, model, no_tools(), Hooks::new());
+    let harness = World::harness(&session, model, no_tools(), Hooks::new());
     let result = harness.prompt(MAIN_LANE, "go").await.unwrap();
     assert_eq!(result.outcome, Outcome::Failed);
     assert_eq!(
@@ -685,7 +708,7 @@ async fn a_terminal_provider_failure_is_not_retried() {
         retryable: false,
         then: ScriptedModel::new(vec![assistant_text("never reached")], &world.cursor),
     });
-    let harness = world.harness(&session, model, no_tools(), Hooks::new());
+    let harness = World::harness(&session, model, no_tools(), Hooks::new());
     let result = harness.prompt(MAIN_LANE, "go").await.unwrap();
     assert_eq!(result.outcome, Outcome::Failed);
     assert_eq!(
@@ -702,9 +725,9 @@ async fn a_truncated_response_never_executes_its_tool_call() {
     let (tools, calls) = FakeTools::new(&[("write", Replay::Never)], |_, _| {
         panic!("truncated arguments must never be executed")
     });
-    let mut truncated = assistant_call("write", json!({"path": "/etc/pas"}));
+    let mut truncated = assistant_call("write", &json!({"path": "/etc/pas"}));
     truncated.stop_reason = reve::model::StopReason::Length;
-    let harness = world.harness(
+    let harness = World::harness(
         &session,
         world.scripted(vec![truncated, assistant_text("ok")]),
         tools,
@@ -724,10 +747,10 @@ async fn a_truncated_response_never_executes_its_tool_call() {
 async fn an_unknown_tool_is_answered_not_fatal() {
     let world = World::new();
     let session = world.session();
-    let harness = world.harness(
+    let harness = World::harness(
         &session,
         world.scripted(vec![
-            assistant_call("nonexistent", json!({})),
+            assistant_call("nonexistent", &json!({})),
             assistant_text("my mistake"),
         ]),
         no_tools(),
@@ -749,7 +772,7 @@ async fn a_run_dropped_before_its_first_generation_resumes_and_finishes() {
     // everything without ever committing an assistant.
     {
         let session = world.session();
-        let harness = world.harness(&session, Arc::new(NeverAnswers), no_tools(), Hooks::new());
+        let harness = World::harness(&session, Arc::new(NeverAnswers), no_tools(), Hooks::new());
         let running = {
             let harness = harness.clone();
             tokio::spawn(async move { harness.prompt(MAIN_LANE, "hello").await })
@@ -767,7 +790,7 @@ async fn a_run_dropped_before_its_first_generation_resumes_and_finishes() {
         session.transcript(MAIN_LANE).await.unwrap().len() <= 1,
         "a reserved prompt is placed at most once"
     );
-    let harness = world.harness(
+    let harness = World::harness(
         &session,
         world.scripted(vec![assistant_text("resumed")]),
         no_tools(),
@@ -795,9 +818,9 @@ async fn a_safe_tool_interrupted_mid_effect_is_re_executed() {
         let session = world.session();
         // The effect is genuinely in flight when we drop the driver.
         let (tools, _) = FakeTools::hanging(&[("read", Replay::Safe)], &["read"]);
-        let harness = world.harness(
+        let harness = World::harness(
             &session,
-            world.scripted(vec![assistant_call("read", json!({"path": "a"}))]),
+            world.scripted(vec![assistant_call("read", &json!({"path": "a"}))]),
             tools,
             Hooks::new(),
         );
@@ -814,7 +837,7 @@ async fn a_safe_tool_interrupted_mid_effect_is_re_executed() {
     let (tools, calls) = FakeTools::new(&[("read", Replay::Safe)], |_, args| {
         Ok(format!("re-read {}", args["path"].as_str().unwrap()))
     });
-    let harness = world.harness(
+    let harness = World::harness(
         &session,
         world.scripted(vec![assistant_text("done")]),
         tools,
@@ -837,9 +860,9 @@ async fn an_effectful_tool_interrupted_mid_effect_is_never_re_executed() {
     {
         let session = world.session();
         let (tools, _) = FakeTools::hanging(&[("write", Replay::Never)], &["write"]);
-        let harness = world.harness(
+        let harness = World::harness(
             &session,
-            world.scripted(vec![assistant_call("write", json!({"path": "a"}))]),
+            world.scripted(vec![assistant_call("write", &json!({"path": "a"}))]),
             tools,
             Hooks::new(),
         );
@@ -856,7 +879,7 @@ async fn an_effectful_tool_interrupted_mid_effect_is_never_re_executed() {
     let (tools, calls) = FakeTools::new(&[("write", Replay::Never)], |_, _| {
         panic!("an effectful tool must never be re-run after a crash")
     });
-    let harness = world.harness(
+    let harness = World::harness(
         &session,
         world.scripted(vec![assistant_text("carrying on")]),
         tools,
@@ -883,13 +906,13 @@ async fn a_completed_tool_is_not_run_again_on_resume() {
             &[("first", Replay::Never), ("second", Replay::Never)],
             &["second"],
         );
-        let mut both = assistant_call("first", json!({}));
+        let mut both = assistant_call("first", &json!({}));
         both.tool_calls.push(ToolCall {
             id: "call_second".into(),
             name: "second".into(),
-            arguments: Default::default(),
+            arguments: Map::default(),
         });
-        let harness = world.harness(&session, world.scripted(vec![both]), tools, Hooks::new());
+        let harness = World::harness(&session, world.scripted(vec![both]), tools, Hooks::new());
         let running = {
             let harness = harness.clone();
             tokio::spawn(async move { harness.prompt(MAIN_LANE, "go").await })
@@ -908,7 +931,7 @@ async fn a_completed_tool_is_not_run_again_on_resume() {
             Ok("second ran".into())
         },
     );
-    let harness = world.harness(
+    let harness = World::harness(
         &session,
         world.scripted(vec![assistant_text("both handled")]),
         tools,
@@ -932,7 +955,7 @@ async fn an_abort_committed_before_the_crash_ends_the_resumed_run_aborted() {
     let world = World::new();
     {
         let session = world.session();
-        let harness = world.harness(&session, Arc::new(NeverAnswers), no_tools(), Hooks::new());
+        let harness = World::harness(&session, Arc::new(NeverAnswers), no_tools(), Hooks::new());
         let running = {
             let harness = harness.clone();
             tokio::spawn(async move { harness.prompt(MAIN_LANE, "go").await })
@@ -944,7 +967,7 @@ async fn an_abort_committed_before_the_crash_ends_the_resumed_run_aborted() {
     }
 
     let session = world.session();
-    let harness = world.harness(
+    let harness = World::harness(
         &session,
         world.scripted(vec![assistant_text("must not be asked")]),
         no_tools(),
@@ -963,7 +986,7 @@ async fn an_abort_committed_before_the_crash_ends_the_resumed_run_aborted() {
 async fn an_idle_lane_has_nothing_to_resume() {
     let world = World::new();
     let session = world.session();
-    let harness = world.harness(
+    let harness = World::harness(
         &session,
         world.scripted(vec![assistant_text("done")]),
         no_tools(),
@@ -1023,7 +1046,7 @@ async fn tool_is_pending(session: &Session) -> bool {
 async fn kick_starts_a_run_from_pending_next_run_without_duplicating() {
     let world = World::new();
     let session = world.session();
-    let harness = world.harness(
+    let harness = World::harness(
         &session,
         world.scripted(vec![assistant_text("woke")]),
         no_tools(),
@@ -1047,7 +1070,7 @@ async fn kick_starts_a_run_from_pending_next_run_without_duplicating() {
 async fn place_idle_notice_keeps_custom_type() {
     let world = World::new();
     let session = world.session();
-    let harness = world.harness(&session, world.scripted(vec![]), no_tools(), Hooks::new());
+    let harness = World::harness(&session, world.scripted(vec![]), no_tools(), Hooks::new());
     let id = harness
         .place_idle(
             MAIN_LANE,

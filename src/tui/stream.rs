@@ -69,7 +69,8 @@ impl Stream {
 
     /// The stream ended: everything is final.
     pub fn finish(&mut self) {
-        self.pending.push_str(&self.source[self.frozen..]);
+        let tail = self.source.get(self.frozen..).unwrap_or_default();
+        self.pending.push_str(tail);
         self.frozen = self.source.len();
     }
 
@@ -78,7 +79,8 @@ impl Stream {
             return;
         };
         if boundary > self.frozen {
-            self.pending.push_str(&self.source[self.frozen..boundary]);
+            let finalised = self.source.get(self.frozen..boundary).unwrap_or_default();
+            self.pending.push_str(finalised);
             self.frozen = boundary;
         }
     }
@@ -96,7 +98,10 @@ impl Stream {
     pub fn tail(&self, width: usize) -> Vec<Line<'static>> {
         // A trailing newline is a separator, not content: rendering it would
         // put a blank line between the text and the input box.
-        let tail = self.source[self.frozen..]
+        let tail = self
+            .source
+            .get(self.frozen..)
+            .unwrap_or_default()
             .trim_start_matches('\n')
             .trim_end_matches('\n');
         if tail.is_empty() {

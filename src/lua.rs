@@ -341,7 +341,8 @@ impl Runtime {
     /// Trusted host-installed tools. Workspace callers must use the rooted,
     /// restricted loader below, never this ambient-filesystem entry point.
     pub fn load_tools_for(&mut self, dir: &Path, owner: Option<&str>) -> Result<()> {
-        self.load_tool_sources(self.lua.clone(), trusted_sources(dir)?, owner)
+        let lua = self.lua.clone();
+        self.load_tool_sources(&lua, trusted_sources(dir)?, owner)
     }
 
     pub fn load_workspace_tools(
@@ -350,16 +351,13 @@ impl Runtime {
         relative: &Path,
         owner: Option<&str>,
     ) -> Result<()> {
-        self.load_tool_sources(
-            self.workspace_lua.clone(),
-            workspace_sources(root, relative)?,
-            owner,
-        )
+        let lua = self.workspace_lua.clone();
+        self.load_tool_sources(&lua, workspace_sources(root, relative)?, owner)
     }
 
     fn load_tool_sources(
         &mut self,
-        lua: Lua,
+        lua: &Lua,
         sources: Vec<(PathBuf, String)>,
         owner: Option<&str>,
     ) -> Result<()> {
@@ -394,25 +392,25 @@ impl Runtime {
             })?,
         )?;
         for (path, source) in sources {
-            Self::exec_source(&lua, &path, &source)?;
+            Self::exec_source(lua, &path, &source)?;
         }
 
         let declared = std::mem::take(&mut *collected.lock());
         for (name, spec) in declared {
             self.tools.push(Self::tool_from_table(
-                &lua,
+                lua,
                 name,
-                spec,
+                &spec,
                 owner.map(str::to_string),
             )?);
         }
         let declared_guards = std::mem::take(&mut *guards.lock());
         for (name, spec) in declared_guards {
-            self.guards.push(Self::guard_from_table(&lua, name, spec)?);
+            self.guards.push(Self::guard_from_table(lua, name, &spec)?);
         }
         let declared_crons = std::mem::take(&mut *crons.lock());
         for (id, spec) in declared_crons {
-            let mut def = Self::routine_from_table(&lua, id, spec)?;
+            let mut def = Self::routine_from_table(lua, id, &spec)?;
             if def.bot.is_none() {
                 def.bot = owner.map(str::to_string);
             }
@@ -485,7 +483,7 @@ impl Runtime {
         }
         let declared = std::mem::take(&mut *collected.lock());
         for (id, spec) in declared {
-            let mut def = Self::routine_from_table(&lua, id, spec)?;
+            let mut def = Self::routine_from_table(&lua, id, &spec)?;
             if def.bot.is_none() {
                 def.bot = default_bot.map(str::to_string);
             }
@@ -603,7 +601,7 @@ impl Runtime {
         }
     }
 
-    fn routine_from_table(lua: &Lua, id: String, spec: Table) -> Result<RoutineDef> {
+    fn routine_from_table(lua: &Lua, id: String, spec: &Table) -> Result<RoutineDef> {
         let cron_src: String = spec
             .get("cron")
             .map_err(|_| invalid("routine", format!("{id} needs a `cron` field")))?;
@@ -801,7 +799,7 @@ impl Runtime {
     fn tool_from_table(
         lua: &Lua,
         name: String,
-        spec: Table,
+        spec: &Table,
         owner: Option<String>,
     ) -> Result<ToolDef> {
         let run: mlua::Function = spec
@@ -857,7 +855,7 @@ impl Runtime {
         })
     }
 
-    fn guard_from_table(lua: &Lua, id: String, spec: Table) -> Result<GuardDef> {
+    fn guard_from_table(lua: &Lua, id: String, spec: &Table) -> Result<GuardDef> {
         let run: mlua::Function = spec
             .get("run")
             .map_err(|_| invalid("guard", format!("{id} has no `run` function")))?;

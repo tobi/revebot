@@ -4,6 +4,7 @@ use crate::sandbox::{ExecOptions, Sandbox};
 use crate::session::Session;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -193,10 +194,7 @@ fn format_instructions(instructions: &[Instruction]) -> String {
     let mut text =
         String::from("Directory instructions (root to leaf; nearest takes precedence):\n");
     for instruction in instructions {
-        text.push_str(&format!(
-            "\n## {}\n{}\n",
-            instruction.path, instruction.text
-        ));
+        let _ = write!(text, "\n## {}\n{}\n", instruction.path, instruction.text);
     }
     text
 }

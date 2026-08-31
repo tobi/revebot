@@ -106,7 +106,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    match run().await {
+    match Box::pin(run()).await {
         Ok(code) => code,
         Err(e) => {
             eprintln!("\x1b[31mrevebot:\x1b[0m {e}");
@@ -118,7 +118,7 @@ async fn main() -> ExitCode {
 async fn run() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
     let Some(command) = cli.command else {
-        return serve_house(cli.bind).await;
+        return Box::pin(serve_house(cli.bind)).await;
     };
     match command {
         Command::Init { dir } => {
@@ -176,10 +176,10 @@ async fn run() -> anyhow::Result<ExitCode> {
             })
             .await
         }
-        Command::Serve => serve_house(cli.bind).await,
+        Command::Serve => Box::pin(serve_house(cli.bind)).await,
         Command::Tui => {
             let project = Project::load(std::env::current_dir()?)?;
-            let sandbox = start_sandbox(&project).await?;
+            let sandbox = Box::pin(start_sandbox(&project)).await?;
             let result = reve::tui::session::run(project, sandbox.clone()).await;
             let stopped = sandbox.stop().await;
             result?;
@@ -211,7 +211,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             if command.is_empty() {
                 anyhow::bail!("nothing to run");
             }
-            let (project, sandbox) = boot().await?;
+            let (project, sandbox) = Box::pin(boot()).await?;
             let _ = &project;
             let output = sandbox
                 .exec(&command.join(" "), ExecOptions::default(), None)
@@ -240,7 +240,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                 .ok_or_else(|| anyhow::anyhow!("--args must be a JSON object"))?
                 .clone();
 
-            let sandbox = start_sandbox(&project).await?;
+            let sandbox = Box::pin(start_sandbox(&project)).await?;
             let result = project
                 .runtime
                 .call_tool(&name, object, sandbox.clone())
@@ -267,14 +267,14 @@ fn tool_names(project: &Project) -> Vec<String> {
 
 async fn boot() -> anyhow::Result<(Project, Arc<Sandbox>)> {
     let project = Project::load(std::env::current_dir()?)?;
-    let sandbox = start_sandbox(&project).await?;
+    let sandbox = Box::pin(start_sandbox(&project)).await?;
     Ok((project, sandbox))
 }
 
 async fn serve_house(bind: String) -> anyhow::Result<ExitCode> {
     let project = Project::load(std::env::current_dir()?)?;
     let spinner = Spinner::new();
-    let house = House::boot(project, bind, &spinner).await?;
+    let house = Box::pin(House::boot(project, bind, &spinner)).await?;
     let url = format!("http://{}/", house.bind());
     println!("\x1b[1mrevebot\x1b[0m house on {url}");
     println!("  token  {}", house.token());
@@ -289,6 +289,10 @@ async fn serve_house(bind: String) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors the clap CLI flags of the eval subcommand"
+)]
 struct EvalArgs {
     filters: Vec<String>,
     dir: Option<PathBuf>,
@@ -387,12 +391,12 @@ fn default_eval_catalog() -> PathBuf {
 }
 
 async fn start_sandbox(project: &Project) -> anyhow::Result<Arc<Sandbox>> {
-    let sandbox = Sandbox::start(
+    let sandbox = Box::pin(Sandbox::start(
         project.runtime.policy.clone(),
         project.workspace(),
         project.state_dir(),
         &Spinner::new(),
-    )
+    ))
     .await?;
     Ok(Arc::new(sandbox))
 }

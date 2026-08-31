@@ -265,7 +265,7 @@ impl Hooks {
             match handler(event.clone()).await {
                 Ok(Some(result)) => {
                     if let Some(content) = result.content {
-                        event.content = content.clone();
+                        event.content.clone_from(&content);
                         aggregate.content = Some(content);
                     }
                     if let Some(is_error) = result.is_error {
@@ -375,7 +375,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn tool_event(args: Value) -> BeforeToolEvent {
+    fn tool_event(args: &Value) -> BeforeToolEvent {
         BeforeToolEvent {
             lane: "main".into(),
             run_id: "op".into(),
@@ -407,7 +407,7 @@ mod tests {
                 })
             }));
         let out = hooks
-            .before_tool(tool_event(json!({"command": "ls"})))
+            .before_tool(tool_event(&json!({"command": "ls"})))
             .await;
         let args = out.value.args.unwrap();
         assert_eq!(args["second"], 1);
@@ -424,7 +424,7 @@ mod tests {
             .on_before_tool(Arc::new(|_| {
                 panic!("later handlers must not run after a failure")
             }));
-        let out = hooks.before_tool(tool_event(json!({}))).await;
+        let out = hooks.before_tool(tool_event(&json!({}))).await;
         let block = out.value.block.expect("fails closed");
         assert!(block.reason.contains("policy service down"));
         assert_eq!(out.errors.len(), 1);

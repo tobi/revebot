@@ -17,6 +17,10 @@ use reve::lua::Runtime;
 use reve::sandbox::{ExecOptions, Sandbox, Secret, Silent, tokio_util_lite};
 use reve::tools::Toolbox;
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "test scaffolding: a fixture that cannot be written is the test failing"
+)]
 fn write(dir: &Path, name: &str, body: &str) {
     let path = dir.join(name);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -75,9 +79,14 @@ async fn a_lua_tool_runs_its_commands_inside_the_microvm() {
     assert_eq!(rt.policy.image, "alpine", "Lua drove the policy");
 
     let sandbox = Arc::new(
-        Sandbox::start(rt.policy.clone(), &workspace, root.join(".reve"), &Silent)
-            .await
-            .expect("the microVM must boot"),
+        Box::pin(Sandbox::start(
+            rt.policy.clone(),
+            &workspace,
+            root.join(".reve"),
+            &Silent,
+        ))
+        .await
+        .expect("the microVM must boot"),
     );
 
     let out = rt
@@ -122,9 +131,14 @@ async fn a_released_microvm_restarts_on_the_next_effect() {
         provision: false,
         ..Default::default()
     };
-    let sandbox = Sandbox::start(policy, &workspace, dir.path().join(".reve"), &Silent)
-        .await
-        .expect("the microVM must boot");
+    let sandbox = Box::pin(Sandbox::start(
+        policy,
+        &workspace,
+        dir.path().join(".reve"),
+        &Silent,
+    ))
+    .await
+    .expect("the microVM must boot");
 
     sandbox.stop().await.expect("release the idle VM");
     let output = sandbox
@@ -152,9 +166,14 @@ async fn simultaneous_tools_share_one_running_microvm() {
         ..Default::default()
     };
     let sandbox = Arc::new(
-        Sandbox::start(policy, &workspace, dir.path().join(".reve"), &Silent)
-            .await
-            .expect("the microVM must boot"),
+        Box::pin(Sandbox::start(
+            policy,
+            &workspace,
+            dir.path().join(".reve"),
+            &Silent,
+        ))
+        .await
+        .expect("the microVM must boot"),
     );
 
     let first = sandbox.exec("sleep 0.2; printf first", ExecOptions::default(), None);
@@ -186,9 +205,14 @@ async fn an_effect_waits_for_an_in_progress_stop_before_restarting() {
         ..Default::default()
     };
     let sandbox = Arc::new(
-        Sandbox::start(policy, &workspace, dir.path().join(".reve"), &Silent)
-            .await
-            .expect("the microVM must boot"),
+        Box::pin(Sandbox::start(
+            policy,
+            &workspace,
+            dir.path().join(".reve"),
+            &Silent,
+        ))
+        .await
+        .expect("the microVM must boot"),
     );
 
     let long_sandbox = Arc::clone(&sandbox);
@@ -248,9 +272,14 @@ async fn egress_reaches_an_allowed_host_and_nothing_else() {
         allow_hosts: vec!["github.com".into(), "deb.debian.org".into()],
         ..Default::default()
     };
-    let sandbox = Sandbox::start(policy, &workspace, root.join(".reve"), &Silent)
-        .await
-        .expect("the microVM must boot");
+    let sandbox = Box::pin(Sandbox::start(
+        policy,
+        &workspace,
+        root.join(".reve"),
+        &Silent,
+    ))
+    .await
+    .expect("the microVM must boot");
 
     let allowed = sandbox
         .exec(
@@ -310,9 +339,14 @@ async fn cancelling_kills_the_guest_command() {
         provision: false,
         ..Default::default()
     };
-    let sandbox = Sandbox::start(policy, &workspace, root.join(".reve"), &Silent)
-        .await
-        .expect("the microVM must boot");
+    let sandbox = Box::pin(Sandbox::start(
+        policy,
+        &workspace,
+        root.join(".reve"),
+        &Silent,
+    ))
+    .await
+    .expect("the microVM must boot");
 
     let (tx, rx) = tokio_util_lite::channel();
     tokio::spawn(async move {
@@ -386,9 +420,14 @@ async fn runtime_secrets_rotate_without_a_rebuild_and_deleted_secrets_are_revoke
     };
     // SAFETY: this test owns a process-unique variable name.
     unsafe { std::env::set_var(SOURCE, "first-host-value") };
-    let sandbox = Sandbox::start(policy.clone(), &workspace, &state_dir, &Silent)
-        .await
-        .expect("the microVM must boot");
+    let sandbox = Box::pin(Sandbox::start(
+        policy.clone(),
+        &workspace,
+        &state_dir,
+        &Silent,
+    ))
+    .await
+    .expect("the microVM must boot");
     let fingerprint = policy.fingerprint(&workspace);
 
     let first = sandbox
@@ -439,9 +478,14 @@ async fn runtime_secrets_rotate_without_a_rebuild_and_deleted_secrets_are_revoke
         secrets: Vec::new(),
         ..policy
     };
-    let sandbox = Sandbox::start(without_secret, &workspace, &state_dir, &Silent)
-        .await
-        .expect("the source-only definition is reusable");
+    let sandbox = Box::pin(Sandbox::start(
+        without_secret,
+        &workspace,
+        &state_dir,
+        &Silent,
+    ))
+    .await
+    .expect("the source-only definition is reusable");
     let revoked = sandbox
         .exec(
             &format!("test -z \"${{{GUEST}+x}}\" && printf revoked"),
@@ -473,9 +517,14 @@ async fn long_bash_output_is_spilled_to_guest_tmp() {
         ..Default::default()
     };
     let sandbox = Arc::new(
-        Sandbox::start(policy, &workspace, dir.path().join(".reve"), &Silent)
-            .await
-            .expect("the microVM must boot"),
+        Box::pin(Sandbox::start(
+            policy,
+            &workspace,
+            dir.path().join(".reve"),
+            &Silent,
+        ))
+        .await
+        .expect("the microVM must boot"),
     );
     let toolbox = Toolbox::new(sandbox.clone(), Arc::new(Runtime::new().unwrap()));
     let args = serde_json::json!({ "command": "head -c 50000 /dev/zero | tr '\\0' x" })
@@ -515,7 +564,7 @@ async fn ordinary_environment_refreshes_without_rebuilding_the_vm() {
         .env
         .insert("REVE_RUNTIME_VALUE".into(), "first".into());
     let fingerprint = first.fingerprint(&workspace);
-    let sandbox = Sandbox::start(first, &workspace, &state_dir, &Silent)
+    let sandbox = Box::pin(Sandbox::start(first, &workspace, &state_dir, &Silent))
         .await
         .expect("the microVM must boot");
     let initial = sandbox
@@ -541,7 +590,7 @@ async fn ordinary_environment_refreshes_without_rebuilding_the_vm() {
         .env
         .insert("REVE_RUNTIME_VALUE".into(), "second".into());
     assert_eq!(fingerprint, second.fingerprint(&workspace));
-    let sandbox = Sandbox::start(second, &workspace, &state_dir, &Silent)
+    let sandbox = Box::pin(Sandbox::start(second, &workspace, &state_dir, &Silent))
         .await
         .expect("the existing root disk is reusable");
     let refreshed = sandbox

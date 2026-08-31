@@ -33,7 +33,7 @@ pub fn prepare(context: &[Entry], settings: &CompactionSettings) -> Option<Compa
     let mut budget = settings.keep_recent_tokens;
     let mut start = context.len();
     while start > 0 {
-        let cost = estimate_tokens(&context[start - 1..start]);
+        let cost = estimate_tokens(context.get(start - 1..start).unwrap_or(&[]));
         if cost > budget && start < context.len() {
             break;
         }
@@ -41,7 +41,10 @@ pub fn prepare(context: &[Entry], settings: &CompactionSettings) -> Option<Compa
         start -= 1;
     }
     // Widen to a user turn so the tail is a coherent suffix.
-    while start > 0 && start < context.len() && context[start].role() != Some("user") {
+    while start > 0
+        && start < context.len()
+        && context.get(start).and_then(Entry::role) != Some("user")
+    {
         start -= 1;
     }
     if start == 0 {

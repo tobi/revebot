@@ -1,4 +1,5 @@
 //! Planned, compare-before-replace workspace writes. Effects are guest-only.
+use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 
 use crate::sandbox::{ExecOptions, Sandbox};
@@ -39,10 +40,11 @@ impl Change {
         let mut checks = String::new();
         for component in self.relative.components() {
             ancestors.push(component.as_os_str());
-            checks.push_str(&format!(
-                "[ ! -L {} ] || {{ echo 'symlink refused' >&2; exit 73; }}\n",
+            let _ = writeln!(
+                checks,
+                "[ ! -L {} ] || {{ echo 'symlink refused' >&2; exit 73; }}",
                 quote(&format!("/{}", ancestors.display()))
-            ));
+            );
         }
         let compare = match &self.before {
             Some(text) => format!(
@@ -50,8 +52,10 @@ impl Change {
                 quote(
                     &Sha256::digest(text.as_bytes())
                         .iter()
-                        .map(|b| format!("{b:02x}"))
-                        .collect::<String>()
+                        .fold(String::new(), |mut out, b| {
+                            let _ = write!(out, "{b:02x}");
+                            out
+                        })
                 )
             ),
             None => "[ ! -e \"$p\" ] && [ ! -L \"$p\" ]".into(),

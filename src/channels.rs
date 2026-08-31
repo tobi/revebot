@@ -64,7 +64,8 @@ impl Kv {
             .entry(self.namespace.clone())
             .or_insert_with(|| serde_json::json!({}));
         ns[key] = serde_json::Value::String(value.into());
-        std::fs::write(&self.path, serde_json::to_vec_pretty(&all).unwrap())
+        let bytes = serde_json::to_vec_pretty(&all).map_err(std::io::Error::other)?;
+        std::fs::write(&self.path, bytes)
     }
 }
 

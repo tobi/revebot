@@ -47,7 +47,9 @@ impl Tools for HangingTool {
         Box::pin(async move {
             // The intent is already committed and flushed by now, so the file
             // on disk says "this tool is running" the moment we signal.
-            std::fs::write(&self.ready, "ready").expect("signal readiness");
+            if let Err(error) = std::fs::write(&self.ready, "ready") {
+                return Err(format!("signal readiness: {error}"));
+            }
             loop {
                 tokio::time::sleep(std::time::Duration::from_hours(1)).await;
             }
@@ -56,17 +58,18 @@ impl Tools for HangingTool {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
-    let path: PathBuf = args.next().expect("session path").into();
-    let ready: PathBuf = args.next().expect("ready path").into();
+    let usage = || anyhow::anyhow!("usage: crash_child <session> <ready> [safe]");
+    let path: PathBuf = args.next().ok_or_else(usage)?.into();
+    let ready: PathBuf = args.next().ok_or_else(usage)?.into();
     let replay = match args.next().as_deref() {
         Some("safe") => Replay::Safe,
         _ => Replay::Never,
     };
     let cursor = path.with_extension("cursor");
 
-    let storage = reve::storage::Storage::open(&path, "crash", None).expect("open the session");
+    let storage = reve::storage::Storage::open(&path, "crash", None)?;
     let session = Session::spawn(storage);
     let harness = Harness::new(
         session,

@@ -21,7 +21,7 @@ pub fn now_ms() -> i64 {
 
 /// Mint a `UUIDv7` string for the given millisecond timestamp.
 pub fn uuid_v7(timestamp_ms: i64) -> String {
-    let ts = (timestamp_ms.max(0) as u64) & 0x0000_FFFF_FFFF_FFFF;
+    let ts = u64::try_from(timestamp_ms.max(0)).unwrap_or(0) & 0x0000_FFFF_FFFF_FFFF;
     let rand_a: u16 = rand::random::<u16>() & 0x0FFF;
     let rand_b: u64 = rand::random::<u64>() & 0x3FFF_FFFF_FFFF_FFFF;
     let hi: u64 = (ts << 16) | 0x7000 | u64::from(rand_a);
@@ -106,7 +106,8 @@ id_type!(
 /// are not durable identities — a turn, a structural task — where an operator
 /// reading a log matters more than global uniqueness.
 pub fn short_id(prefix: &str) -> String {
-    format!("{prefix}_{}", &uuid_v7(now_ms()).replace('-', "")[..12])
+    let stripped = uuid_v7(now_ms()).replace('-', "");
+    format!("{prefix}_{}", stripped.get(..12).unwrap_or(&stripped))
 }
 
 #[cfg(test)]

@@ -63,7 +63,7 @@ impl Model for HttpModel {
                 Api::OpenaiResponses => openai_responses::build_body(
                     &self.resolved,
                     request.system,
-                    openai_input(request.context),
+                    &openai_input(request.context),
                     request.tools,
                 ),
                 Api::OpenaiCompletions => openai_completions::build_body(
@@ -75,7 +75,7 @@ impl Model for HttpModel {
                 Api::AnthropicMessages => anthropic::build_body(
                     &self.resolved,
                     request.system,
-                    anthropic_messages(request.context),
+                    &anthropic_messages(request.context),
                     request.tools,
                 ),
                 Api::Fake => {

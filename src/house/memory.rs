@@ -6,6 +6,7 @@ use super::profile::{Profile, validate_id};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 const OPEN: &str = "<!-- reve-memory ";
@@ -157,16 +158,27 @@ struct Document {
 fn blocks(text: &str) -> anyhow::Result<Vec<Block>> {
     let mut out = Vec::new();
     let mut offset = 0;
-    while let Some(start) = text[offset..].find(OPEN).map(|i| i + offset) {
+    while let Some(start) = text
+        .get(offset..)
+        .and_then(|rest| rest.find(OPEN))
+        .map(|i| i + offset)
+    {
+        // Every offset here comes from `find` plus ASCII marker lengths, so
+        // each slice lands on a char boundary; `get` keeps that explicit.
         let metadata_start = start + OPEN.len();
-        let metadata_end = text[metadata_start..]
-            .find(" -->\n")
+        let metadata_end = text
+            .get(metadata_start..)
+            .and_then(|rest| rest.find(" -->\n"))
             .map(|i| i + metadata_start)
             .ok_or_else(|| anyhow::anyhow!("malformed memory header"))?;
-        let meta = serde_json::from_str(&text[metadata_start..metadata_end])?;
+        let meta = serde_json::from_str(
+            text.get(metadata_start..metadata_end)
+                .ok_or_else(|| anyhow::anyhow!("malformed memory header"))?,
+        )?;
         let fact_start = metadata_end + " -->\n".len();
-        let fact_end = text[fact_start..]
-            .find(CLOSE)
+        let fact_end = text
+            .get(fact_start..)
+            .and_then(|rest| rest.find(CLOSE))
             .map(|i| i + fact_start)
             .ok_or_else(|| anyhow::anyhow!("unterminated memory block"))?;
         let end = fact_end + CLOSE.len();
@@ -174,7 +186,10 @@ fn blocks(text: &str) -> anyhow::Result<Vec<Block>> {
             start,
             end,
             meta,
-            fact: text[fact_start..fact_end].to_string(),
+            fact: text
+                .get(fact_start..fact_end)
+                .ok_or_else(|| anyhow::anyhow!("unterminated memory block"))?
+                .to_string(),
         });
         offset = end;
     }
@@ -271,10 +286,7 @@ pub fn plan(
         at: now,
         tier: request.tier,
     })?;
-    after.push_str(&format!(
-        "\n{OPEN}{metadata} -->\n{}{CLOSE}\n",
-        request.fact
-    ));
+    let _ = write!(after, "\n{OPEN}{metadata} -->\n{}{CLOSE}\n", request.fact);
     if after.len() as u64 > MAX_FILE {
         anyhow::bail!("memory file is full; archive older material rather than overwriting it");
     }
@@ -290,10 +302,10 @@ pub fn plan(
 
 /// UTF-8-safe, explicit truncation. Limits count bytes to bound provider input.
 pub fn bounded(text: &str, budget: usize) -> String {
+    const NOTICE: &str = "\n[truncated; more is on disk]";
     if text.len() <= budget {
         return text.into();
     }
-    const NOTICE: &str = "\n[truncated; more is on disk]";
     if budget <= NOTICE.len() {
         return String::new();
     }
@@ -301,7 +313,7 @@ pub fn bounded(text: &str, budget: usize) -> String {
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}{NOTICE}", &text[..end])
+    format!("{}{NOTICE}", text.get(..end).unwrap_or(text))
 }
 
 fn projection(
@@ -342,21 +354,23 @@ fn projection(
     recent.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     let mut text = format!("Memory source: /{}\n", directory.display());
     if !profile.is_empty() {
-        text.push_str(&format!(
-            "Enduring facts:\n{}\n",
+        let _ = writeln!(
+            text,
+            "Enduring facts:\n{}",
             bounded(&profile.join("\n"), budget / 2)
-        ));
+        );
     }
     if !recent.is_empty() {
         text.push_str("Recently (newest first):\n");
     }
     for (at, fact) in recent {
-        text.push_str(&format!("- [{}] {fact}\n", at.format("%Y-%m-%d")));
+        let _ = writeln!(text, "- [{}] {fact}", at.format("%Y-%m-%d"));
     }
     if omitted > 0 {
-        text.push_str(&format!(
-            "{omitted} older facts remain on disk. Read the files when needed.\n"
-        ));
+        let _ = writeln!(
+            text,
+            "{omitted} older facts remain on disk. Read the files when needed."
+        );
     }
     if docs.is_empty() {
         return Ok(String::new());

@@ -143,8 +143,8 @@ fn grade_one(grader: &Grader, trace: &Trace) -> GradeResult {
             let got: Vec<&str> = trace.tools.iter().map(|t| t.name.as_str()).collect();
             let mut gi = 0;
             let ok = names.iter().all(|want| {
-                while gi < got.len() {
-                    if got[gi] == want {
+                while let Some(g) = got.get(gi) {
+                    if *g == want {
                         gi += 1;
                         return true;
                     }
@@ -226,8 +226,7 @@ fn match_transcript(got: &[TraceMessage], want: &[TranscriptExpect]) -> (bool, S
             format!("want {} messages, got {}", want.len(), got.len()),
         );
     }
-    for (i, expect) in want.iter().enumerate() {
-        let msg = &got[i];
+    for (i, (msg, expect)) in got.iter().zip(want).enumerate() {
         if !msg.role.eq_ignore_ascii_case(&expect.role) {
             return (
                 false,

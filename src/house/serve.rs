@@ -1,5 +1,6 @@
 //! HTTP + WebSocket surface for the house.
 
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -32,7 +33,7 @@ pub async fn serve(house: House) -> anyhow::Result<()> {
     let addr: SocketAddr = house
         .bind()
         .parse()
-        .unwrap_or_else(|_| "127.0.0.1:7420".parse().unwrap());
+        .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 7420)));
     let tcp = TcpListener::bind(addr).await?;
 
     let sock = house.sock().clone();
@@ -90,7 +91,9 @@ fn router(state: AppState) -> Router {
         .route("/api/routines", get(list_routines))
         .route("/api/routines/{id}/run", post(run_routine))
         .layer(DefaultBodyLimit::max(
-            super::attach::MAX_BYTES as usize + 1024 * 1024,
+            usize::try_from(super::attach::MAX_BYTES)
+                .unwrap_or(usize::MAX)
+                .saturating_add(1024 * 1024),
         ))
         .with_state(state)
 }
@@ -672,7 +675,9 @@ fn urlencoding_path(s: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(b as char);
             }
-            _ => out.push_str(&format!("%{b:02X}")),
+            _ => {
+                let _ = write!(out, "%{b:02X}");
+            }
         }
     }
     out

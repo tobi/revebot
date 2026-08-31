@@ -21,6 +21,7 @@ mod lifecycle_tests;
 mod microvm_tests;
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as _;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
@@ -30,6 +31,7 @@ use anyhow::Context;
 use chrono::{Datelike, Timelike};
 use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
+use sha2::Digest as _;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::entry::MAIN_LANE;
@@ -222,12 +224,12 @@ impl House {
             crate::sandbox::Sandbox::sandbox_name_for(&project.runtime.policy, project.workspace());
         Sandbox::reclaim_namesake(&name).await.ok();
 
-        let sandbox = Sandbox::start(
+        let sandbox = Box::pin(Sandbox::start(
             project.runtime.policy.clone(),
             project.workspace(),
             project.state_dir(),
             progress,
-        )
+        ))
         .await?;
         let sandbox = Arc::new(sandbox);
         sandbox.hold().await?;
@@ -302,11 +304,12 @@ impl House {
             .values()
             .filter_map(|slot| match slot {
                 BotSlot::Ready(rt) => {
-                    let mut value = serde_json::to_value(&rt.profile).expect("profile JSON");
-                    value["profile_error"] = serde_json::json!(rt.profile_error);
-                    value["cwd"] = serde_json::json!(rt.context.cwd());
-                    value["log_id"] = serde_json::json!(rt.session.id());
-                    value["status"] = "ready".into();
+                    let mut value = serde_json::to_value(&rt.profile).ok()?;
+                    let obj = value.as_object_mut()?;
+                    obj.insert("profile_error".into(), serde_json::json!(rt.profile_error));
+                    obj.insert("cwd".into(), serde_json::json!(rt.context.cwd()));
+                    obj.insert("log_id".into(), serde_json::json!(rt.session.id()));
+                    obj.insert("status".into(), "ready".into());
                     Some(value)
                 }
                 BotSlot::Deleting {
@@ -315,22 +318,29 @@ impl House {
                     retryable,
                     ..
                 } => {
-                    let mut value = serde_json::to_value(profile).expect("profile JSON");
-                    value["profile_error"] = serde_json::json!(
-                        error
-                            .as_deref()
-                            .unwrap_or("Deleting: waiting for owned work to stop")
+                    let mut value = serde_json::to_value(profile).ok()?;
+                    let obj = value.as_object_mut()?;
+                    obj.insert(
+                        "profile_error".into(),
+                        serde_json::json!(
+                            error
+                                .as_deref()
+                                .unwrap_or("Deleting: waiting for owned work to stop")
+                        ),
                     );
-                    value["status"] = if error.is_some() {
-                        "delete_failed"
-                    } else {
-                        "deleting"
-                    }
-                    .into();
-                    value["delete_retryable"] = (*retryable).into();
+                    obj.insert(
+                        "status".into(),
+                        if error.is_some() {
+                            "delete_failed"
+                        } else {
+                            "deleting"
+                        }
+                        .into(),
+                    );
+                    obj.insert("delete_retryable".into(), (*retryable).into());
                     Some(value)
                 }
-                _ => None,
+                BotSlot::Creating { .. } => None,
             })
             .collect();
         views.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
@@ -350,8 +360,15 @@ impl House {
     pub async fn bots_view(&self) -> Vec<serde_json::Value> {
         let mut out = Vec::new();
         for mut value in self.profile_views() {
-            let id = value["id"].as_str().unwrap_or_default().to_string();
-            value["busy"] = serde_json::json!(self.bot_is_busy(&id).await);
+            let id = value
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let busy = self.bot_is_busy(&id).await;
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("busy".into(), serde_json::json!(busy));
+            }
             out.push(value);
         }
         out
@@ -1087,7 +1104,7 @@ impl Inner {
     }
 
     async fn create_inner(self: &Arc<Self>, spec: CreateSpec) -> anyhow::Result<Profile> {
-        let (reserved, token) = self.reserve_create(spec.clone())?;
+        let (reserved, token) = self.reserve_create(&spec)?;
         let guard = CreateGuard {
             inner: Arc::clone(self),
             id: reserved.id.clone(),
@@ -1101,7 +1118,7 @@ impl Inner {
         Ok(reserved)
     }
 
-    fn reserve_create(&self, spec: CreateSpec) -> anyhow::Result<(Profile, String)> {
+    fn reserve_create(&self, spec: &CreateSpec) -> anyhow::Result<(Profile, String)> {
         if spec.name.trim().is_empty() {
             anyhow::bail!("agent name cannot be blank");
         }
@@ -1303,13 +1320,11 @@ impl Inner {
         self.refresh_profiles();
         let (target_harness, target_cmds, from_name, to_name) = {
             let snap = self.snapshot.read();
-            let from_rt = match snap.get(from) {
-                Some(BotSlot::Ready(rt)) => rt,
-                _ => anyhow::bail!("unknown to {from}"),
+            let Some(BotSlot::Ready(from_rt)) = snap.get(from) else {
+                anyhow::bail!("unknown to {from}")
             };
-            let to_rt = match snap.get(to) {
-                Some(BotSlot::Ready(rt)) => rt,
-                _ => anyhow::bail!("unknown to {to}"),
+            let Some(BotSlot::Ready(to_rt)) = snap.get(to) else {
+                anyhow::bail!("unknown to {to}")
             };
             (
                 to_rt.harness.clone(),
@@ -1345,11 +1360,10 @@ impl Inner {
             "user_notice",
             serde_json::json!({ "text": text, "bot": bot }),
         );
-        use sha2::{Digest, Sha256};
-        let digest: String = Sha256::digest(text.as_bytes())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let mut digest = String::with_capacity(64);
+        for b in sha2::Sha256::digest(text.as_bytes()) {
+            let _ = write!(digest, "{b:02x}");
+        }
         match harness
             .write_once(MAIN_LANE, &format!("user_notice/{digest}"), notice.clone())
             .await
@@ -1492,7 +1506,8 @@ fn spawn_routines(house: Weak<Inner>) -> tokio::task::JoinHandle<()> {
             }
             inner.fire_due_routines().await;
             drop(inner);
-            let secs = 60u64.saturating_sub(chrono::Local::now().timestamp() as u64 % 60);
+            let secs = 60u64
+                .saturating_sub(u64::try_from(chrono::Local::now().timestamp()).unwrap_or(0) % 60);
             tokio::time::sleep(Duration::from_secs(secs.max(1))).await;
         }
     })
@@ -1525,10 +1540,7 @@ fn spawn_supervisor(
             let h = harness.clone();
             drives.spawn(async move {
                 let _ = h.resume_all().await;
-                match h.kick(MAIN_LANE).await {
-                    Ok(_) | Err(HarnessError::Idle(_) | HarnessError::Busy(_)) => {}
-                    Err(_) => {}
-                }
+                let _ = h.kick(MAIN_LANE).await;
             });
         }
         loop {
@@ -1557,10 +1569,7 @@ fn spawn_supervisor(
                         BotCmd::KickNow => {
                             let h = harness.clone();
                             drives.spawn(async move {
-                                match h.kick(MAIN_LANE).await {
-                                    Ok(_) | Err(HarnessError::Idle(_) | HarnessError::Busy(_)) => {}
-                                    Err(_) => {}
-                                }
+                                let _ = h.kick(MAIN_LANE).await;
                             });
                         }
                     }
@@ -1632,7 +1641,10 @@ async fn claim_then_drive(
             else {
                 unreachable!()
             };
-            let id = prompt_entry_ids.first().expect("accepted prompt").clone();
+            let Some(id) = prompt_entry_ids.first() else {
+                return Err("accepted prompt has no entries".to_string());
+            };
+            let id = id.clone();
             let ack = PromptAck {
                 log_id: harness.session().id().into(),
                 record: harness
@@ -1706,7 +1718,10 @@ fn hex_token() -> String {
     use sha2::{Digest, Sha256};
     let bytes: [u8; 16] = rand::random();
     let digest = Sha256::digest(bytes);
-    digest.iter().take(16).map(|b| format!("{b:02x}")).collect()
+    digest.iter().take(16).fold(String::new(), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
+    })
 }
 
 pub(crate) fn bind_profile_environment(

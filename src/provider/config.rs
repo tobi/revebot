@@ -370,7 +370,9 @@ providers:
             .find("  # llamacpp:")
             .expect("the example is present");
         // Uncomment the way a person does: delete the `# `, keep the indent.
-        let uncommented: String = TEMPLATE[start..]
+        let uncommented: String = TEMPLATE
+            .get(start..)
+            .expect("ascii boundary")
             .lines()
             .map(|line| line.replacen("# ", "", 1))
             .collect::<Vec<_>>()

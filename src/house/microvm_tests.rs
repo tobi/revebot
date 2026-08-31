@@ -21,8 +21,13 @@ async fn homes_cwd_memory_and_profile_notifications_work_in_the_guest() -> anyho
     println!("isolated VM integration instance: {name}");
     let policy = runtime.policy.clone();
     let mut remaining_ids = Vec::new();
-    let house = House::boot(project, "127.0.0.1:0".into(), &crate::sandbox::Silent).await?;
-    let result: anyhow::Result<()> = async {
+    let house = Box::pin(House::boot(
+        project,
+        "127.0.0.1:0".into(),
+        &crate::sandbox::Silent,
+    ))
+    .await?;
+    let result: anyhow::Result<()> = Box::pin(async {
         let first = "chief-of-staff";
         let second = house.create_bot(CreateSpec { name:"Miku".into(), title:"Music".into(), description:"Compose music".into(), soul:Some("MUSIC_ONLY_SOUL".into()), model:None, avatar:None }).await?;
         anyhow::ensure!(house.bot_soul(&second.id)?.contains("MUSIC_ONLY_SOUL"));
@@ -91,7 +96,7 @@ async fn homes_cwd_memory_and_profile_notifications_work_in_the_guest() -> anyho
         remaining_ids = house.ready_profiles().into_iter().map(|p|p.id).collect();
         anyhow::ensure!(remaining_ids.len() == 1 && remaining_ids[0] != first);
         Ok(())
-    }.await;
+    }).await;
     let stopped = house.shutdown().await;
     drop(house);
     if let Err(error) = result {
@@ -103,7 +108,12 @@ async fn homes_cwd_memory_and_profile_notifications_work_in_the_guest() -> anyho
     let runtime = Arc::get_mut(&mut project.runtime).unwrap();
     runtime.policy = policy;
     runtime.agent.model = None;
-    let reopened = House::boot(project, "127.0.0.1:0".into(), &crate::sandbox::Silent).await?;
+    let reopened = Box::pin(House::boot(
+        project,
+        "127.0.0.1:0".into(),
+        &crate::sandbox::Silent,
+    ))
+    .await?;
     let actual_ids: Vec<_> = reopened
         .ready_profiles()
         .into_iter()

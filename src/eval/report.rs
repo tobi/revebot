@@ -1,5 +1,6 @@
 //! JSON and markdown reports.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -87,20 +88,28 @@ impl Report {
             std::fs::create_dir_all(parent)?;
         }
         let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-        xml.push_str(&format!(
-            "<testsuite name=\"revebot-eval\" tests=\"{}\" failures=\"{}\" errors=\"{}\" skipped=\"{}\">\n",
+        let _ = writeln!(
+            xml,
+            "<testsuite name=\"revebot-eval\" tests=\"{}\" failures=\"{}\" errors=\"{}\" skipped=\"{}\">",
             self.cases.len(),
             self.failed,
             self.errored,
             self.skipped
-        ));
+        );
         for case in &self.cases {
-            xml.push_str(&format!(
-                "  <testcase name=\"{}\" classname=\"{}\" time=\"{:.3}\">",
+            // Durations in ms stay far below 2^53, so the cast is exact at this
+            // display precision.
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "millisecond durations are << 2^53; three-decimal display only"
+            )]
+            let secs = case.duration_ms as f64 / 1000.0;
+            let _ = write!(
+                xml,
+                "  <testcase name=\"{}\" classname=\"{}\" time=\"{secs:.3}\">",
                 xml_escape(&case.id),
-                xml_escape(&case.suite),
-                case.duration_ms as f64 / 1000.0
-            ));
+                xml_escape(&case.suite)
+            );
             match case.status {
                 Status::Failed => {
                     let msg = case
@@ -110,16 +119,22 @@ impl Report {
                         .map(|g| format!("{}: {}", g.grader, g.detail))
                         .collect::<Vec<_>>()
                         .join("; ");
-                    xml.push_str(&format!("<failure message=\"{}\"/>", xml_escape(&msg)));
+                    let _ = write!(xml, "<failure message=\"{}\"/>", xml_escape(&msg));
                 }
-                Status::Error => xml.push_str(&format!(
-                    "<error message=\"{}\"/>",
-                    xml_escape(case.error.as_deref().unwrap_or("error"))
-                )),
-                Status::Skipped => xml.push_str(&format!(
-                    "<skipped message=\"{}\"/>",
-                    xml_escape(case.skip_reason.as_deref().unwrap_or("skipped"))
-                )),
+                Status::Error => {
+                    let _ = write!(
+                        xml,
+                        "<error message=\"{}\"/>",
+                        xml_escape(case.error.as_deref().unwrap_or("error"))
+                    );
+                }
+                Status::Skipped => {
+                    let _ = write!(
+                        xml,
+                        "<skipped message=\"{}\"/>",
+                        xml_escape(case.skip_reason.as_deref().unwrap_or("skipped"))
+                    );
+                }
                 Status::Passed | Status::Scored => {}
             }
             xml.push_str("</testcase>\n");
@@ -131,14 +146,15 @@ impl Report {
 
     pub fn markdown(&self) -> String {
         let mut out = String::new();
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "# eval report\n\n{} passed, {} failed, {} skipped, {} errored  ({})\n\n",
             self.passed,
             self.failed,
             self.skipped,
             self.errored,
-            format_ms(self.duration_ms),
-        ));
+            format_ms(self.duration_ms)
+        );
         out.push_str("| status | id | suite | time |\n|---|---|---|---|\n");
         for case in &self.cases {
             let mark = match case.status {
@@ -148,23 +164,25 @@ impl Report {
                 Status::Error => "ERR",
                 Status::Scored => "score",
             };
-            out.push_str(&format!(
-                "| {mark} | `{}` | {} | {} |\n",
+            let _ = writeln!(
+                out,
+                "| {mark} | `{}` | {} | {} |",
                 case.id,
                 case.suite,
                 format_ms(case.duration_ms)
-            ));
+            );
             if let Some(reason) = &case.skip_reason {
-                out.push_str(&format!("|  | _{reason}_ |  |  |\n"));
+                let _ = writeln!(out, "|  | _{reason}_ |  |  |");
             }
             if let Some(err) = &case.error {
-                out.push_str(&format!("|  | `{err}` |  |  |\n"));
+                let _ = writeln!(out, "|  | `{err}` |  |  |");
             }
             for grade in case.grades.iter().filter(|g| !g.passed) {
-                out.push_str(&format!(
-                    "|  | grader `{}`: {} |  |  |\n",
+                let _ = writeln!(
+                    out,
+                    "|  | grader `{}`: {} |  |  |",
                     grade.grader, grade.detail
-                ));
+                );
             }
         }
         out
@@ -238,6 +256,13 @@ fn format_ms(ms: u64) -> String {
     if ms < 1000 {
         format!("{ms}ms")
     } else {
-        format!("{:.1}s", ms as f64 / 1000.0)
+        // Durations in ms stay far below 2^53, so the cast is exact at this
+        // display precision.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "millisecond durations are << 2^53; one-decimal display only"
+        )]
+        let secs = ms as f64;
+        format!("{:.1}s", secs / 1000.0)
     }
 }

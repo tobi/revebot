@@ -88,7 +88,10 @@ pub fn validate_id(id: &str) -> anyhow::Result<()> {
         || !id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        || !id.as_bytes()[0].is_ascii_alphanumeric()
+        || id
+            .as_bytes()
+            .first()
+            .is_none_or(|b| !b.is_ascii_alphanumeric())
     {
         anyhow::bail!("invalid bot/project id {id:?}: use one ASCII name, not a path");
     }

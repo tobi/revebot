@@ -40,11 +40,11 @@ pub fn load(path: &Path, previous: Option<&str>) -> Result<Reloaded, HeartbeatEr
     let schedule: Schedule = serde_yaml::from_str(&text)?;
     let mut h = Sha256::new();
     h.update(text.as_bytes());
-    let fp = h
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
+    let fp = h.finalize().iter().fold(String::new(), |mut out, b| {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+        out
+    });
     Ok(Reloaded {
         changed: previous != Some(&fp),
         schedule,

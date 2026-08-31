@@ -1,6 +1,7 @@
 //! House tools: `update_state`, `CreateAgent`, `UpdateAgent`,
 //! `SendAgentMessage`, `SendUserMessage`, `AskUserForSecret`. Names win over Lua.
 
+use std::fmt::Write as _;
 use std::sync::{Arc, Weak};
 
 use serde_json::{Map, Value, json};
@@ -232,7 +233,10 @@ impl Tools for HouseTools {
                             house.workspace_changed(&self.bot_id, paths, !known).await
                             && let Ok(text) = &mut result
                         {
-                            text.push_str(&format!("\nSpecial-file refresh failed: {error}. Use cd to refresh directory rules."));
+                            let _ = write!(
+                                text,
+                                "\nSpecial-file refresh failed: {error}. Use cd to refresh directory rules."
+                            );
                         }
                     }
                     result

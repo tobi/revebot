@@ -91,7 +91,10 @@ impl Spinner {
                     let mut state = state.lock();
                     state.frame = state.frame.wrapping_add(1);
                     if let Some(stage) = &state.stage {
-                        let frame = FRAMES[state.frame % FRAMES.len()];
+                        let frame = FRAMES
+                            .get(state.frame % FRAMES.len())
+                            .copied()
+                            .unwrap_or("⠋");
                         let line = render(
                             frame,
                             theme::RGB_ALERT,

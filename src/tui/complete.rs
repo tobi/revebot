@@ -33,6 +33,7 @@ impl Command {
         }
     }
 
+    #[must_use]
     pub fn with_arguments(mut self, arguments: Vec<Candidate>) -> Self {
         self.arguments = arguments;
         self
@@ -61,7 +62,7 @@ impl Completion {
 /// prose to the right of the cursor.
 pub fn complete(input: &str, commands: &[Command], files: &[Candidate]) -> Completion {
     if let Some(replace_from) = file_token_start(input) {
-        let typed = &input[replace_from..];
+        let typed = input.get(replace_from..).unwrap_or_default();
         let candidates = files
             .iter()
             .filter(|file| file.value.starts_with(typed))
@@ -116,10 +117,15 @@ pub fn complete(input: &str, commands: &[Command], files: &[Candidate]) -> Compl
 
 fn file_token_start(input: &str) -> Option<usize> {
     let start = input.rfind('@')?;
-    if start > 0 && !input[..start].ends_with(char::is_whitespace) {
+    if start > 0
+        && !input
+            .get(..start)
+            .is_some_and(|before| before.ends_with(char::is_whitespace))
+    {
         return None;
     }
-    (!input[start + 1..].chars().any(char::is_whitespace)).then_some(start)
+    let after = input.get(start + 1..)?;
+    (!after.chars().any(char::is_whitespace)).then_some(start)
 }
 
 /// Apply a candidate to the input, leaving the cursor after it.
@@ -130,7 +136,7 @@ pub fn accept(input: &str, completion: &Completion, index: usize, commands: &[Co
     let Some(candidate) = completion.candidates.get(index) else {
         return input.to_string();
     };
-    let mut out = String::from(&input[..completion.replace_from]);
+    let mut out = String::from(input.get(..completion.replace_from).unwrap_or_default());
     out.push_str(&candidate.value);
     let wants_argument = commands
         .iter()

@@ -86,8 +86,10 @@ impl StreamState {
                     .get("delta")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                if let Some(index) = self.calls.iter().position(|(k, _)| k == id) {
-                    self.partial[index].push_str(delta);
+                if let Some(index) = self.calls.iter().position(|(k, _)| k == id)
+                    && let Some(partial) = self.partial.get_mut(index)
+                {
+                    partial.push_str(delta);
                 }
             }
             "response.completed" | "response.incomplete" => {
@@ -163,7 +165,7 @@ fn read_usage(usage: &Value) -> Usage {
 pub fn build_body(
     resolved: &Resolved,
     system: &str,
-    input: Vec<Value>,
+    input: &[Value],
     tools: &[ToolSchema],
 ) -> Value {
     let mut body = json!({
@@ -171,7 +173,9 @@ pub fn build_body(
         "input": input,
         "stream": true,
     });
-    let map = body.as_object_mut().expect("object");
+    let Some(map) = body.as_object_mut() else {
+        return body;
+    };
 
     // The cap is spelled differently by different endpoints, so the name comes
     // from the provider's compat block rather than from a conditional here.
@@ -341,14 +345,14 @@ event: response.function_call_arguments.delta\ndata: {\"item_id\":\"a\",\"delta\
 
     #[test]
     fn the_token_cap_is_named_by_the_compat_block() {
-        let body = build_body(&resolved(Compat::default(), false), "", vec![], &[]);
+        let body = build_body(&resolved(Compat::default(), false), "", &[], &[]);
         assert_eq!(body["max_output_tokens"], 8192);
 
         let compat = Compat {
             max_tokens_field: "max_tokens".into(),
             ..Default::default()
         };
-        let body = build_body(&resolved(compat, false), "", vec![], &[]);
+        let body = build_body(&resolved(compat, false), "", &[], &[]);
         assert_eq!(
             body["max_tokens"], 8192,
             "an endpoint that spells it differently"
@@ -362,7 +366,7 @@ event: response.function_call_arguments.delta\ndata: {\"item_id\":\"a\",\"delta\
             supports_reasoning_effort: false,
             ..Default::default()
         };
-        let body = build_body(&resolved(compat, true), "", vec![], &[]);
+        let body = build_body(&resolved(compat, true), "", &[], &[]);
         assert!(body.get("store").is_none(), "{body}");
         assert!(
             body.get("reasoning").is_none(),
@@ -377,12 +381,7 @@ event: response.function_call_arguments.delta\ndata: {\"item_id\":\"a\",\"delta\
             description: "run a command".into(),
             schema: json!({"type": "object", "properties": {}}),
         }];
-        let body = build_body(
-            &resolved(Compat::default(), false),
-            "be terse",
-            vec![],
-            &tools,
-        );
+        let body = build_body(&resolved(Compat::default(), false), "be terse", &[], &tools);
         assert_eq!(body["instructions"], "be terse");
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "bash");

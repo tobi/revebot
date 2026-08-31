@@ -5,6 +5,7 @@
 
 use super::profile::Profile;
 use crate::skills::Skill;
+use std::fmt::Write as _;
 
 /// Header snapshot for an arriving message. It is data, never raw markup.
 pub fn with_cwd(wrapped: &str, cwd: &str) -> String {
@@ -15,7 +16,8 @@ pub fn with_cwd(wrapped: &str, cwd: &str) -> String {
     let header = format!("<cwd>{cwd}</cwd>\n");
     if let Some(end) = wrapped.find("</timestamp>\n") {
         let split = end + "</timestamp>\n".len();
-        format!("{}{header}{}", &wrapped[..split], &wrapped[split..])
+        let (before, after) = wrapped.split_at(split);
+        format!("{before}{header}{after}")
     } else {
         format!("{header}{wrapped}")
     }
@@ -82,7 +84,7 @@ pub fn wrap_user_turn_at(
             "Skills created or edited since your last turn. Follow the latest body when they apply.\n",
         );
         if !removed.is_empty() {
-            inner.push_str(&format!("Removed: {}\n", removed.join(", ")));
+            let _ = writeln!(inner, "Removed: {}", removed.join(", "));
         }
         for skill in fresh {
             inner.push_str(&format_skill_card(skill));
@@ -188,10 +190,11 @@ fn slash_invokes(raw_lower: &str, name: &str) -> bool {
     let n = needle.as_bytes();
     let mut i = 0;
     while i + n.len() <= bytes.len() {
-        if bytes[i..].starts_with(n) {
-            let ok_before = i == 0 || bytes[i - 1].is_ascii_whitespace();
+        if bytes.get(i..).is_some_and(|rest| rest.starts_with(n)) {
+            let ok_before = i == 0 || bytes.get(i - 1).is_some_and(u8::is_ascii_whitespace);
             let after = i + n.len();
-            let ok_after = after == bytes.len() || !is_skill_name_char(bytes[after]);
+            let ok_after =
+                after == bytes.len() || bytes.get(after).is_some_and(|b| !is_skill_name_char(*b));
             if ok_before && ok_after {
                 return true;
             }

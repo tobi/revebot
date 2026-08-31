@@ -1,6 +1,7 @@
 //! Each bot's home and persona. Never inherit a global SOUL/KNOWLEDGE file.
 use super::profile::{Profile, validate_id};
 use crate::sandbox::{ExecOptions, Sandbox};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 pub fn relative(id: &str) -> anyhow::Result<PathBuf> {
@@ -53,11 +54,15 @@ pub async fn ensure(sandbox: &Sandbox, profile: &Profile) -> anyhow::Result<()> 
         "plugins",
         "routines",
     ] {
-        command.push_str(&format!("mkdir -p -- {}\n", q(&format!("{path}/{dir}"))));
+        let _ = writeln!(command, "mkdir -p -- {}", q(&format!("{path}/{dir}")));
     }
     for (name, body) in defaults(profile) {
         let file = q(&format!("{path}/{name}"));
-        command.push_str(&format!("if [ ! -e {file} ] && [ ! -L {file} ]; then (set -C; printf %s {} > {file}) || exit 1; fi\n", q(&body)));
+        let _ = writeln!(
+            command,
+            "if [ ! -e {file} ] && [ ! -L {file} ]; then (set -C; printf %s {} > {file}) || exit 1; fi",
+            q(&body)
+        );
     }
     let result = sandbox.exec(&command, ExecOptions::default(), None).await?;
     if !result.success || result.cancelled {

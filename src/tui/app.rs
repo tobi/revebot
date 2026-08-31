@@ -148,11 +148,14 @@ impl Input {
 
     /// Display column of the cursor.
     pub fn column(&self) -> u16 {
-        self.text
-            .chars()
-            .take(self.cursor)
-            .collect::<String>()
-            .width() as u16
+        u16::try_from(
+            self.text
+                .chars()
+                .take(self.cursor)
+                .collect::<String>()
+                .width(),
+        )
+        .unwrap_or(u16::MAX)
     }
 }
 
@@ -256,17 +259,14 @@ impl App {
         match update {
             Update::Item(item) => self.scrollback.push(item),
             Update::Working(label) => {
-                match label {
-                    // The clock measures the operation, not the current label,
-                    // so a tool starting must not reset it back to zero.
-                    Some(label) => {
-                        let since = self.working.take().map_or_else(Instant::now, |(_, t)| t);
-                        self.working = Some((label, since));
-                    }
-                    None => {
-                        self.working = None;
-                        self.interrupt_armed = false;
-                    }
+                // The clock measures the operation, not the current label,
+                // so a tool starting must not reset it back to zero.
+                if let Some(label) = label {
+                    let since = self.working.take().map_or_else(Instant::now, |(_, t)| t);
+                    self.working = Some((label, since));
+                } else {
+                    self.working = None;
+                    self.interrupt_armed = false;
                 }
             }
             Update::Subagents(agents) => self.subagents = agents,
@@ -469,7 +469,9 @@ impl App {
     pub const MAX_CANDIDATES: u16 = Self::OVERFLOW;
 
     pub fn completion_height(&self) -> u16 {
-        (self.completion.candidates.len() as u16).min(Self::MAX_CANDIDATES)
+        u16::try_from(self.completion.candidates.len())
+            .unwrap_or(u16::MAX)
+            .min(Self::MAX_CANDIDATES)
     }
 
     /// The live region: the in-flight text, then six fixed rows of chrome.
@@ -481,6 +483,9 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1); 6])
             .split(area);
+        let [row0, row1, row2, rule, input_row, status] = chunks.as_ref() else {
+            return;
+        };
 
         // The three shared rows, in priority order: choosing a command beats
         // watching a reply arrive, which beats idle status. Menus and status
@@ -516,12 +521,14 @@ impl App {
             .take(Self::OVERFLOW as usize)
             .enumerate()
         {
-            Paragraph::new(line).render(chunks[offset + index], buf);
+            if let Some(&chunk) = [row0, row1, row2].get(offset + index) {
+                Paragraph::new(line).render(*chunk, buf);
+            }
         }
 
-        Paragraph::new(self.top_rule(width)).render(chunks[3], buf);
-        Paragraph::new(self.input_line()).render(chunks[4], buf);
-        Paragraph::new(self.status_line(width)).render(chunks[5], buf);
+        Paragraph::new(self.top_rule(width)).render(*rule, buf);
+        Paragraph::new(self.input_line()).render(*input_row, buf);
+        Paragraph::new(self.status_line(width)).render(*status, buf);
     }
 
     /// One live row for every subagent at once: state, name, age.
@@ -630,20 +637,21 @@ impl App {
 
     /// The shimmer that tells you it is alive without redrawing the world.
     fn working_line(&self) -> Line<'static> {
-        let (label, since) = self.working.as_ref().expect("busy");
+        let Some((label, since)) = self.working.as_ref() else {
+            return Line::default();
+        };
         let elapsed = since.elapsed().as_secs();
         let mut spans = vec![Span::styled("◇ ", theme::dim())];
         let period = theme::SHIMMER.len() * 2;
         for (i, ch) in label.chars().enumerate() {
             let shade = (i + period - (self.frame / 2) % period) % period;
-            let shade = if shade >= theme::SHIMMER.len() {
-                theme::SHIMMER.len() - 1
-            } else {
-                shade
-            };
+            let shade = shade.min(theme::SHIMMER.len() - 1);
             spans.push(Span::styled(
                 ch.to_string(),
-                ratatui::style::Style::default().fg(theme::SHIMMER[shade]),
+                ratatui::style::Style::default().fg(theme::SHIMMER
+                    .get(shade)
+                    .copied()
+                    .unwrap_or(ratatui::style::Color::Reset)),
             ));
         }
         let hint = if self.interrupt_armed {
@@ -774,7 +782,7 @@ pub fn flush(
     for item in items {
         let mut lines = item.render(width);
         lines.push(Line::from(""));
-        let height = lines.len() as u16;
+        let height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
         terminal.insert_before(height, |buf| {
             Paragraph::new(lines).render(buf.area, buf);
         })?;

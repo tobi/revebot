@@ -60,11 +60,15 @@ impl StreamState {
         let delta = choice.get("delta")?;
         if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for incoming in calls {
-                let index = incoming.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let index =
+                    usize::try_from(incoming.get("index").and_then(Value::as_u64).unwrap_or(0))
+                        .unwrap_or(0);
                 while self.calls.len() <= index {
                     self.calls.push(PartialCall::default());
                 }
-                let call = &mut self.calls[index];
+                let Some(call) = self.calls.get_mut(index) else {
+                    continue;
+                };
                 if let Some(id) = incoming.get("id").and_then(Value::as_str)
                     && !id.is_empty()
                 {
@@ -167,7 +171,9 @@ pub fn build_body(
         "stream": true,
         "stream_options": { "include_usage": true },
     });
-    let map = body.as_object_mut().expect("object");
+    let Some(map) = body.as_object_mut() else {
+        return body;
+    };
     map.insert(
         resolved.compat.max_tokens_field.clone(),
         json!(resolved.model.max_tokens),

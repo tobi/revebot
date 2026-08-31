@@ -45,6 +45,10 @@ impl Tools for RecoveryTools {
         }]
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "test double: an effectful tool re-running during recovery is the failure under test"
+    )]
     fn invoke<'a>(
         &'a self,
         name: &'a str,
@@ -64,6 +68,10 @@ impl Tools for RecoveryTools {
     }
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "test helper: the test binary's own path always resolves"
+)]
 fn crash_child_bin() -> PathBuf {
     // The integration test binary lives next to the other build artifacts.
     let mut dir = std::env::current_exe().expect("test binary path");
@@ -86,6 +94,10 @@ fn wait_for(path: &Path, limit: Duration) -> bool {
 }
 
 /// Run the child until its tool is in flight, then SIGKILL it.
+#[expect(
+    clippy::expect_used,
+    reason = "test helper: spawn/kill/reap failures are the test failing"
+)]
 fn crash(session: &Path, ready: &Path, replay: &str) {
     let bin = crash_child_bin();
     // `cargo test` builds bins before integration tests; if that changes,
@@ -145,6 +157,18 @@ fn harness(session: &Session, tools: Arc<dyn Tools>, cursor: PathBuf) -> Arc<Har
 
 /// The state the crash left: an open operation whose tool call is past its
 /// intent commit and has no result.
+#[expect(
+    clippy::unwrap_used,
+    reason = "test assertion helper: missing state is the test failing"
+)]
+#[expect(
+    clippy::expect_used,
+    reason = "test assertion helper: missing state is the test failing"
+)]
+#[expect(
+    clippy::panic,
+    reason = "test assertion helper: the wrong phase is the test failing"
+)]
 async fn assert_interrupted_tool(session: &Session) {
     let op = session
         .lane_state(MAIN_LANE)

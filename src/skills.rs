@@ -239,7 +239,7 @@ fn unquote(s: &str) -> String {
     if (s.starts_with('"') && s.ends_with('"') && s.len() >= 2)
         || (s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2)
     {
-        s[1..s.len() - 1].to_string()
+        s.get(1..s.len() - 1).unwrap_or(s).to_string()
     } else {
         s.to_string()
     }

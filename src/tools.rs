@@ -8,6 +8,7 @@
 //! Replay safety is declared per tool and is what recovery consults: a tool
 //! that only reads may be re-run after a crash, one that writes may not.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -53,7 +54,9 @@ struct Builtin {
 }
 
 fn object(mut properties: Value, required: &[&str]) -> Value {
-    properties.as_object_mut().expect("object schema").insert("description".into(), json!({"type":"string","description":"Short active status for the user, e.g. Reading project configuration or Running tests"}));
+    if let Some(obj) = properties.as_object_mut() {
+        obj.insert("description".into(), json!({"type":"string","description":"Short active status for the user, e.g. Reading project configuration or Running tests"}));
+    }
     json!({
         "type": "object",
         "properties": properties,
@@ -303,7 +306,7 @@ impl Toolbox {
                     text.push_str(out.stderr.trim_end());
                 }
                 if !out.success {
-                    text.push_str(&format!("\n(exit {})", out.exit_code));
+                    let _ = write!(text, "\n(exit {})", out.exit_code);
                 }
                 text
             }
@@ -443,7 +446,7 @@ pub fn is_session_path(path: &str) -> bool {
     let trimmed = path.trim_start_matches('/');
     let trimmed = trimmed.strip_prefix("workspace/").unwrap_or(trimmed);
     let parts: Vec<&str> = trimmed.split('/').filter(|p| !p.is_empty()).collect();
-    parts.len() >= 3 && parts[0] == "agents" && parts[2] == "sessions"
+    parts.len() >= 3 && parts.first() == Some(&"agents") && parts.get(2) == Some(&"sessions")
 }
 
 fn refuse_session_path(path: &str) -> Result<(), String> {
@@ -486,7 +489,7 @@ fn read_range(content: &str, offset: Option<i64>, limit: Option<i64>) -> Result<
     // Match Pi: lines are split on `\n`, including a trailing empty line;
     // offsets are 1-indexed, zero/negative offsets start at the first line.
     let lines: Vec<&str> = content.split('\n').collect();
-    let start = offset.unwrap_or(1).saturating_sub(1).max(0) as usize;
+    let start = usize::try_from(offset.unwrap_or(1).saturating_sub(1).max(0)).unwrap_or(0);
     if start >= lines.len() {
         return Err(format!(
             "Offset {} is beyond end of file ({} lines total)",
@@ -495,10 +498,14 @@ fn read_range(content: &str, offset: Option<i64>, limit: Option<i64>) -> Result<
         ));
     }
     let end = match limit {
-        Some(limit) => start.saturating_add(limit.max(0) as usize).min(lines.len()),
+        Some(limit) => start
+            .saturating_add(usize::try_from(limit.max(0)).unwrap_or(0))
+            .min(lines.len()),
         None => lines.len(),
     };
-    let mut output = lines[start..end]
+    let mut output = lines
+        .get(start..end)
+        .unwrap_or(&[])
         .iter()
         .enumerate()
         .map(|(index, line)| format!("{:>5}  {line}", start + index + 1))
@@ -507,9 +514,10 @@ fn read_range(content: &str, offset: Option<i64>, limit: Option<i64>) -> Result<
     if limit.is_some() && end < lines.len() {
         let remaining = lines.len() - end;
         let next_offset = end + 1;
-        output.push_str(&format!(
+        let _ = write!(
+            output,
             "\n\n[{remaining} more lines in file. Use offset={next_offset} to continue.]"
-        ));
+        );
     }
     Ok(output)
 }

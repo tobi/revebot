@@ -249,11 +249,8 @@ pub fn assign_path_id(cases_dir: &Path, path: &Path, case: &mut Case) {
         return;
     }
     let rel = path.strip_prefix(cases_dir).unwrap_or(path);
-    case.id = rel
-        .with_extension("")
-        .to_string_lossy()
-        .replace('\\', "/")
-        .clone();
+    case.id
+        .clone_from(&rel.with_extension("").to_string_lossy().replace('\\', "/"));
 }
 
 fn compile_test(case: &mut Case) -> anyhow::Result<()> {

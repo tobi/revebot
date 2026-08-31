@@ -17,8 +17,9 @@
 //! `pending.entry` and the driver places it. That is the whole reason a steer
 //! typed a millisecond before the process died is still there on resume.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tokio::sync::broadcast;
 
@@ -116,27 +117,30 @@ impl Harness {
     /// Optional house environment: refresh configuration only at idle admission;
     /// each drive resolves and holds the model named by its captured configuration.
     pub fn set_environment_sources(&self, configuration: ConfigurationSource, model: ModelSource) {
-        *self.sources.lock().unwrap() = Some(EnvironmentSources {
+        *self.sources.lock() = Some(EnvironmentSources {
             configuration,
             model,
         });
     }
 
     async fn refresh_idle_configuration(&self, lane: &str) -> Result<()> {
-        let sources = self.sources.lock().unwrap().clone();
+        let sources = self.sources.lock().clone();
         let Some(sources) = sources else {
             return Ok(());
         };
         self.session.ensure_lane(lane, None, &self.seed).await?;
-        let (state, state_seq) = self.session.lane_state(lane).await?.expect("ensured lane");
+        let (state, state_seq) = self
+            .session
+            .lane_state(lane)
+            .await?
+            .ok_or_else(|| SessionError::Corrupt(format!("lane {lane} vanished")))?;
         if state.current_operation_id.is_some() {
             return Ok(());
         }
-        let (current, config_seq) = self
-            .session
-            .lane_config(lane)
-            .await?
-            .expect("ensured configuration");
+        let (current, config_seq) =
+            self.session.lane_config(lane).await?.ok_or_else(|| {
+                SessionError::Corrupt(format!("lane {lane} configuration vanished"))
+            })?;
         let desired = (sources.configuration)().map_err(HarnessError::Invalid)?;
         if current == desired {
             return Ok(());
@@ -162,7 +166,7 @@ impl Harness {
     pub async fn close(&self) {
         self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
         self.session.close().await;
-        for cancel in self.cancels.lock().unwrap().values() {
+        for cancel in self.cancels.lock().values() {
             cancel.cancel();
         }
     }
@@ -561,7 +565,7 @@ impl Harness {
                 );
             }
             // Wake anything blocking on a request or a tool.
-            if let Some(tx) = self.cancels.lock().unwrap().get(lane) {
+            if let Some(tx) = self.cancels.lock().get(lane) {
                 tx.cancel();
             }
             return Ok(());
@@ -657,14 +661,16 @@ impl Harness {
             .zip(&prompts)
             .map(|(id, content)| Write::set(Namespace::PendingEntry, id.as_str(), content))
             .collect();
-        let trigger = ids.last().cloned().expect("non-empty");
+        let Some(trigger) = ids.last().cloned() else {
+            return Err(HarnessError::Invalid("a run needs a prompt".into()));
+        };
         let intent = Intent::Run {
             prompt_entry_ids: ids.clone(),
             system_prompt_override: before.value.system_prompt,
         };
         let state = OperationState::Run(RunState {
             tools_started: false,
-            accepted_writes: Default::default(),
+            accepted_writes: Box::default(),
             control: Control::Running,
             settings: self.settings.clone(),
             // The prompts are queued as deferred writes and placed by the
@@ -757,14 +763,18 @@ impl Harness {
             ));
             writes.push(id);
         }
-        let trigger = writes.last().cloned().expect("non-empty pending");
+        let Some(trigger) = writes.last().cloned() else {
+            return Err(HarnessError::Session(SessionError::Corrupt(
+                "pending run has no entries".into(),
+            )));
+        };
         let intent = Intent::Run {
             prompt_entry_ids: writes.clone(),
             system_prompt_override: before.value.system_prompt,
         };
         let state = OperationState::Run(RunState {
             tools_started: false,
-            accepted_writes: Default::default(),
+            accepted_writes: Box::default(),
             control: Control::Running,
             settings: self.settings.clone(),
             phase: RunPhase::Checkpoint(CheckpointPhase::need_assistant(trigger)),
@@ -906,7 +916,7 @@ impl Harness {
             tx.cancel();
         }
         {
-            let mut cancels = self.cancels.lock().unwrap();
+            let mut cancels = self.cancels.lock();
             if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(HarnessError::Invalid("harness is closed".into()));
             }
@@ -914,12 +924,12 @@ impl Harness {
         }
         let driver = self.driver(rx, &current.configuration);
         let result = driver.drive(current).await;
-        self.cancels.lock().unwrap().remove(&lane);
+        self.cancels.lock().remove(&lane);
         Ok(result?)
     }
 
     fn driver(&self, cancel: CancelRx, configuration: &LaneConfiguration) -> Driver {
-        let sources = self.sources.lock().unwrap().clone();
+        let sources = self.sources.lock().clone();
         let model = sources.map_or_else(
             || self.model.clone(),
             |sources| (sources.model)(configuration),

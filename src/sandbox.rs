@@ -294,7 +294,10 @@ impl Policy {
             })
             .collect();
         let digest = Sha256::digest(root.to_string_lossy().as_bytes());
-        format!("reve-{label}-{}", &hex(&digest)[..10])
+        format!(
+            "reve-{label}-{}",
+            hex(&digest).get(..10).unwrap_or_default()
+        )
     }
 
     /// Identifies the *disk and VM shape*. Runtime environment and secret
@@ -360,7 +363,13 @@ touch {PROVISION_MARKER}
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
 }
 
 /// The result of running a command in the VM.
@@ -524,7 +533,7 @@ impl Sandbox {
             // Refresh source references while stopped. Microsandbox resolves
             // their values only when the VM starts; no credential is persisted.
             if let Ok(handle) = MsbSandbox::get(&name).await {
-                let config = handle.config().map_err(secret_config_error)?;
+                let config = handle.config().map_err(|e| secret_config_error(&e))?;
                 let existing = persisted_secret_names(&config);
                 remove_secret_definitions(handle.modify(), &existing, true).await?;
                 install_secret_definitions(handle.modify(), &policy.secrets, true, &secret_root)
@@ -674,10 +683,10 @@ impl Sandbox {
     /// If a namesake is still Running after a dead house, stop it so
     /// [`Sandbox::start`] can boot. Only the lock holder should call this.
     pub async fn reclaim_namesake(name: &str) -> Result<()> {
+        use microsandbox::sandbox::SandboxStatus;
         let Ok(handle) = MsbSandbox::get(name).await else {
             return Ok(());
         };
-        use microsandbox::sandbox::SandboxStatus;
         if matches!(
             handle.status_snapshot(),
             SandboxStatus::Running | SandboxStatus::Draining
@@ -857,7 +866,7 @@ impl Sandbox {
         {
             let mut secrets = self.secrets.lock();
             if let Some(existing) = secrets.iter_mut().find(|s| s.env == secret.env) {
-                *existing = secret.clone();
+                (*existing).clone_from(&secret);
             } else {
                 secrets.push(secret.clone());
             }
@@ -895,7 +904,7 @@ impl Sandbox {
         let desired = runtime_secret_digests(&secrets, &self.secret_root);
         if state.vm.is_none() {
             if let Ok(handle) = MsbSandbox::get(&self.name).await {
-                let config = handle.config().map_err(secret_config_error)?;
+                let config = handle.config().map_err(|e| secret_config_error(&e))?;
                 let existing = persisted_secret_names(&config);
                 remove_secret_definitions(handle.modify(), &existing, true).await?;
                 install_secret_definitions(handle.modify(), &secrets, true, &self.secret_root)
@@ -906,7 +915,12 @@ impl Sandbox {
             })?);
             state.secret_digests = desired;
         } else if state.effect_idle() && state.secret_digests != desired {
-            let vm = state.vm.take().expect("checked above");
+            let Some(vm) = state.vm.take() else {
+                return Err(SandboxError::Unavailable(format!(
+                    "microVM {} vanished mid-acquire",
+                    self.name
+                )));
+            };
             vm.stop()
                 .await
                 .map_err(|e| SandboxError::Failed(e.to_string()))?;
@@ -923,7 +937,13 @@ impl Sandbox {
             state.secret_digests = desired;
         }
         state.begin();
-        Ok(state.vm.as_ref().expect("set above").clone())
+        let Some(vm) = state.vm.as_ref() else {
+            return Err(SandboxError::Unavailable(format!(
+                "microVM {} vanished mid-acquire",
+                self.name
+            )));
+        };
+        Ok(vm.clone())
     }
 
     async fn release(&self) {
@@ -1147,7 +1167,7 @@ fn run_secret_command(script: &str) -> Result<String, String> {
         return Err("empty command".into());
     };
     let output = std::process::Command::new(program)
-        .args(&words[1..])
+        .args(words.get(1..).unwrap_or(&[]))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1268,7 +1288,7 @@ fn bind_secret(secret: &Secret, root: &Path) -> Option<String> {
         Some(secret.source.clone())
     }
 }
-fn secret_config_error(error: microsandbox::MicrosandboxError) -> SandboxError {
+fn secret_config_error(error: &microsandbox::MicrosandboxError) -> SandboxError {
     SandboxError::Failed(format!("cannot inspect runtime secrets: {error}"))
 }
 
@@ -1490,8 +1510,12 @@ async fn build(
     let desktop_ports = if is_desktop_image(&policy.image) {
         let ports = reserve_localhost_ports(2)?;
         Some(Desktop {
-            novnc_port: ports[0],
-            vnc_port: ports[1],
+            novnc_port: *ports.first().ok_or_else(|| {
+                SandboxError::Failed("reserved fewer than two localhost ports".into())
+            })?,
+            vnc_port: *ports.get(1).ok_or_else(|| {
+                SandboxError::Failed("reserved fewer than two localhost ports".into())
+            })?,
         })
     } else {
         None

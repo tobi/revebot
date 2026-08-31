@@ -573,9 +573,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("README.md"), "someone else's project").unwrap();
         assert!(!Project::is_house_dir(dir.path()));
-        let err = match Project::load(dir.path()) {
-            Err(err) => err,
-            Ok(_) => panic!("an arbitrary checkout must not load as an agent"),
+        let Err(err) = Project::load(dir.path()) else {
+            panic!("an arbitrary checkout must not load as an agent")
         };
         assert!(
             err.to_string().contains("not a house directory"),

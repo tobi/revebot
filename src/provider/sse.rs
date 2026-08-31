@@ -35,7 +35,12 @@ impl Decoder {
         self.buffer.push_str(chunk);
         let mut events = Vec::new();
         while let Some(index) = self.buffer.find('\n') {
-            let line = self.buffer[..index].trim_end_matches('\r').to_string();
+            let line = self
+                .buffer
+                .get(..index)
+                .unwrap_or_default()
+                .trim_end_matches('\r')
+                .to_string();
             self.buffer.drain(..=index);
             if let Some(event) = self.line(&line) {
                 events.push(event);

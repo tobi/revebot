@@ -23,13 +23,13 @@ use super::grade::{Trace, TraceMessage, TraceTool};
 pub struct RecordingTools {
     replay: Vec<(String, Replay)>,
     results: std::collections::BTreeMap<String, String>,
-    calls: std::sync::Mutex<Vec<TraceTool>>,
+    calls: parking_lot::Mutex<Vec<TraceTool>>,
 }
 
 impl RecordingTools {
     pub fn new(case: &Case) -> Arc<Self> {
         let mut replay = Vec::new();
-        let mut results = std::collections::BTreeMap::new();
+        let mut results = std::collections::BTreeMap::default();
         for (name, stub) in &case.tools {
             replay.push((
                 name.clone(),
@@ -47,12 +47,12 @@ impl RecordingTools {
         Arc::new(Self {
             replay,
             results,
-            calls: std::sync::Mutex::new(Vec::new()),
+            calls: parking_lot::Mutex::new(Vec::new()),
         })
     }
 
     pub fn recorded(&self) -> Vec<TraceTool> {
-        self.calls.lock().unwrap().clone()
+        self.calls.lock().clone()
     }
 }
 
@@ -82,7 +82,7 @@ impl Tools for RecordingTools {
         arguments: Map<String, Value>,
         _cancel: Option<CancelRx>,
     ) -> BoxFuture<'a, Result<String, String>> {
-        self.calls.lock().unwrap().push(TraceTool {
+        self.calls.lock().push(TraceTool {
             name: name.to_string(),
             arguments: arguments.clone(),
         });
@@ -220,7 +220,7 @@ pub async fn run(case: &Case, live: bool) -> anyhow::Result<Trace> {
         final_text,
         transcript,
         tools: tools.recorded(),
-        extras: Default::default(),
+        extras: std::collections::BTreeMap::default(),
         root: None,
     })
 }
@@ -238,7 +238,7 @@ fn script_to_assistants(script: &[ScriptTurn]) -> Vec<Assistant> {
                         .map(|c| (c.name.clone(), Value::Object(c.arguments.clone())))
                         .collect(),
                 );
-                a.text = turn.text.clone();
+                a.text.clone_from(&turn.text);
                 a
             }
         })

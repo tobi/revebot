@@ -29,8 +29,9 @@ pub fn system_prompt(project: &Project, bot: &Profile, teammates: &[Profile]) ->
         bot.projects.join(", ")
     ));
     let bot_dir = project.bot_dir(&bot.id);
-    let relative = super::home::relative(&bot.id).expect("validated profile");
-    match super::files::read_optional(&project.root, &relative.join("SOUL.md")) {
+    match super::home::relative(&bot.id)
+        .and_then(|relative| super::files::read_optional(&project.root, &relative.join("SOUL.md")))
+    {
         Ok(Some(text)) => parts.push(format!("# Your SOUL.md\n{text}")),
         Ok(None) => parts.push(super::home::soul(bot)),
         Err(error) => parts.push(format!(

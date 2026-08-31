@@ -63,8 +63,8 @@ pub fn run(case: &Case) -> anyhow::Result<Trace> {
         }
         "house_tools" => {
             let names = house_tools::names().join(",");
-            extras.insert("equals".into(), names);
-            extras.insert("house_tools".into(), extras["equals"].clone());
+            extras.insert("equals".into(), names.clone());
+            extras.insert("house_tools".into(), names);
         }
         "cron_describe" => {
             let src = case

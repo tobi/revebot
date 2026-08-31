@@ -285,7 +285,7 @@ impl Storage {
     pub fn scan_branch(&self, scan: &BranchScan) -> Vec<&Entry> {
         let mut path: Vec<&Entry> = Vec::new();
         let mut cursor = scan.start.clone();
-        while let Some(id) = cursor {
+        while let Some(id) = cursor.take() {
             let Some(entry) = self.entries.get(&id) else {
                 break;
             };
@@ -298,7 +298,7 @@ impl Storage {
             if stop_type || stop_id {
                 break;
             }
-            cursor = entry.parent_id.clone();
+            cursor.clone_from(&entry.parent_id);
         }
         if scan.order == Order::OldestFirst {
             path.reverse();
@@ -486,21 +486,22 @@ mod tests {
     #[test]
     fn a_branch_scan_stops_inclusively_at_a_compaction() {
         let mut s = Storage::memory("s1");
-        let a = user("a");
-        let b = user("b").with_parent(Some(a.id.clone()));
-        let c = Entry::compaction("sum", vec![], 10, false).with_parent(Some(b.id.clone()));
-        let d = user("d").with_parent(Some(c.id.clone()));
-        for e in [&a, &b, &c, &d] {
-            s.commit(tx(vec![Write::entry(e.clone())])).unwrap();
+        let first = user("a");
+        let second = user("b").with_parent(Some(first.id.clone()));
+        let compaction =
+            Entry::compaction("sum", vec![], 10, false).with_parent(Some(second.id.clone()));
+        let fourth = user("d").with_parent(Some(compaction.id.clone()));
+        for entry in [&first, &second, &compaction, &fourth] {
+            s.commit(tx(vec![Write::entry(entry.clone())])).unwrap();
         }
         let scan = BranchScan {
-            start: Some(d.id.clone()),
+            start: Some(fourth.id.clone()),
             stop_at_type: Some("compaction".into()),
             order: Order::OldestFirst,
             ..Default::default()
         };
         let ids: Vec<_> = s.scan_branch(&scan).iter().map(|e| e.id.clone()).collect();
-        assert_eq!(ids, vec![c.id.clone(), d.id.clone()]);
+        assert_eq!(ids, vec![compaction.id.clone(), fourth.id.clone()]);
 
         // A filter applies after the stop.
         let only_messages = BranchScan {
@@ -512,11 +513,11 @@ mod tests {
             .iter()
             .map(|e| e.id.clone())
             .collect();
-        assert_eq!(ids, vec![d.id.clone()]);
+        assert_eq!(ids, vec![fourth.id.clone()]);
 
         // No stop: the whole path.
         let whole = BranchScan {
-            start: Some(d.id.clone()),
+            start: Some(fourth.id.clone()),
             ..Default::default()
         };
         assert_eq!(s.scan_branch(&whole).len(), 4);
@@ -568,8 +569,8 @@ mod tests {
         }
         for entry in s.scan_entries(Order::OldestFirst) {
             let mut cursor = entry.parent_id.clone();
-            while let Some(id) = cursor {
-                cursor = s.entry(&id).expect("parent must exist").parent_id.clone();
+            while let Some(id) = cursor.take() {
+                cursor.clone_from(&s.entry(&id).expect("parent must exist").parent_id);
             }
         }
     }

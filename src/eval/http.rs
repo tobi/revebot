@@ -93,9 +93,13 @@ fn settled_replies(body: &Value) -> usize {
             records
                 .iter()
                 .filter(|record| {
-                    record["status"] == "committed"
-                        && (record["entry"]["message"]["role"] == "assistant"
-                            || record["entry"]["type"] == "custom")
+                    record.get("status").and_then(Value::as_str) == Some("committed")
+                        && (record
+                            .pointer("/entry/message/role")
+                            .and_then(Value::as_str)
+                            == Some("assistant")
+                            || record.pointer("/entry/type").and_then(Value::as_str)
+                                == Some("custom"))
                 })
                 .count()
         })
@@ -119,7 +123,7 @@ fn trace_from_messages(body: &Value) -> Trace {
                 if role == "assistant" {
                     if let Some(a) = Assistant::from_message(message) {
                         if !a.text.is_empty() {
-                            final_text = a.text.clone();
+                            final_text.clone_from(&a.text);
                         }
                         for call in a.tool_calls {
                             tools.push(TraceTool {
@@ -151,7 +155,7 @@ fn trace_from_messages(body: &Value) -> Trace {
         final_text,
         transcript,
         tools,
-        extras: Default::default(),
+        extras: std::collections::BTreeMap::default(),
         root: None,
     }
 }
