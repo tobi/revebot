@@ -189,7 +189,8 @@ next idle run boundary; an in-flight drive keeps its captured model. The real te
 model: openrouter/x-ai/grok-4.6
 thinking: low
 sandbox:
-  image: ghcr.io/tobi/wrap:latest
+  image: ghcr.io/tobi/wrap:desktop
+  memory: 8192
   open: true
   secrets:
     - env: GITHUB_TOKEN
@@ -201,8 +202,8 @@ There is no `host-exec`, and omitting a secret does not create an invisible host
 
 ### Working directories and memory
 
-Every bot starts at `$HOME/workspace`, where HOME is `/workspace/agents/<id>`.
-The `cd` tool changes the conversation's cwd without moving HOME. Relative filesystem
+Every bot starts at `$HOME/workspace`, where the **agent** HOME is `/workspace/agents/<id>`.
+The guest Unix account is `user` (`HOME=/home/user`). The `cd` tool changes the conversation's cwd without moving agent HOME. Relative filesystem
 tools, bash and Lua `ctx.sh` follow cwd. Each incoming message carries a `<cwd>` header.
 `cd` reads the full guest ancestor chain of AGENTS.md files, root-to-leaf; nearest rules
 win. Existing workspace-root AGENTS.md still applies by ancestry, not as a persona file.

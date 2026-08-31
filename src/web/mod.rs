@@ -105,6 +105,11 @@ mod tests {
         assert!(html.contains("tool-name"));
         assert!(html.contains("Plugins"));
         assert!(html.contains("Search"));
+        assert!(html.contains("id=\"desktop\""));
+        assert!(html.contains("function loadDesktop"));
+        assert!(html.contains("function takeOverDesktop"));
+        assert!(html.contains("/api/desktop"));
+        assert!(html.contains("click to take over"));
         assert!(
             !html.contains("JSON.stringify(content)"),
             "assistant content parts must be parsed, not stringified"
