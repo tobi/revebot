@@ -444,8 +444,15 @@ async fn forward_events(
                     Some(Update::Working(Some(format!("Running {tool_name}"))))
                 }
             }
-            Kind::EntryAccepted { entry, .. } if entry.custom_type.as_deref() == Some("user_notice") => {
-                entry.payload.get("data").and_then(|v| v.get("text")).and_then(|v| v.as_str()).map(|text| Update::Item(Item::Assistant(text.into())))
+            Kind::EntryAccepted { entry, .. }
+                if entry.custom_type.as_deref() == Some("user_notice") =>
+            {
+                entry
+                    .payload
+                    .get("data")
+                    .and_then(|v| v.get("text"))
+                    .and_then(|v| v.as_str())
+                    .map(|text| Update::Item(Item::Assistant(text.into())))
             }
             Kind::ToolEnd {
                 tool_name,
