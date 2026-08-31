@@ -173,7 +173,22 @@ impl Tools for HouseTools {
                 "SendAgentMessage" => self.send_agent(arguments).await,
                 "SendUserMessage" => self.send_user(arguments).await,
                 "AskUserForSecret" => self.ask_secret(arguments, cancel).await,
-                other => self.inner.call_cancelled(other, arguments, cancel).await,
+                other => {
+                    if let Some(house) = self.house.upgrade()
+                        && let Some(def) = house.project.runtime.tool(other)
+                    {
+                        let source = match def.owner.as_deref() {
+                            Some(_) => Some("bot"),
+                            None => Some("workspace"),
+                        };
+                        house.usage.record(&super::usage::UsageEvent::plugin(
+                            &self.bot_id,
+                            other,
+                            source,
+                        ));
+                    }
+                    self.inner.call_cancelled(other, arguments, cancel).await
+                }
             }
         })
     }

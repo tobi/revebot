@@ -5,6 +5,7 @@ pub mod prompt;
 pub mod secret;
 pub mod serve;
 pub mod tools;
+pub mod usage;
 pub mod wrap;
 
 use std::collections::{BTreeMap, HashMap};
@@ -74,6 +75,7 @@ pub(crate) struct Inner {
     skill_seen: Mutex<HashMap<String, BTreeMap<String, u64>>>,
     /// One in-flight AskUserForSecret per bot.
     secret_asks: Mutex<HashMap<String, tokio::sync::oneshot::Sender<SecretAskResult>>>,
+    usage: usage::UsageLog,
 }
 
 #[derive(Debug, Clone)]
@@ -205,6 +207,7 @@ impl House {
             last_fired: Mutex::new(HashMap::new()),
             skill_seen: Mutex::new(HashMap::new()),
             secret_asks: Mutex::new(HashMap::new()),
+            usage: usage::UsageLog::open(&project.state_dir()),
         });
         *inner.me.lock() = Arc::downgrade(&inner);
 
@@ -381,6 +384,15 @@ impl Inner {
             seen.insert(bot.to_string(), next);
             (changed, removed)
         };
+        for skill in wrap::skills_in(text, &skills) {
+            let source = if skill.path.starts_with(self.project.bot_dir(bot)) {
+                "bot"
+            } else {
+                "workspace"
+            };
+            self.usage
+                .record(&usage::UsageEvent::skill(bot, &skill.name, source));
+        }
         let wrapped = wrap::wrap_user_turn_at(
             text,
             &self.ready_profiles(),

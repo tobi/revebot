@@ -71,6 +71,8 @@ src/
                       workspace/agents/<id>/, never a root instructions.md
   tui/                inline ratatui renderer and the terminal session
   house/              multi-bot house: roster, supervisors, HTTP/WS, routine ticker;
+                      usage.jsonl in `.reve/` logs skill `/name` and Lua plugin
+                      invocations (one JSON object per line) for later stats.
                       wrap.rs timestamps + [agent] arrivals; kernel before instructions.md.
                       SendUserMessage emits UserNotice on the bot harness
                       stream (the chat websocket), not only house_events.
