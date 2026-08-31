@@ -20,11 +20,11 @@
 //! The rule: a blank line that is not inside a fenced code block ends a
 //! top-level block. Everything up to it is final.
 //!
-//! Two things make that safe here that would not be safe for a full CommonMark
+//! Two things make that safe here that would not be safe for a full `CommonMark`
 //! renderer:
 //!
 //! * The renderer is line-based, so a later line never restyles an earlier one.
-//!   A loose list (`- a`, blank, `- b`) is one list to CommonMark, but two
+//!   A loose list (`- a`, blank, `- b`) is one list to `CommonMark`, but two
 //!   independently rendered bullets here, so freezing after the blank is fine.
 //! * Setext headings (`text` then `===`, where a later line changes the line
 //!   above) are not supported, so that hazard does not exist.

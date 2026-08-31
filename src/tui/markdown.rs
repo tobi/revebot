@@ -140,7 +140,7 @@ pub fn inline(text: &str, base: Style) -> Vec<Span<'static>> {
         if let Some(end) = delimited(&rest, "`") {
             flush(&mut buffer, &mut spans);
             spans.push(Span::styled(rest[1..end].to_string(), theme::code()));
-            i += rest[..end + 1].chars().count();
+            i += rest[..=end].chars().count();
         } else if let Some(end) = delimited(&rest, "**") {
             flush(&mut buffer, &mut spans);
             spans.push(Span::styled(
@@ -154,7 +154,7 @@ pub fn inline(text: &str, base: Style) -> Vec<Span<'static>> {
                 rest[1..end].to_string(),
                 base.add_modifier(Modifier::ITALIC),
             ));
-            i += rest[..end + 1].chars().count();
+            i += rest[..=end].chars().count();
         } else {
             buffer.push(chars[i]);
             i += 1;

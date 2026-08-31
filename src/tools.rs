@@ -214,7 +214,7 @@ impl Toolbox {
     fn options(&self) -> ExecOptions {
         self.context
             .as_ref()
-            .map(|c| c.options())
+            .map(super::working_directory::Context::options)
             .unwrap_or_default()
     }
 

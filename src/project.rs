@@ -304,7 +304,7 @@ impl Project {
 
     pub fn latest_bot_session_checked(&self, bot: &str, name: &str) -> Result<Option<PathBuf>> {
         crate::house::profile::validate_id(bot)
-            .and_then(|_| crate::house::profile::validate_id(name))
+            .and_then(|()| crate::house::profile::validate_id(name))
             .map_err(|e| ProjectError::Profile(e.to_string()))?;
         let relative = Path::new("workspace/agents").join(bot).join("sessions");
         let mut files: Vec<_> = crate::script_fs::files(&self.root, &relative)

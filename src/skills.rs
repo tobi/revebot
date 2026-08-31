@@ -172,7 +172,9 @@ fn parse(text: &str, path: &Path) -> Result<((String, String), String), SkillErr
             folding_desc = false;
             continue;
         }
-        if !closed {
+        if closed {
+            body.push(line);
+        } else {
             if folding_desc {
                 if line.starts_with(' ') || line.starts_with('\t') {
                     let bit = line.trim();
@@ -207,8 +209,6 @@ fn parse(text: &str, path: &Path) -> Result<((String, String), String), SkillErr
                     desc = Some(unquote(rest));
                 }
             }
-        } else {
-            body.push(line);
         }
     }
     let name = name

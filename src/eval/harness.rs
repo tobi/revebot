@@ -1,4 +1,4 @@
-//! Harness runner: ScriptedModel or live HttpModel, recording tools, no VM.
+//! Harness runner: `ScriptedModel` or live `HttpModel`, recording tools, no VM.
 
 use serde_json::{Map, Value};
 use std::path::PathBuf;
@@ -291,7 +291,7 @@ pub fn try_live_model() -> Option<Arc<dyn Model>> {
 }
 
 /// Default live id when no key is set, so the missing-env error names
-/// `OPENROUTER_API_KEY` rather than an unused OpenAI key.
+/// `OPENROUTER_API_KEY` rather than an unused `OpenAI` key.
 const DEFAULT_LIVE_MODEL: &str = "openrouter/x-ai/grok-4.6";
 
 fn load_live_model() -> anyhow::Result<Arc<dyn Model>> {
@@ -312,7 +312,7 @@ fn load_live_model() -> anyhow::Result<Arc<dyn Model>> {
 }
 
 /// Choose a live model: `REVEBOT_EVAL_MODEL` wins, otherwise the first
-/// configured provider whose `$ENV` key is actually set, preferring OpenRouter.
+/// configured provider whose `$ENV` key is actually set, preferring `OpenRouter`.
 fn pick_live_spec(
     models: &Models,
     eval_model: Option<&str>,

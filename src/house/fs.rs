@@ -93,7 +93,7 @@ pub fn list(root: &Path, rel: &str) -> Result<FsList, String> {
     for ent in rd {
         let ent = ent.map_err(|e| e.to_string())?;
         let name = ent.file_name().to_string_lossy().into_owned();
-        let is_dir = ent.metadata().map(|m| m.is_dir()).unwrap_or(false);
+        let is_dir = ent.metadata().is_ok_and(|m| m.is_dir());
         if skip_name(&path, &name, is_dir) {
             continue;
         }

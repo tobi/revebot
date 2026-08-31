@@ -69,8 +69,7 @@ impl Context {
         let path = session
             .register::<State>(Namespace::FactCustom, &key)
             .await?
-            .map(|(s, _)| s.path)
-            .unwrap_or_else(|| format!("{}/workspace", self.home));
+            .map_or_else(|| format!("{}/workspace", self.home), |(s, _)| s.path);
         self.change(session, lane, sandbox, &path).await?;
         Ok(())
     }

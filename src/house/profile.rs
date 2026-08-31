@@ -35,7 +35,7 @@ impl Profile {
         let id = dir.file_name()?.to_str()?;
         let root = dir.parent()?;
         let text =
-            crate::script_fs::read_text(root, &Path::new(id).join("profile.json"), 131072).ok()?;
+            crate::script_fs::read_text(root, &Path::new(id).join("profile.json"), 131_072).ok()?;
         Self::parse_for(id, &text).ok()
     }
 
@@ -72,7 +72,7 @@ impl Profile {
     pub fn load_for(root: &Path, id: &str) -> anyhow::Result<Self> {
         validate_id(id)?;
         let path = Path::new("workspace/agents").join(id).join("profile.json");
-        let text = crate::script_fs::read_text(root, &path, 131072)?;
+        let text = crate::script_fs::read_text(root, &path, 131_072)?;
         Self::parse_for(id, &text)
     }
 
@@ -104,7 +104,7 @@ pub fn scan_checked(root: &Path) -> anyhow::Result<Vec<Profile>> {
             .ok_or_else(|| anyhow::anyhow!("bot directory is not UTF-8"))?;
         validate_id(id)?;
         let path = relative.join("profile.json");
-        match crate::script_fs::read_text(root, &path, 131072) {
+        match crate::script_fs::read_text(root, &path, 131_072) {
             Ok(text) => profiles.push(Profile::parse_for(id, &text)?),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),

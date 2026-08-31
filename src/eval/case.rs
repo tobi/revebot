@@ -253,7 +253,7 @@ pub fn assign_path_id(cases_dir: &Path, path: &Path, case: &mut Case) {
         .with_extension("")
         .to_string_lossy()
         .replace('\\', "/")
-        .to_string();
+        .clone();
 }
 
 fn compile_test(case: &mut Case) -> anyhow::Result<()> {

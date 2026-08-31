@@ -330,10 +330,10 @@ fn projection(
             match block.meta.tier {
                 Tier::Profile => profile.push(block.fact.clone()),
                 Tier::Log if age <= Duration::days(30) => {
-                    recent.push((block.meta.at, block.fact.clone()))
+                    recent.push((block.meta.at, block.fact.clone()));
                 }
                 Tier::Note if age <= Duration::days(2) => {
-                    recent.push((block.meta.at, block.fact.clone()))
+                    recent.push((block.meta.at, block.fact.clone()));
                 }
                 _ => omitted += 1,
             }

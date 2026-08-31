@@ -200,9 +200,18 @@ impl Default for Policy {
             // The default image is already provisioned. An agent that points
             // at a bare image turns this back on in `sandbox.lua`.
             provision: false,
-            packages: APT_PACKAGES.iter().map(|s| s.to_string()).collect(),
-            mise: MISE_TOOLS.iter().map(|s| s.to_string()).collect(),
-            npm: NPM_TOOLS.iter().map(|s| s.to_string()).collect(),
+            packages: APT_PACKAGES
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+            mise: MISE_TOOLS
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+            npm: NPM_TOOLS
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             open: true,
             allow_hosts: Vec::new(),
             secrets: Vec::new(),
@@ -274,8 +283,7 @@ impl Policy {
         let root = host_workspace.parent().unwrap_or(host_workspace);
         let label: String = root
             .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "agent".into())
+            .map_or_else(|| "agent".into(), |n| n.to_string_lossy().to_string())
             .chars()
             .map(|c| {
                 if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
@@ -407,7 +415,7 @@ pub struct Sandbox {
     host_workspace: PathBuf,
     /// House root (parent of `.reve/`). `file:` secret sources resolve here.
     secret_root: PathBuf,
-    /// Live secret list. Starts as `policy.secrets`; AskUserForSecret upserts
+    /// Live secret list. Starts as `policy.secrets`; `AskUserForSecret` upserts
     /// here so a save takes effect without rebuilding the VM fingerprint.
     secrets: parking_lot::Mutex<Vec<Secret>>,
     name: String,
@@ -511,8 +519,7 @@ impl Sandbox {
         let fingerprint = policy.fingerprint(&host_workspace);
         let reusable = tokio::fs::read_to_string(&fingerprint_path)
             .await
-            .map(|text| text.trim() == fingerprint)
-            .unwrap_or(false);
+            .is_ok_and(|text| text.trim() == fingerprint);
         if reusable {
             // Refresh source references while stopped. Microsandbox resolves
             // their values only when the VM starts; no credential is persisted.
@@ -741,7 +748,7 @@ impl Sandbox {
                                 collected.map_err(|e| SandboxError::Failed(e.to_string()))?;
                             Ok(encode(&output, false))
                         }
-                        _ = rx.cancelled() => {
+                        () = rx.cancelled() => {
                             let _ = control.kill().await;
                             Ok(Output {
                                 stdout: String::new(),
@@ -951,7 +958,7 @@ impl Sandbox {
         let script = self.policy.provision_script();
         let options = ExecOptions {
             cwd: Some("/".into()),
-            timeout: Some(std::time::Duration::from_secs(900)),
+            timeout: Some(std::time::Duration::from_mins(15)),
             ..Default::default()
         };
         match self.exec(&script, options, None).await {
@@ -1007,17 +1014,15 @@ impl Sandbox {
         let script = format!(
             "set -eu\n\
              uid={uid}; gid={gid}\n\
-             cur_gid=$(getent group {user} | cut -d: -f3)\n\
+             cur_gid=$(getent group {GUEST_USER} | cut -d: -f3)\n\
              if [ \"$cur_gid\" != \"$gid\" ]; then\n\
-               if getent group \"$gid\" >/dev/null; then groupmod -o -g \"$gid\" {user}; else groupmod -g \"$gid\" {user}; fi\n\
+               if getent group \"$gid\" >/dev/null; then groupmod -o -g \"$gid\" {GUEST_USER}; else groupmod -g \"$gid\" {GUEST_USER}; fi\n\
              fi\n\
-             cur_uid=$(id -u {user})\n\
-             if [ \"$cur_uid\" != \"$uid\" ]; then usermod -o -u \"$uid\" -g \"$gid\" {user}; fi\n\
+             cur_uid=$(id -u {GUEST_USER})\n\
+             if [ \"$cur_uid\" != \"$uid\" ]; then usermod -o -u \"$uid\" -g \"$gid\" {GUEST_USER}; fi\n\
              if [ \"$cur_uid\" != \"$uid\" ] || [ \"$cur_gid\" != \"$gid\" ]; then\n\
-               chown -R \"$uid:$gid\" {home} /opt/mise\n\
+               chown -R \"$uid:$gid\" {GUEST_HOME} /opt/mise\n\
              fi\n",
-            user = GUEST_USER,
-            home = GUEST_HOME,
         );
         let output = self.exec_as("root", &script).await?;
         if !output.success {
@@ -1088,8 +1093,7 @@ fn encode(output: &microsandbox::ExecOutput, cancelled: bool) -> Output {
 fn secret_root_from(state_dir: &Path) -> PathBuf {
     state_dir
         .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| state_dir.to_path_buf())
+        .map_or_else(|| state_dir.to_path_buf(), Path::to_path_buf)
 }
 
 fn runtime_secret_digests(secrets: &[Secret], root: &Path) -> BTreeMap<String, String> {
@@ -1243,6 +1247,10 @@ fn secret_value(secret: &Secret, root: &Path) -> Option<String> {
 
 /// Resolve a secret to a host env var microsandbox can read. Command, file, and
 /// HTTP sources are copied into `REVEBOT_SECRET_<env>` for this process.
+#[expect(
+    unsafe_code,
+    reason = "Rust 2024 requires an explicit boundary for process environment mutation; this writes only Reve-owned secret variables"
+)]
 fn bind_secret(secret: &Secret, root: &Path) -> Option<String> {
     let needs_copy = command_secret_source(&secret.source).is_some()
         || file_secret_path(&secret.source, root).is_some()
@@ -1452,9 +1460,7 @@ async fn build(
     secret_root: &Path,
 ) -> Result<(MsbSandbox, Option<Desktop>)> {
     let wrap = is_wrap_image(&policy.image);
-    let host_uid = host_identity(host_workspace)
-        .map(|(uid, _)| uid)
-        .unwrap_or(0);
+    let host_uid = host_identity(host_workspace).map_or(0, |(uid, _)| uid);
     let mut builder = MsbSandbox::builder(name.to_string())
         .image(policy.image.clone())
         .root_disk(policy.root_disk.mib())
@@ -1599,12 +1605,16 @@ pub mod tokio_util_lite {
                     return;
                 }
             }
-            std::future::pending::<()>().await
+            std::future::pending::<()>().await;
         }
     }
 }
 
 #[cfg(test)]
+#[expect(
+    unsafe_code,
+    reason = "tests serialize process-wide HOME mutation with HOME_LOCK"
+)]
 mod tests {
     use super::*;
 
@@ -1857,10 +1867,13 @@ hosts:
         let _guard = HOME_LOCK.lock().unwrap();
         let prev = std::env::var("HOME").ok();
         // SAFETY: test-only HOME swap, restored before return; serialized by HOME_LOCK.
+        // SAFETY: HOME_LOCK serializes this test-only process-wide environment change.
         unsafe { std::env::set_var("HOME", home) };
         let out = f();
         match prev {
+            // SAFETY: HOME_LOCK still holds while restoring the prior value.
             Some(h) => unsafe { std::env::set_var("HOME", h) },
+            // SAFETY: HOME_LOCK still holds while restoring the prior value.
             None => unsafe { std::env::remove_var("HOME") },
         }
         out

@@ -1,4 +1,4 @@
-//! The OpenAI Responses API.
+//! The `OpenAI` Responses API.
 //!
 //! Only the streaming path is implemented, because that is the one reve uses:
 //! text arrives as `response.output_text.delta`, tool calls are announced by
@@ -122,7 +122,7 @@ impl StreamState {
             return Err(failure);
         }
         for (index, (_, call)) in self.calls.iter_mut().enumerate() {
-            let raw = self.partial.get(index).map(String::as_str).unwrap_or("{}");
+            let raw = self.partial.get(index).map_or("{}", String::as_str);
             // A truncated stream can leave partial JSON; an empty object is a
             // better answer than failing the whole turn.
             call.arguments = serde_json::from_str::<Value>(if raw.is_empty() { "{}" } else { raw })

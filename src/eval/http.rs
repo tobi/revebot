@@ -89,7 +89,7 @@ async fn wait_for_assistant(
 fn settled_replies(body: &Value) -> usize {
     body.get("records")
         .and_then(Value::as_array)
-        .map(|records| {
+        .map_or(0, |records| {
             records
                 .iter()
                 .filter(|record| {
@@ -99,7 +99,6 @@ fn settled_replies(body: &Value) -> usize {
                 })
                 .count()
         })
-        .unwrap_or(0)
 }
 
 fn trace_from_messages(body: &Value) -> Trace {

@@ -23,8 +23,8 @@ async fn offline_eval_suite_is_green() {
         "expected offline cases, got {:?}",
         report.cases.iter().map(|c| &c.id).collect::<Vec<_>>()
     );
-    assert_eq!(report.failed, 0, "{:?}", report);
-    assert_eq!(report.errored, 0, "{:?}", report);
+    assert_eq!(report.failed, 0, "{report:?}");
+    assert_eq!(report.errored, 0, "{report:?}");
     assert!(report.skipped >= 1, "live cases should skip without --live");
 }
 

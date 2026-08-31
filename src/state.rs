@@ -663,6 +663,7 @@ impl PendingEntry {
         }
     }
 
+    #[must_use]
     pub fn display(mut self, run: &str) -> Self {
         self.display = Some(serde_json::json!({"run_id":run,"audience":"chat"}));
         self
@@ -715,7 +716,7 @@ mod tests {
     fn operation_state_round_trips_with_tagged_unions() {
         let state = OperationState::Run(RunState {
             tools_started: false,
-            accepted_writes: Default::default(),
+            accepted_writes: Box::default(),
             control: Control::CancelRequested {
                 requested_at: 5,
                 drained_steer: vec![EntryId::from("a")],

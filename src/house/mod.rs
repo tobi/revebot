@@ -89,7 +89,7 @@ pub(crate) struct Inner {
     /// Per-bot skill fingerprints so a created/edited SKILL.md is attached to
     /// the next user turn. Empty map = first snapshot, not "all new".
     skill_seen: Mutex<HashMap<String, BTreeMap<String, u64>>>,
-    /// One in-flight AskUserForSecret per bot.
+    /// One in-flight `AskUserForSecret` per bot.
     secret_asks: Mutex<HashMap<String, tokio::sync::oneshot::Sender<SecretAskResult>>>,
     usage: usage::UsageLog,
     memory_edits: tokio::sync::Mutex<()>,
@@ -867,7 +867,7 @@ impl Inner {
             result = rx => {
                 result.map_err(|_| "secret prompt was dropped".to_string())
             }
-            _ = cancelled => {
+            () = cancelled => {
                 self.secret_asks.lock().remove(bot);
                 Err("cancelled".into())
             }
@@ -1526,7 +1526,7 @@ fn spawn_supervisor(
             drives.spawn(async move {
                 let _ = h.resume_all().await;
                 match h.kick(MAIN_LANE).await {
-                    Ok(_) | Err(HarnessError::Idle(_)) | Err(HarnessError::Busy(_)) => {}
+                    Ok(_) | Err(HarnessError::Idle(_) | HarnessError::Busy(_)) => {}
                     Err(_) => {}
                 }
             });
@@ -1558,7 +1558,7 @@ fn spawn_supervisor(
                             let h = harness.clone();
                             drives.spawn(async move {
                                 match h.kick(MAIN_LANE).await {
-                                    Ok(_) | Err(HarnessError::Idle(_)) | Err(HarnessError::Busy(_)) => {}
+                                    Ok(_) | Err(HarnessError::Idle(_) | HarnessError::Busy(_)) => {}
                                     Err(_) => {}
                                 }
                             });

@@ -234,8 +234,7 @@ fn render_at(
 /// right where it is no longer next to what it times.
 fn terminal_width() -> usize {
     crossterm::terminal::size()
-        .map(|(w, _)| w as usize)
-        .unwrap_or(80)
+        .map_or(80, |(w, _)| w as usize)
         .clamp(24, 88)
 }
 
@@ -244,7 +243,7 @@ fn human(elapsed: Duration) -> String {
     if secs < 10.0 {
         format!("{secs:.1}s")
     } else {
-        format!("{:.0}s", secs)
+        format!("{secs:.0}s")
     }
 }
 

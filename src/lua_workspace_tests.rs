@@ -14,7 +14,7 @@ fn workspace_lua_has_no_ambient_host_authority() {
     source(
         dir.path(),
         "workspace/plugins/check.lua",
-        r#"
+        r"
         for _, name in ipairs({ 'io', 'os', 'package', 'require', 'debug',
             'load', 'loadfile', 'dofile', 'print', 'warn', 'collectgarbage',
             'agent', 'sandbox', 'HOST_SECRET', 'saved_open' }) do
@@ -30,7 +30,7 @@ fn workspace_lua_has_no_ambient_host_authority() {
             local values = {3, 1, 2}; table.sort(values)
             return table.concat(values, ',') .. ':' .. utf8.len('hello')
         end })
-    "#,
+    ",
     );
     let mut rt = Runtime::new().unwrap();
     rt.lua
@@ -111,7 +111,7 @@ async fn workspace_guards_and_routines_execute_in_the_restricted_state() {
     source(
         dir.path(),
         "workspace/plugins/guard.lua",
-        r#"
+        r"
         guard('guard', { tools={'bash'}, run=function(event)
             assert(io == nil and os == nil)
             if event.args.command == 'blocked' then return {block='not allowed', terminate=true} end
@@ -120,17 +120,17 @@ async fn workspace_guards_and_routines_execute_in_the_restricted_state() {
             assert(io == nil and ctx.bot == 'reviewer')
             ctx.send(ctx.bot, 'tick')
         end})
-    "#,
+    ",
     );
     source(
         dir.path(),
         "workspace/routines/check.lua",
-        r#"
+        r"
         routine('routine', {cron='0 9 * * *', run=function(ctx)
             assert(io == nil and os == nil)
             ctx.send(ctx.bot, 'morning')
         end})
-    "#,
+    ",
     );
     let mut rt = Runtime::new().unwrap();
     rt.load_workspace_tools(dir.path(), Path::new("workspace/plugins"), Some("reviewer"))
@@ -289,7 +289,7 @@ async fn change_observers_are_filtered_scoped_and_errors_do_not_veto_other_obser
     source(
         dir.path(),
         "workspace/plugins/changes.lua",
-        r#"
+        r"
         on_change('bad', {resources={'memory'}, run=function(event, ctx)
             ctx.send(ctx.bot, 'must not leak'); error('broken observer')
         end})
@@ -297,14 +297,14 @@ async fn change_observers_are_filtered_scoped_and_errors_do_not_veto_other_obser
             assert(io == nil and ctx.bot == 'miku' and ctx.cwd == '/repo')
             ctx.send(ctx.bot, event.resources[1])
         end})
-    "#,
+    ",
     );
     source(
         dir.path(),
         "workspace/agents/qmd/plugins/private.lua",
-        r#"
+        r"
         on_change('private', {include_unknown=true, run=function() error('wrong owner called') end})
-    "#,
+    ",
     );
     let mut rt = Runtime::new().unwrap();
     rt.load_workspace_tools(dir.path(), Path::new("workspace/plugins"), None)

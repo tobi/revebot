@@ -882,8 +882,8 @@ impl Driver {
                     let wait = std::time::Duration::from_millis((*not_before - now) as u64);
                     let mut cancel = self.cancel.clone();
                     tokio::select! {
-                        _ = tokio::time::sleep(wait) => {}
-                        _ = cancel.cancelled() => {}
+                        () = tokio::time::sleep(wait) => {}
+                        () = cancel.cancelled() => {}
                     }
                     return Ok(Step::Continue(self.reload(current).await?));
                 }
@@ -1001,7 +1001,7 @@ impl Driver {
         let response = self.model.respond(request, &on_delta);
         let outcome = tokio::select! {
             biased;
-            _ = cancel.cancelled() => None,
+            () = cancel.cancelled() => None,
             response = response => Some(response),
         };
         let assistant = match outcome {
@@ -1393,7 +1393,7 @@ impl Driver {
                 let RunPhase::Tools { batch: ref mut b } = next.phase else {
                     unreachable!()
                 };
-                for c in b.calls.iter_mut() {
+                for c in &mut b.calls {
                     if c.source_index() == index {
                         *c = ToolCallState::EffectPending {
                             source_index: index,
@@ -1611,8 +1611,7 @@ impl Driver {
             .session
             .register::<serde_json::Map<String, Value>>(Namespace::OpToolArgs, &key)
             .await?
-            .map(|(args, _)| args)
-            .unwrap_or_else(|| call.arguments.clone());
+            .map_or_else(|| call.arguments.clone(), |(args, _)| args);
         let entry = Entry::message(tool_result_message(
             call, content, is_error, terminate, synthetic,
         ))
@@ -1623,7 +1622,7 @@ impl Driver {
         let RunPhase::Tools { batch: ref mut b } = next.phase else {
             unreachable!()
         };
-        for c in b.calls.iter_mut() {
+        for c in &mut b.calls {
             if c.result_entry_id() == result_entry_id {
                 *c = ToolCallState::Completed {
                     source_index: c.source_index(),
@@ -1707,7 +1706,7 @@ impl Driver {
         let response = self.model.respond(request, &quiet);
         let outcome = tokio::select! {
             biased;
-            _ = cancel.cancelled() => None,
+            () = cancel.cancelled() => None,
             response = response => Some(response),
         };
         match outcome {
@@ -1816,8 +1815,8 @@ impl Driver {
                         let wait = std::time::Duration::from_millis((*not_before - now) as u64);
                         let mut cancel = self.cancel.clone();
                         tokio::select! {
-                            _ = tokio::time::sleep(wait) => {}
-                            _ = cancel.cancelled() => {}
+                            () = tokio::time::sleep(wait) => {}
+                            () = cancel.cancelled() => {}
                         }
                         return Ok(Structural::Waited);
                     }

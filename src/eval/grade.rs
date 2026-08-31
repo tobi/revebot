@@ -88,9 +88,7 @@ fn grade_one(grader: &Grader, trace: &Trace) -> GradeResult {
         }
         Grader::Regex { pattern, target } => {
             let hay = target_text(trace, *target);
-            let ok = regex::Regex::new(pattern)
-                .map(|re| re.is_match(&hay))
-                .unwrap_or(false);
+            let ok = regex::Regex::new(pattern).is_ok_and(|re| re.is_match(&hay));
             pass("regex", ok, format!("{pattern} vs {target:?}"))
         }
         Grader::Exact { text, target } => {

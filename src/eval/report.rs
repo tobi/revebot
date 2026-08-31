@@ -218,7 +218,7 @@ impl Report {
                 }
                 (None, Status::Passed) => lines.push(format!("new pass   {}", case.id)),
                 (None, Status::Failed | Status::Error) => {
-                    lines.push(format!("new fail   {}", case.id))
+                    lines.push(format!("new fail   {}", case.id));
                 }
                 _ => {}
             }

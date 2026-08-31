@@ -142,7 +142,7 @@ impl Assistant {
         for part in message.get("content")?.as_array()? {
             match part.get("type").and_then(Value::as_str) {
                 Some("text") => {
-                    text.push_str(part.get("text").and_then(Value::as_str).unwrap_or(""))
+                    text.push_str(part.get("text").and_then(Value::as_str).unwrap_or(""));
                 }
                 Some("toolCall") => tool_calls.push(ToolCall {
                     id: part

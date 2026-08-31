@@ -173,28 +173,27 @@ impl Harness {
 
     async fn publish_accepted(&self, lane: &str, op: Option<&str>, id: &EntryId) -> Result<()> {
         if let Some(record) = self.session.log_record(id.clone()).await? {
-            match record.status {
-                crate::log::Status::Committed => self.emit(
+            if record.status == crate::log::Status::Committed {
+                self.emit(
                     lane,
                     op,
                     Kind::EntryAdded {
                         entry: record.entry,
                     },
-                ),
-                _ => {
-                    let entry = match op {
-                        Some(op) => record.entry.display(op, "chat"),
-                        None => record.entry,
-                    };
-                    self.emit(
-                        lane,
-                        op,
-                        Kind::EntryAccepted {
-                            entry,
-                            order: record.order,
-                        },
-                    );
-                }
+                );
+            } else {
+                let entry = match op {
+                    Some(op) => record.entry.display(op, "chat"),
+                    None => record.entry,
+                };
+                self.emit(
+                    lane,
+                    op,
+                    Kind::EntryAccepted {
+                        entry,
+                        order: record.order,
+                    },
+                );
             }
         }
         Ok(())
@@ -921,9 +920,10 @@ impl Harness {
 
     fn driver(&self, cancel: CancelRx, configuration: &LaneConfiguration) -> Driver {
         let sources = self.sources.lock().unwrap().clone();
-        let model = sources
-            .map(|sources| (sources.model)(configuration))
-            .unwrap_or_else(|| self.model.clone());
+        let model = sources.map_or_else(
+            || self.model.clone(),
+            |sources| (sources.model)(configuration),
+        );
         Driver {
             session: self.session.clone(),
             model,

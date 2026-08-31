@@ -248,10 +248,10 @@ fn text_of(message: &Value) -> String {
         for block in blocks {
             match block.get("type").and_then(Value::as_str) {
                 Some("text") => {
-                    out.push_str(block.get("text").and_then(Value::as_str).unwrap_or(""))
+                    out.push_str(block.get("text").and_then(Value::as_str).unwrap_or(""));
                 }
                 Some("toolResult") => {
-                    out.push_str(block.get("content").and_then(Value::as_str).unwrap_or(""))
+                    out.push_str(block.get("content").and_then(Value::as_str).unwrap_or(""));
                 }
                 _ => {}
             }

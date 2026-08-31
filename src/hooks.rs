@@ -137,22 +137,27 @@ pub struct Outcome<T> {
 }
 
 impl Hooks {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    #[must_use]
     pub fn on_before_run(mut self, h: Handler<BeforeRunEvent, Option<BeforeRunResult>>) -> Self {
         self.before_run.push(h);
         self
     }
+    #[must_use]
     pub fn on_before_tool(mut self, h: Handler<BeforeToolEvent, Option<BeforeToolResult>>) -> Self {
         self.before_tool.push(h);
         self
     }
+    #[must_use]
     pub fn on_after_tool(mut self, h: Handler<AfterToolEvent, Option<AfterToolResult>>) -> Self {
         self.after_tool.push(h);
         self
     }
+    #[must_use]
     pub fn on_before_run_end(
         mut self,
         h: Handler<BeforeRunEndEvent, Option<BeforeRunEndResult>>,
@@ -160,6 +165,7 @@ impl Hooks {
         self.before_run_end.push(h);
         self
     }
+    #[must_use]
     pub fn on_before_compaction(
         mut self,
         h: Handler<BeforeCompactionEvent, Option<BeforeCompactionResult>>,
@@ -167,6 +173,7 @@ impl Hooks {
         self.before_compaction.push(h);
         self
     }
+    #[must_use]
     pub fn on_transform_context(
         mut self,
         h: Handler<TransformContextEvent, Option<Vec<Entry>>>,

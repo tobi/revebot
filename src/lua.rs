@@ -724,7 +724,10 @@ impl Runtime {
         let sh = lua.create_async_function(move |_, command: String| {
             let sandbox = sh_sandbox.clone();
             let cancel = sh_cancel.clone();
-            let options = sh_context.as_ref().map(|c| c.options()).unwrap_or_default();
+            let options = sh_context
+                .as_ref()
+                .map(super::working_directory::Context::options)
+                .unwrap_or_default();
             async move {
                 let output = sandbox
                     .exec(&command, options, cancel)
@@ -740,10 +743,10 @@ impl Runtime {
             }
         })?;
         ctx.set("sh", sh)?;
-        let cwd = context
-            .as_ref()
-            .map(|c| c.cwd())
-            .unwrap_or_else(|| sandbox.workdir().to_string());
+        let cwd = context.as_ref().map_or_else(
+            || sandbox.workdir().to_string(),
+            super::working_directory::Context::cwd,
+        );
         ctx.set("workdir", cwd.clone())?;
         ctx.set("cwd", cwd)?;
         if let Some(context) = &context {
@@ -761,7 +764,7 @@ impl Runtime {
         let lua_args = lua.to_value(&Value::Object(args))?;
         let result: LuaValue = function.call_async((lua_args, ctx)).await?;
         Ok(match result {
-            LuaValue::String(s) => s.to_string_lossy().to_string(),
+            LuaValue::String(s) => s.to_string_lossy().clone(),
             LuaValue::Nil => String::new(),
             other => {
                 let json: Value = lua.from_value(other)?;
@@ -1226,9 +1229,9 @@ mod tests {
         let path = write(
             dir.path(),
             "sandbox.lua",
-            r#"
+            r"
             sandbox { mount_workspace = false, provision = true }
-        "#,
+        ",
         );
         let mut rt = Runtime::new().unwrap();
         rt.load_sandbox(&path).unwrap();

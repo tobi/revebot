@@ -358,6 +358,10 @@ async fn cancelling_kills_the_guest_command() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "boots a real microVM"]
+#[expect(
+    unsafe_code,
+    reason = "the test serializes process environment mutation while testing secret rotation"
+)]
 async fn runtime_secrets_rotate_without_a_rebuild_and_deleted_secrets_are_revoked() {
     const NAME: &str = "reve-it-secret-runtime";
     const SOURCE: &str = "REVE_IT_HOST_SECRET_7A31";

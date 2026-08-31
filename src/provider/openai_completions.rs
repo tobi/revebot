@@ -1,4 +1,4 @@
-//! The OpenAI Chat Completions API.
+//! The `OpenAI` Chat Completions API.
 //!
 //! Text and tool calls arrive as deltas under `choices[0].delta`. Tool-call
 //! arguments are partial JSON strings and are assembled by their stable index.

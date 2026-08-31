@@ -235,7 +235,7 @@ fn resolve_env(
 mod tests {
     use super::*;
 
-    const SAMPLE: &str = r#"
+    const SAMPLE: &str = r"
 providers:
   openai:
     baseUrl: https://api.openai.com/v1
@@ -255,7 +255,7 @@ providers:
     compat:
       supportsStore: false
       maxTokensField: max_tokens
-"#;
+";
 
     #[test]
     fn a_literal_api_key_is_kept_for_local_dummy_servers() {

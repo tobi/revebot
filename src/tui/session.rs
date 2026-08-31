@@ -63,11 +63,10 @@ pub async fn run(project: Project, sandbox: Arc<Sandbox>) -> anyhow::Result<()> 
     let (updates, updates_rx) = mpsc::channel(256);
     let (actions, mut actions_rx) = mpsc::channel(64);
 
-    let location = project
-        .root
-        .file_name()
-        .map(|n| format!("…/{}", n.to_string_lossy()))
-        .unwrap_or_else(|| project.root.display().to_string());
+    let location = project.root.file_name().map_or_else(
+        || project.root.display().to_string(),
+        |n| format!("…/{}", n.to_string_lossy()),
+    );
     let mut app = App::new(
         project
             .runtime
@@ -832,7 +831,7 @@ fn collect_files(root: &Path, directory: &Path, out: &mut Vec<Candidate>, depth:
             let Ok(relative) = path.strip_prefix(root) else {
                 continue;
             };
-            let bytes = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+            let bytes = entry.metadata().map_or(0, |metadata| metadata.len());
             out.push(Candidate {
                 value: format!("@{}", relative.to_string_lossy()),
                 detail: file_size(bytes),

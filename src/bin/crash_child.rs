@@ -1,7 +1,7 @@
 //! A process that dies between intent and effect, on purpose.
 //!
 //! Used by `tests/crash.rs`. It opens a JSONL session, starts a run whose tool
-//! blocks forever, and waits to be SIGKILLed — so the session on disk ends
+//! blocks forever, and waits to be `SIGKILLed` — so the session on disk ends
 //! with a committed tool intent whose result never arrived, and quite possibly
 //! a torn last line. That is the exact state recovery has to reduce, and the
 //! only honest way to produce it is to really kill a real process.
@@ -49,7 +49,7 @@ impl Tools for HangingTool {
             // on disk says "this tool is running" the moment we signal.
             std::fs::write(&self.ready, "ready").expect("signal readiness");
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                tokio::time::sleep(std::time::Duration::from_hours(1)).await;
             }
         })
     }

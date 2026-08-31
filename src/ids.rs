@@ -1,6 +1,6 @@
 //! Identifier allocation.
 //!
-//! Every id — entry, usage row, operation — is a **UUIDv7** (`docs/harness.md`
+//! Every id — entry, usage row, operation — is a **`UUIDv7`** (`docs/harness.md`
 //! §1.2): the first 48 bits are the mint time in milliseconds, the rest is
 //! random. Ids are therefore self-describing and time-sortable, and a
 //! *follower* id can be minted with its leader's timestamp so a tool call and
@@ -19,12 +19,12 @@ pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// Mint a UUIDv7 string for the given millisecond timestamp.
+/// Mint a `UUIDv7` string for the given millisecond timestamp.
 pub fn uuid_v7(timestamp_ms: i64) -> String {
     let ts = (timestamp_ms.max(0) as u64) & 0x0000_FFFF_FFFF_FFFF;
     let rand_a: u16 = rand::random::<u16>() & 0x0FFF;
     let rand_b: u64 = rand::random::<u64>() & 0x3FFF_FFFF_FFFF_FFFF;
-    let hi: u64 = (ts << 16) | 0x7000 | rand_a as u64;
+    let hi: u64 = (ts << 16) | 0x7000 | u64::from(rand_a);
     let lo: u64 = 0x8000_0000_0000_0000 | rand_b;
     format!(
         "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
@@ -36,7 +36,7 @@ pub fn uuid_v7(timestamp_ms: i64) -> String {
     )
 }
 
-/// The 48-bit mint timestamp of a UUIDv7, if the string is one.
+/// The 48-bit mint timestamp of a `UUIDv7`, if the string is one.
 pub fn uuid_timestamp(id: &str) -> Option<i64> {
     let hex: String = id.chars().filter(|c| *c != '-').take(12).collect();
     if hex.len() != 12 {
@@ -45,7 +45,7 @@ pub fn uuid_timestamp(id: &str) -> Option<i64> {
     i64::from_str_radix(&hex, 16).ok()
 }
 
-/// Declares an id newtype over a UUIDv7 string.
+/// Declares an id newtype over a `UUIDv7` string.
 macro_rules! id_type {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]

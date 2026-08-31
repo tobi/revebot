@@ -92,7 +92,7 @@ enum Command {
         /// JSON report path.
         #[arg(long)]
         report: Option<PathBuf>,
-        /// Write JUnit XML.
+        /// Write `JUnit` XML.
         #[arg(long)]
         junit: Option<PathBuf>,
         /// Diff against this previous JSON report.

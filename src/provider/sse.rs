@@ -8,7 +8,7 @@
 /// One decoded event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event {
-    /// The `event:` field. OpenAI names its events; Anthropic does too.
+    /// The `event:` field. `OpenAI` names its events; Anthropic does too.
     pub name: Option<String>,
     /// The `data:` payload, newlines preserved.
     pub data: String,

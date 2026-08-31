@@ -1,6 +1,6 @@
 //! Read bot-authored source beneath a caller-chosen house directory.
 //!
-//! Walk directory descriptors with O_NOFOLLOW, not canonicalize-then-open:
+//! Walk directory descriptors with `O_NOFOLLOW`, not canonicalize-then-open:
 //! checking a pathname and later reading it leaves a symlink-swap race. This
 //! host helper is not exposed to Lua and never executes commands.
 
@@ -320,7 +320,7 @@ mod tests {
         std::fs::remove_dir(dir.join("directory.lua")).unwrap();
         std::fs::write(
             dir.join("huge.lua"),
-            vec![b' '; MAX_SCRIPT_BYTES as usize + 1],
+            vec![b' '; usize::try_from(MAX_SCRIPT_BYTES).unwrap() + 1],
         )
         .unwrap();
         assert!(scripts(root.path(), Path::new("plugins")).is_err());

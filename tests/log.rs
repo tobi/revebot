@@ -150,7 +150,11 @@ async fn notices_are_durable_once_and_known_tool_results_survive_state_changes()
         }
     }
     assert!(
-        session.read(|s| s.register_count()).await.unwrap() < 10,
+        session
+            .read(reve::storage::Storage::register_count)
+            .await
+            .unwrap()
+            < 10,
         "operation dedupe map must die at terminal"
     );
     session.close().await;

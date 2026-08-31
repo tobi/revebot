@@ -31,7 +31,7 @@ use super::config::{Api, Models};
 /// How long a catalogue is considered current. Model lists change on the order
 /// of weeks; a day is short enough to notice a new release and long enough that
 /// normal use makes no requests at all.
-pub const TTL: Duration = Duration::from_secs(24 * 60 * 60);
+pub const TTL: Duration = Duration::from_hours(24);
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -185,7 +185,7 @@ async fn probe(
     Ok(parse(&value, provider))
 }
 
-/// The OpenAI list shape, plus the fields OpenRouter adds on top of it.
+/// The `OpenAI` list shape, plus the fields `OpenRouter` adds on top of it.
 pub fn parse(value: &Value, provider: &str) -> Vec<Discovered> {
     let Some(rows) = value.get("data").and_then(Value::as_array) else {
         return Vec::new();
@@ -201,7 +201,7 @@ pub fn parse(value: &Value, provider: &str) -> Vec<Discovered> {
                 .get("context_length")
                 .or_else(|| row.get("context_window"))
                 .and_then(Value::as_u64)
-                .map(|n| n.min(u32::MAX as u64) as u32);
+                .map(|n| n.min(u64::from(u32::MAX)) as u32);
             let reasoning = row
                 .get("supported_parameters")
                 .and_then(Value::as_array)
@@ -247,7 +247,7 @@ mod tests {
 
     fn models_yml() -> Models {
         Models::parse(
-            r#"
+            r"
 providers:
   openrouter:
     baseUrl: https://openrouter.ai/api/v1
@@ -267,7 +267,7 @@ providers:
     apiKey: $ANTHROPIC_API_KEY
     models:
       - id: claude-opus-5
-"#,
+",
             "models.yml",
         )
         .unwrap()
@@ -278,9 +278,9 @@ providers:
         // The real response, trimmed. `x-ai/grok-4.6` contains a slash, which
         // is exactly the id you would have got wrong by hand.
         let body = json!({"data": [
-            {"id": "x-ai/grok-4.6", "context_length": 500000,
+            {"id": "x-ai/grok-4.6", "context_length": 500_000,
              "supported_parameters": ["reasoning", "tools"]},
-            {"id": "openai/gpt-5.6", "context_length": 400000,
+            {"id": "openai/gpt-5.6", "context_length": 400_000,
              "supported_parameters": ["tools"]},
         ]});
         let found = parse(&body, "openrouter");
@@ -348,7 +348,7 @@ providers:
         // is reserved as unroutable, so the probe fails. Discovery must still
         // return, with the reason kept for `/models` to show.
         let models = Models::parse(
-            r#"
+            r"
 providers:
   local:
     baseUrl: http://127.0.0.1:1
@@ -356,7 +356,7 @@ providers:
     apiKey: $LOCAL_KEY
     models:
       - id: whatever
-"#,
+",
             "models.yml",
         )
         .unwrap();

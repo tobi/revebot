@@ -293,7 +293,7 @@ impl Storage {
     }
 
     pub fn path(&self) -> Option<&Path> {
-        self.sink.as_ref().map(|s| s.path())
+        self.sink.as_ref().map(Sink::path)
     }
 }
 

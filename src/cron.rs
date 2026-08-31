@@ -33,12 +33,15 @@ impl Cron {
         if parts.len() != 5 {
             return Err(CronError::Fields(src.to_string()));
         }
+        let [minute, hour, dom, month, dow] = parts.as_slice() else {
+            return Err(CronError::Fields(src.to_string()));
+        };
         Ok(Self {
-            minute: parse_field("minute", parts[0], 0, 59)?,
-            hour: parse_field("hour", parts[1], 0, 23)?,
-            dom: parse_field("dom", parts[2], 1, 31)?,
-            month: parse_field("month", parts[3], 1, 12)?,
-            dow: parse_dow(parts[4])?,
+            minute: parse_field("minute", minute, 0, 59)?,
+            hour: parse_field("hour", hour, 0, 23)?,
+            dom: parse_field("dom", dom, 1, 31)?,
+            month: parse_field("month", month, 1, 12)?,
+            dow: parse_dow(dow)?,
         })
     }
 
@@ -81,7 +84,7 @@ fn parse_dow(src: &str) -> Result<Field, CronError> {
             field.values.push(0);
         }
         field.values.retain(|v| *v != 7);
-        field.values.sort();
+        field.values.sort_unstable();
         field.values.dedup();
         field.any = field.values.len() == 7;
     }
@@ -139,9 +142,9 @@ fn parse_field(name: &'static str, src: &str, min: u32, max: u32) -> Result<Fiel
             }
         }
     }
-    values.sort();
+    values.sort_unstable();
     values.dedup();
-    let any = values.len() as u32 == (max - min + 1);
+    let any = usize::try_from(max - min + 1).is_ok_and(|count| values.len() == count);
     Ok(Field { any, values })
 }
 
@@ -164,22 +167,20 @@ fn describe(src: &str) -> String {
     if parts.len() != 5 {
         return src.to_string();
     }
-    let minute = parts[0];
-    let hour = parts[1];
-    let dom = parts[2];
-    let month = parts[3];
-    let dow = parts[4];
+    let [minute, hour, dom, month, dow] = parts.as_slice() else {
+        return src.to_string();
+    };
 
-    if minute == "*" && hour == "*" && dom == "*" && month == "*" && dow == "*" {
+    if *minute == "*" && *hour == "*" && *dom == "*" && *month == "*" && *dow == "*" {
         return "Every minute".into();
     }
-    if minute != "*" && hour == "*" && dom == "*" && month == "*" && dow == "*" {
+    if *minute != "*" && *hour == "*" && *dom == "*" && *month == "*" && *dow == "*" {
         return format!("Every hour at :{minute:0>2}");
     }
 
     match (parse_clock(minute, hour), weekday_phrase(dow, dom, month)) {
         (Some(clock), Some(days)) => format!("{days} at {clock}"),
-        (Some(clock), None) if dom == "*" && month == "*" && dow == "*" => {
+        (Some(clock), None) if *dom == "*" && *month == "*" && *dow == "*" => {
             format!("Every day at {clock}")
         }
         (Some(clock), None) => format!("At {clock} ({src})"),

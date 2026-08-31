@@ -262,7 +262,7 @@ impl Session {
     }
 
     pub async fn stats(&self) -> Result<Stats> {
-        self.read(|s| s.stats()).await
+        self.read(super::storage::Storage::stats).await
     }
 
     /// Lane names, from their `lane.state` registers. Always includes `main`
@@ -624,8 +624,7 @@ fn validate_current(
             let calls = crate::model::Assistant::from_message(
                 assistant.message_value().unwrap_or(&Value::Null),
             )
-            .map(|a| a.tool_calls.len())
-            .unwrap_or(0);
+            .map_or(0, |a| a.tool_calls.len());
             let mut indices: Vec<usize> = batch
                 .calls
                 .iter()
@@ -751,7 +750,7 @@ pub fn project_context(s: &Storage, leaf: Option<EntryId>) -> Vec<Entry> {
             continue;
         }
         if entry.role() == Some("assistant")
-            && matches!(entry.stop_reason(), Some("error") | Some("aborted"))
+            && matches!(entry.stop_reason(), Some("error" | "aborted"))
         {
             continue;
         }
@@ -764,11 +763,7 @@ pub fn project_context(s: &Storage, leaf: Option<EntryId>) -> Vec<Entry> {
 pub fn estimate_tokens(entries: &[Entry]) -> u64 {
     entries
         .iter()
-        .map(|e| {
-            serde_json::to_string(&e.payload)
-                .map(|s| s.len())
-                .unwrap_or(0) as u64
-        })
+        .map(|e| serde_json::to_string(&e.payload).map_or(0, |s| s.len()) as u64)
         .sum::<u64>()
         / 4
 }
@@ -901,7 +896,7 @@ mod tests {
         let op = OpId::new();
         let state = OperationState::Run(RunState {
             tools_started: false,
-            accepted_writes: Default::default(),
+            accepted_writes: Box::default(),
             control: Control::Running,
             settings: RunSettings::default(),
             phase: RunPhase::Checkpoint(crate::state::CheckpointPhase::may_finish(

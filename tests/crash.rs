@@ -1,7 +1,7 @@
 //! Crash-site recovery, against a really-killed process.
 //!
 //! Nothing here is simulated. A child process opens a real JSONL session,
-//! commits a tool intent, and is SIGKILLed while the tool is in flight. Then
+//! commits a tool intent, and is `SIGKILLed` while the tool is in flight. Then
 //! this process reopens the file and has to continue the operation — with an
 //! effectful tool that panics if recovery is ever tempted to re-run it.
 
@@ -88,14 +88,13 @@ fn wait_for(path: &Path, limit: Duration) -> bool {
 /// Run the child until its tool is in flight, then SIGKILL it.
 fn crash(session: &Path, ready: &Path, replay: &str) {
     let bin = crash_child_bin();
-    if !bin.exists() {
-        // `cargo test` builds bins before integration tests; if that changes,
-        // say so rather than passing silently.
-        panic!(
-            "crash_child binary missing at {}; run `cargo build` first",
-            bin.display()
-        );
-    }
+    // `cargo test` builds bins before integration tests; if that changes,
+    // say so rather than passing silently.
+    assert!(
+        bin.exists(),
+        "crash_child binary missing at {}; run `cargo build` first",
+        bin.display()
+    );
     let mut child = Command::new(&bin)
         .arg(session)
         .arg(ready)
@@ -105,7 +104,7 @@ fn crash(session: &Path, ready: &Path, replay: &str) {
         .spawn()
         .expect("spawn the crash child");
     assert!(
-        wait_for(ready, Duration::from_secs(60)),
+        wait_for(ready, Duration::from_mins(1)),
         "child never reached the tool"
     );
     // Kill it outright. No unwinding, no flush on the way out — whatever is on

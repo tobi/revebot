@@ -140,6 +140,7 @@ impl Entry {
         Self::base("compaction", payload)
     }
 
+    #[must_use]
     pub fn custom(custom_type: impl Into<String>, data: Option<Value>) -> Self {
         let mut payload = Map::new();
         if let Some(data) = data {
@@ -151,6 +152,7 @@ impl Entry {
     }
 
     /// Presentation travels with the entry, never in a renderer's hidden phase.
+    #[must_use]
     pub fn display(mut self, run_id: &str, audience: &str) -> Self {
         self.payload.insert(
             "display".into(),
@@ -159,6 +161,7 @@ impl Entry {
         self
     }
 
+    #[must_use]
     pub fn tool_display(mut self, run_id: &str, name: &str, args: &Map<String, Value>) -> Self {
         self.payload.insert(
             "display".into(),
@@ -167,11 +170,13 @@ impl Entry {
         self
     }
 
+    #[must_use]
     pub fn with_id(mut self, id: EntryId) -> Self {
         self.id = id;
         self
     }
 
+    #[must_use]
     pub fn with_parent(mut self, parent: Option<EntryId>) -> Self {
         self.parent_id = parent;
         self
@@ -383,8 +388,9 @@ impl Write {
         match self {
             Self::Entry(e) => e.seq,
             Self::Usage(u) => u.seq,
-            Self::Register(RegisterWrite::Set { seq, .. })
-            | Self::Register(RegisterWrite::Delete { seq, .. }) => *seq,
+            Self::Register(RegisterWrite::Set { seq, .. } | RegisterWrite::Delete { seq, .. }) => {
+                *seq
+            }
         }
     }
 
@@ -392,8 +398,9 @@ impl Write {
         match self {
             Self::Entry(e) => e.seq = value,
             Self::Usage(u) => u.seq = value,
-            Self::Register(RegisterWrite::Set { seq, .. })
-            | Self::Register(RegisterWrite::Delete { seq, .. }) => *seq = value,
+            Self::Register(RegisterWrite::Set { seq, .. } | RegisterWrite::Delete { seq, .. }) => {
+                *seq = value;
+            }
         }
     }
 }

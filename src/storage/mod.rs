@@ -142,7 +142,7 @@ impl Storage {
         // Validate with in-transaction visibility.
         let mut new_entries: HashSet<String> = HashSet::new();
         let mut new_usage: HashSet<String> = HashSet::new();
-        for write in writes.iter_mut() {
+        for write in &mut writes {
             seq += 1;
             write.set_seq(seq);
             match write {

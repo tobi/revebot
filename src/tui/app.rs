@@ -143,8 +143,7 @@ impl Input {
         self.text
             .char_indices()
             .nth(index)
-            .map(|(i, _)| i)
-            .unwrap_or(self.text.len())
+            .map_or(self.text.len(), |(i, _)| i)
     }
 
     /// Display column of the cursor.

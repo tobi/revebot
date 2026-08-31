@@ -162,10 +162,10 @@ impl StreamState {
         }
         // Trust the model's own stop_reason, but a call with no reason is still
         // a call.
-        let stop_reason = if !self.calls.is_empty() {
-            StopReason::ToolUse
-        } else {
+        let stop_reason = if self.calls.is_empty() {
             self.stop
+        } else {
+            StopReason::ToolUse
         };
         Ok(Assistant {
             text: self.text,
