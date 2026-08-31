@@ -104,16 +104,61 @@ pub struct Secret {
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
+    /// Per-host scope. Keys are destination hostnames. Each host with
+    /// `allow: true` also joins the sandbox network allow list.
     #[serde(default)]
-    pub hosts: Vec<String>,
-    /// Optional HTTP header the guest should send the placeholder in
-    /// (e.g. `Authorization`). The proxy substitutes the real value for
-    /// `hosts` only — the guest never sees it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub header: Option<String>,
-    /// Optional prefix in that header, typically `Bearer`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefix: Option<String>,
+    pub hosts: BTreeMap<String, SecretHost>,
+}
+
+/// Destination-host policy for one secret.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretHost {
+    /// When true (the default), this host is on the sandbox network allow list.
+    #[serde(default = "default_secret_host_allow")]
+    pub allow: bool,
+    /// Headers to send on requests to this host. Values may reference the
+    /// secret as `$ENV` (e.g. `Authorization: "Bearer $TOOL_GATEWAY"`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+}
+
+fn default_secret_host_allow() -> bool {
+    true
+}
+
+impl Default for SecretHost {
+    fn default() -> Self {
+        Self {
+            allow: true,
+            headers: BTreeMap::new(),
+        }
+    }
+}
+
+impl Secret {
+    /// Hostnames this secret is scoped to, in sorted order.
+    pub fn hostnames(&self) -> Vec<String> {
+        self.hosts.keys().cloned().collect()
+    }
+
+    /// Hostnames that also join the sandbox network allow list.
+    pub fn allowed_hostnames(&self) -> Vec<String> {
+        self.hosts
+            .iter()
+            .filter(|(_, cfg)| cfg.allow)
+            .map(|(host, _)| host.clone())
+            .collect()
+    }
+
+    /// Build a host map with `allow: true` and no extra headers.
+    pub fn scoped_hosts(
+        names: impl IntoIterator<Item = impl Into<String>>,
+    ) -> BTreeMap<String, SecretHost> {
+        names
+            .into_iter()
+            .map(|name| (name.into(), SecretHost::default()))
+            .collect()
+    }
 }
 
 /// What `sandbox.lua` produced.
@@ -180,11 +225,15 @@ fn default_open() -> bool {
 }
 
 impl Policy {
-    /// Hosts named in `allow`. When [`Self::open`] is true the guest can
-    /// already reach the public internet; this list is extra (or the whole
-    /// allowlist when `open` is false).
+    /// Hosts named in `allow`, plus secret hosts with `allow: true`.
+    /// When [`Self::open`] is true the guest can already reach the public
+    /// internet; this list is extra (or the whole allowlist when `open` is
+    /// false).
     pub fn egress_hosts(&self) -> Vec<String> {
         let mut hosts = self.allow_hosts.clone();
+        for secret in &self.secrets {
+            hosts.extend(secret.allowed_hostnames());
+        }
         hosts.sort();
         hosts.dedup();
         hosts
@@ -1217,7 +1266,7 @@ async fn install_secret_definitions(
             if let Some(placeholder) = &secret.placeholder {
                 patch = patch.placeholder(placeholder.as_str());
             }
-            for host in &secret.hosts {
+            for host in secret.hosts.keys() {
                 patch = patch.allow_host(host.as_str());
             }
             patch
@@ -1240,7 +1289,7 @@ fn missing_secret_warning(secret: &Secret, root: &Path) -> Option<String> {
 }
 
 fn format_missing_secret_warning(secret: &Secret) -> String {
-    let hosts = secret.hosts.join(", ");
+    let hosts = secret.hostnames().join(", ");
     if let Some(script) = command_secret_source(&secret.source) {
         let detail = match run_secret_command(script) {
             Ok(value) if value.is_empty() => "produced no output".to_string(),
@@ -1383,9 +1432,10 @@ async fn build(
         network.rules.push(Rule::allow_dns());
         network
     };
-    if !policy.allow_hosts.is_empty() {
+    let hosts = policy.egress_hosts();
+    if !hosts.is_empty() {
         network = network
-            .allow_domains(policy.egress_hosts())
+            .allow_domains(hosts)
             .map_err(|e| SandboxError::Policy(format!("invalid allowed host: {e}")))?;
     }
     builder = builder.network(move |n| n.enabled(true).policy(network));
@@ -1410,7 +1460,7 @@ async fn build(
             if let Some(placeholder) = &secret.placeholder {
                 entry = entry.placeholder(placeholder.as_str());
             }
-            for host in &secret.hosts {
+            for host in secret.hosts.keys() {
                 entry = entry.allow_host(host.as_str());
             }
             entry
@@ -1524,6 +1574,76 @@ mod tests {
     }
 
     #[test]
+    fn secret_hosts_join_the_egress_allow_list() {
+        let policy = Policy {
+            open: false,
+            secrets: vec![Secret {
+                env: "TOOL_GATEWAY".into(),
+                source: "TOOL_GATEWAY".into(),
+                placeholder: None,
+                hosts: Secret::scoped_hosts(["tool-gateway.shopify.io"]),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            policy.egress_hosts(),
+            vec!["tool-gateway.shopify.io".to_string()]
+        );
+        assert_eq!(policy.egress_summary(), "tool-gateway.shopify.io");
+    }
+
+    #[test]
+    fn a_secret_host_with_allow_false_stays_off_the_egress_list() {
+        let mut hosts = BTreeMap::new();
+        hosts.insert(
+            "no.example".into(),
+            SecretHost {
+                allow: false,
+                headers: BTreeMap::new(),
+            },
+        );
+        let policy = Policy {
+            open: false,
+            secrets: vec![Secret {
+                env: "TOKEN".into(),
+                source: "TOKEN".into(),
+                placeholder: None,
+                hosts,
+            }],
+            ..Default::default()
+        };
+        assert!(policy.egress_hosts().is_empty());
+        assert_eq!(policy.egress_summary(), "none");
+    }
+
+    #[test]
+    fn secret_hosts_are_a_map_with_allow_and_headers() {
+        let secret: Secret = serde_yaml::from_str(
+            r#"
+env: TOOL_GATEWAY
+source: TOOL_GATEWAY
+placeholder: reve-tool-gateway
+hosts:
+  tool-gateway.shopify.io:
+    allow: true
+    headers:
+      Authorization: "Bearer $TOOL_GATEWAY"
+"#,
+        )
+        .unwrap();
+        let host = secret.hosts.get("tool-gateway.shopify.io").unwrap();
+        assert!(host.allow);
+        assert_eq!(
+            host.headers.get("Authorization").map(String::as_str),
+            Some("Bearer $TOOL_GATEWAY")
+        );
+        assert_eq!(
+            secret.hostnames(),
+            vec!["tool-gateway.shopify.io".to_string()]
+        );
+    }
+
+    #[test]
     fn the_vm_name_is_stable_per_workspace() {
         let policy = Policy::default();
         let a = policy.sandbox_name(Path::new("/tmp/my-agent/workspace"));
@@ -1555,8 +1675,7 @@ mod tests {
             env: "TOKEN".into(),
             source: "HOST_TOKEN".into(),
             placeholder: Some("reve-token".into()),
-            hosts: vec!["x.com".into()],
-            ..Default::default()
+            hosts: Secret::scoped_hosts(["x.com"]),
         });
         assert_eq!(
             base.fingerprint(ws),
@@ -1591,13 +1710,12 @@ mod tests {
             env: "GITHUB_TOKEN".into(),
             source: "REVE_TEST_MISSING_GITHUB_TOKEN_9D2B".into(),
             placeholder: Some("reve-github-token".into()),
-            hosts: vec!["github.com".into(), "api.github.com".into()],
-            ..Default::default()
+            hosts: Secret::scoped_hosts(["github.com", "api.github.com"]),
         };
         assert_eq!(
             missing_secret_warning(&secret, Path::new("/tmp")).as_deref(),
             Some(
-                "REVE_TEST_MISSING_GITHUB_TOKEN_9D2B is unset; authenticated access for github.com, api.github.com is disabled"
+                "REVE_TEST_MISSING_GITHUB_TOKEN_9D2B is unset; authenticated access for api.github.com, github.com is disabled"
             )
         );
     }
@@ -1608,12 +1726,11 @@ mod tests {
             env: "GITHUB_TOKEN".into(),
             source: "GITHUB_TOKEN".into(),
             placeholder: Some("reve-github-token".into()),
-            hosts: vec!["github.com".into(), "api.github.com".into()],
-            ..Default::default()
+            hosts: Secret::scoped_hosts(["github.com", "api.github.com"]),
         };
         assert_eq!(
             format_missing_secret_warning(&secret),
-            "GITHUB_TOKEN is unset; authenticated access for github.com, api.github.com is disabled\nexport GITHUB_TOKEN=\"$(gh auth token)\""
+            "GITHUB_TOKEN is unset; authenticated access for api.github.com, github.com is disabled\nexport GITHUB_TOKEN=\"$(gh auth token)\""
         );
     }
 
@@ -1623,8 +1740,7 @@ mod tests {
             env: "OPENROUTER_API_KEY".into(),
             source: "OPENROUTER_API_KEY".into(),
             placeholder: Some("reve-openrouter-key".into()),
-            hosts: vec!["openrouter.ai".into()],
-            ..Default::default()
+            hosts: Secret::scoped_hosts(["openrouter.ai"]),
         };
         assert_eq!(
             format_missing_secret_warning(&secret),
@@ -1654,8 +1770,7 @@ mod tests {
             env: "TOKEN_CMD_TEST_9D2B".into(),
             source: "$(/bin/echo command-secret-ok)".into(),
             placeholder: None,
-            hosts: vec!["example.com".into()],
-            ..Default::default()
+            hosts: Secret::scoped_hosts(["example.com"]),
         };
         let root = Path::new("/tmp");
         assert_eq!(
@@ -1712,8 +1827,7 @@ mod tests {
             env: "TOKEN_TILDE_TEST".into(),
             source: "$(cat ~/token)".into(),
             placeholder: None,
-            hosts: vec!["example.com".into()],
-            ..Default::default()
+            hosts: Secret::scoped_hosts(["example.com"]),
         };
         let got = with_home(dir.path(), || secret_value(&secret, Path::new("/tmp")));
         assert_eq!(got.as_deref(), Some("tilde-secret-ok"));
@@ -1727,8 +1841,7 @@ mod tests {
             env: "TOKEN_FILE_TILDE".into(),
             source: "file:~/token".into(),
             placeholder: None,
-            hosts: vec!["example.com".into()],
-            ..Default::default()
+            hosts: Secret::scoped_hosts(["example.com"]),
         };
         let got = with_home(dir.path(), || secret_value(&secret, Path::new("/tmp")));
         assert_eq!(got.as_deref(), Some("file-tilde-ok"));
@@ -1740,8 +1853,7 @@ mod tests {
             env: "TOKEN".into(),
             source: "$(/bin/false)".into(),
             placeholder: None,
-            hosts: vec!["example.com".into()],
-            ..Default::default()
+            hosts: Secret::scoped_hosts(["example.com"]),
         };
         let root = Path::new("/tmp");
         assert!(secret_value(&secret, root).is_none());

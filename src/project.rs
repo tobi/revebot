@@ -430,6 +430,22 @@ mod tests {
             project.runtime.policy.mount_workspace,
             "workspace is mounted"
         );
+        let hosts = project.runtime.policy.egress_hosts();
+        assert!(
+            hosts.iter().any(|h| h == "github.com"),
+            "secret hosts join the allow list: {hosts:?}"
+        );
+        assert!(hosts.iter().any(|h| h == "api.github.com"));
+        assert!(hosts.iter().any(|h| h == "openrouter.ai"));
+        let github = project
+            .runtime
+            .policy
+            .secrets
+            .iter()
+            .find(|s| s.env == "GITHUB_TOKEN")
+            .expect("GITHUB_TOKEN secret");
+        assert!(github.hosts["github.com"].allow);
+        assert!(github.hosts["github.com"].headers.is_empty());
     }
 
     #[test]

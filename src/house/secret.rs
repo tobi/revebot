@@ -3,9 +3,10 @@
 //! The guest never receives the value. Config stores a source reference and
 //! host scope; paste lives under `.reve/secrets/` (gitignored).
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::sandbox::Secret;
+use crate::sandbox::{Secret, SecretHost};
 
 #[derive(Debug, Clone)]
 pub struct SecretDecision {
@@ -57,20 +58,27 @@ pub fn validate_env(name: &str) -> Result<(), String> {
 
 pub fn to_secret(house_root: &Path, decision: &SecretDecision) -> Result<Secret, String> {
     validate_env(&decision.env)?;
-    let mut hosts: Vec<String> = decision
-        .hosts
-        .iter()
-        .map(|h| h.trim().to_string())
-        .filter(|h| !h.is_empty())
-        .collect();
-    hosts.sort();
-    hosts.dedup();
+    let env = decision.env.trim().to_string();
+    let headers = host_headers(&env, decision.header.as_deref(), decision.prefix.as_deref());
+    let mut hosts = BTreeMap::new();
+    for host in &decision.hosts {
+        let name = host.trim();
+        if name.is_empty() {
+            continue;
+        }
+        hosts.insert(
+            name.to_string(),
+            SecretHost {
+                allow: true,
+                headers: headers.clone(),
+            },
+        );
+    }
     if hosts.is_empty() {
         return Err(
             "at least one host is required; the VM must not hold an unscoped secret".into(),
         );
     }
-    let env = decision.env.trim().to_string();
     let source = match decision.kind {
         SecretKind::Paste => {
             if decision.value.trim().is_empty() {
@@ -121,19 +129,18 @@ pub fn to_secret(house_root: &Path, decision: &SecretDecision) -> Result<Secret,
         source,
         placeholder,
         hosts,
-        header: decision
-            .header
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
-        prefix: decision
-            .prefix
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
     })
+}
+
+fn host_headers(env: &str, header: Option<&str>, prefix: Option<&str>) -> BTreeMap<String, String> {
+    let Some(name) = header.map(str::trim).filter(|s| !s.is_empty()) else {
+        return BTreeMap::new();
+    };
+    let value = match prefix.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(prefix) => format!("{prefix} ${env}"),
+        None => format!("${env}"),
+    };
+    BTreeMap::from([(name.to_string(), value)])
 }
 
 fn write_store(house_root: &Path, env: &str, value: &str) -> Result<(), String> {
@@ -184,19 +191,20 @@ fn secret_yaml(secret: &Secret) -> serde_yaml::Value {
     if let Some(p) = &secret.placeholder {
         m.insert("placeholder".into(), p.clone().into());
     }
-    let hosts = secret
-        .hosts
-        .iter()
-        .cloned()
-        .map(serde_yaml::Value::String)
-        .collect();
-    m.insert("hosts".into(), serde_yaml::Value::Sequence(hosts));
-    if let Some(h) = &secret.header {
-        m.insert("header".into(), h.clone().into());
+    let mut hosts = serde_yaml::Mapping::new();
+    for (name, cfg) in &secret.hosts {
+        let mut host = serde_yaml::Mapping::new();
+        host.insert("allow".into(), cfg.allow.into());
+        if !cfg.headers.is_empty() {
+            let mut headers = serde_yaml::Mapping::new();
+            for (header, value) in &cfg.headers {
+                headers.insert(header.clone().into(), value.clone().into());
+            }
+            host.insert("headers".into(), serde_yaml::Value::Mapping(headers));
+        }
+        hosts.insert(name.clone().into(), serde_yaml::Value::Mapping(host));
     }
-    if let Some(p) = &secret.prefix {
-        m.insert("prefix".into(), p.clone().into());
-    }
+    m.insert("hosts".into(), serde_yaml::Value::Mapping(hosts));
     serde_yaml::Value::Mapping(m)
 }
 
@@ -207,19 +215,26 @@ mod tests {
     #[test]
     fn upsert_appends_a_secret_to_the_template() {
         let text = include_str!("../templates/config.yml");
+        let mut hosts = BTreeMap::new();
+        hosts.insert(
+            "api.acme.test".into(),
+            SecretHost {
+                allow: true,
+                headers: BTreeMap::from([("Authorization".into(), "Bearer $ACME_TOKEN".into())]),
+            },
+        );
         let secret = Secret {
             env: "ACME_TOKEN".into(),
             source: "file:.reve/secrets/ACME_TOKEN".into(),
             placeholder: Some("reve-acme-token".into()),
-            hosts: vec!["api.acme.test".into()],
-            header: Some("Authorization".into()),
-            prefix: Some("Bearer".into()),
+            hosts,
         };
         let out = upsert_config_yml(text, &secret).unwrap();
         assert!(out.contains("ACME_TOKEN"));
         assert!(out.contains("api.acme.test"));
         assert!(out.contains("file:.reve/secrets/ACME_TOKEN"));
         assert!(out.contains("GITHUB_TOKEN"), "existing secrets stay");
+        assert!(out.contains("Bearer $ACME_TOKEN"));
         let again = upsert_config_yml(&out, &secret).unwrap();
         let parsed: serde_yaml::Value = serde_yaml::from_str(&again).unwrap();
         let secrets = parsed["sandbox"]["secrets"].as_sequence().unwrap();
@@ -228,6 +243,16 @@ mod tests {
             .filter(|s| s["env"].as_str() == Some("ACME_TOKEN"))
             .collect();
         assert_eq!(acme.len(), 1, "upsert replaces the same env");
+        assert!(acme[0].get("header").is_none());
+        assert!(acme[0].get("prefix").is_none());
+        assert_eq!(
+            acme[0]["hosts"]["api.acme.test"]["allow"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            acme[0]["hosts"]["api.acme.test"]["headers"]["Authorization"].as_str(),
+            Some("Bearer $ACME_TOKEN")
+        );
     }
 
     #[test]
@@ -249,8 +274,15 @@ mod tests {
             std::fs::read_to_string(dir.path().join(".reve/secrets/DEMO_KEY")).unwrap(),
             "super-secret"
         );
+        let host = secret.hosts.get("example.com").unwrap();
+        assert!(host.allow);
+        assert_eq!(
+            host.headers.get("Authorization").map(String::as_str),
+            Some("Bearer $DEMO_KEY")
+        );
         let yaml = upsert_config_yml("sandbox: {}\n", &secret).unwrap();
         assert!(!yaml.contains("super-secret"));
         assert!(yaml.contains("file:.reve/secrets/DEMO_KEY"));
+        assert!(yaml.contains("Bearer $DEMO_KEY"));
     }
 }

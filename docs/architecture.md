@@ -68,7 +68,9 @@ src/
                       `source` is a host env var or `$(command)` resolved
                       at apply into `REVEBOT_SECRET_*` for microsandbox —
                       not a Lua host-exec path. Command argv and `file:`
-                      paths expand a leading `~/`.
+                      paths expand a leading `~/`. Secret `hosts` is a
+                      hostname map (`allow`, `headers`); `allow: true`
+                      joins the sandbox allow list.
   lua.rs              host config/tools and a separate restricted workspace Lua
                       state; definitions retain their originating Lua state.
                       Workspace callbacks get explicit guest/messaging capabilities,
@@ -228,7 +230,8 @@ reloaded state instead of writing something it decided under stale assumptions.
   owner and virtiofs stat virtualization off, XFCE on `:1`, noVNC/VNC published on
   localhost, and a shared Chrome that `agent-browser` attaches to. Provisioning is off
   by default. Public-internet egress by default (`NetworkProfile::Public`);
-  `open = false` plus `allow` is the lock-down. Scoped source-backed secrets, fail-closed boot,
+  `open = false` plus `allow` is the lock-down. Scoped source-backed secrets
+  (per-host `allow`/`headers`; allowed hosts join the egress list), fail-closed boot,
   idle shutdown, workspace bind mount at `/workspace`. Default memory is 8192 MiB.
 - **The scripting surface.** Trusted host `agent { }`, `sandbox { }` and installed
   tools use one Lua state. Bot-editable plugins/routines use a **separate** state
@@ -362,6 +365,7 @@ Every row names a real test. A claim with no test says so instead of appearing c
 | Model discovery contacts only upstreams whose key is set, and never fails the agent | `provider::discovery::tests::{only_upstreams_that_have_a_key_are_probed, an_unreachable_upstream_is_recorded_not_fatal, a_missing_or_corrupt_cache_is_simply_absent}` |
 | A namespaced model id survives discovery intact (`openrouter/x-ai/grok-4.6`) | `provider::discovery::tests::the_openrouter_shape_yields_a_pasteable_reference` |
 | Public-internet egress by default; lock-down is `open = false` | `sandbox::tests::default_egress_is_the_public_internet`, `tests/microvm.rs` (opt-in) |
+| Secret hosts are a per-host map; `allow: true` joins the sandbox allow list | `sandbox::tests::secret_hosts_join_the_egress_allow_list`, `lua::tests::a_secret_host_map_carries_headers_and_joins_allow`, `house::secret::tests::upsert_appends_a_secret_to_the_template` |
 | Chat attachments stay under `workspace/tmp/{id}/` and are named in the message | `house::attach::tests::{save_writes_under_workspace_tmp_id_and_tags_the_guest_path, names_are_basenames_without_traversal, read_refuses_traversal_and_bad_ids}` |
 
 **Not covered yet.** Standalone `compact()` and `navigate()` have no end-to-end test — the

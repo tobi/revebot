@@ -17,8 +17,14 @@ sandbox:
     - env: GITHUB_TOKEN
       source: "$(gh auth token)"
       placeholder: reve-github-token
-      hosts: [github.com, api.github.com]
+      hosts:
+        github.com:
+          allow: true
+        api.github.com:
+          allow: true
     - env: OPENROUTER_API_KEY
       source: OPENROUTER_API_KEY
       placeholder: reve-openrouter-key
-      hosts: [openrouter.ai]
+      hosts:
+        openrouter.ai:
+          allow: true

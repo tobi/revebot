@@ -906,7 +906,7 @@ impl Inner {
             .ok_or_else(|| anyhow::anyhow!("no pending secret prompt"))?;
         let _ = tx.send(SecretAskResult::Saved {
             env: secret.env.clone(),
-            hosts: secret.hosts.clone(),
+            hosts: secret.hostnames(),
         });
         Ok(format!("saved {}", secret.env))
     }

@@ -26,7 +26,7 @@ XFCE on `DISPLAY=:1`. The user sees a live preview in the house Screen panel and
 ## What the guest cannot do
 
 - No host shell. `os.execute` is deleted from Lua. There is no `ctx.host_exec`.
-- **No real secrets.** Guest env for a secret is a placeholder. The host injects the real value only into HTTP(S) to the secret's `hosts` list (e.g. `Authorization: Bearer $GITHUB_TOKEN` toward `github.com`). Never write a credential into `/workspace`. To add one, call `AskUserForSecret`.
+- **No real secrets.** Guest env for a secret is a placeholder. The host injects the real value only into HTTP(S) to the secret's `hosts` map (e.g. `Authorization: Bearer $GITHUB_TOKEN` toward `github.com`). Listed hosts with `allow: true` also join the sandbox allow list. Never write a credential into `/workspace`. To add one, call `AskUserForSecret`.
 
 ## Tools
 
