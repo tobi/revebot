@@ -369,8 +369,7 @@ async fn runtime_secrets_rotate_without_a_rebuild_and_deleted_secrets_are_revoke
         env: GUEST.into(),
         source: SOURCE.into(),
         placeholder: Some("reve-secret-placeholder".into()),
-        hosts: vec!["github.com".into()],
-        ..Default::default()
+        hosts: Secret::scoped_hosts(["github.com"]),
     };
     let policy = reve::sandbox::Policy {
         name: Some(NAME.into()),

@@ -42,10 +42,12 @@ Reve deliberately fails closed:
   lock down; that path starts from `NetworkPolicy::none()`. Private/LAN and cloud
   metadata are not included in the default.
 - Secrets are scoped per host. Configuration stores a host environment variable name, not
-  its value. Microsandbox resolves that source when the VM starts; the guest sees only the
-  placeholder, and the real value is injected into requests to named hosts at the network
-  boundary. An unscoped secret is refused. Removed secrets are deleted from reused VM
-  definitions before restart, and runtime secret changes never enter the disk fingerprint.
+  its value, plus a per-host map (`allow`, optional `headers`). Hosts with `allow: true`
+  also join the sandbox allow list. Microsandbox resolves that source when the VM starts;
+  the guest sees only the placeholder, and the real value is injected into requests to
+  named hosts at the network boundary. An unscoped secret is refused. Removed secrets are
+  deleted from reused VM definitions before restart, and runtime secret changes never
+  enter the disk fingerprint.
 - Durable intent records are written before effects so recovery does not guess whether an
   effectful operation should be replayed.
 

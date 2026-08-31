@@ -195,7 +195,11 @@ sandbox:
   secrets:
     - env: GITHUB_TOKEN
       source: "$(gh auth token)"
-      hosts: [github.com, api.github.com]
+      hosts:
+        github.com:
+          allow: true
+        api.github.com:
+          allow: true
 ```
 
 There is no `host-exec`, and omitting a secret does not create an invisible host fallback.
@@ -305,11 +309,12 @@ Egress is **open to the public internet by default**. The policy uses microsandb
 metadata stay off unless you opt into them.
 
 Secrets are scoped, never borrowed implicitly. Each secret names a host environment
-`source` and carries its own destination-host scope. Microsandbox persists only that source
-reference, resolves its value when the VM starts, exposes only the placeholder in the
-guest, and substitutes the real value at the network boundary. An unscoped secret (no
-`hosts`) is refused at load time. Removing a secret from `sandbox.lua` removes its persisted
-definition before a reused VM starts.
+`source` and a per-host map (`allow`, optional `headers` such as
+`Authorization: "Bearer $ENV"`). Hosts with `allow: true` also join the sandbox allow
+list. Microsandbox persists only that source reference, resolves its value when the VM
+starts, exposes only the placeholder in the guest, and substitutes the real value at the
+network boundary. An unscoped secret (no `hosts`) is refused at load time. Removing a
+secret from `sandbox.lua` removes its persisted definition before a reused VM starts.
 
 The VM is reused by fingerprint. A stable hash of the disk and toolchain shape is written
 to `.reve/sandbox-fingerprint`; runtime environment values and secrets are excluded. A

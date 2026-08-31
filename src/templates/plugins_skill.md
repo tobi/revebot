@@ -312,12 +312,14 @@ to workspace Lua. Do not modify host launch code through a bot plugin.
 | `env` | string-to-string table; merged guest environment, not a secret store |
 | `secrets` | array of scoped secret definitions below |
 
-Each secret needs `env: string`, `source: string`, and nonempty `hosts: {string,...}`.
-Optional strings: `placeholder`, `header`, `prefix`. Sources are host environment
-references or supported host-configured sources (`$(command)`, `file:...`, HTTP(S)).
-No literal `value` field. `$(command)` sources reject nested substitution. Secret
-resolution is host configuration authority, never a workspace Lua command API;
-the guest receives placeholders, with values injected only for configured hosts.
+Each secret needs `env: string`, `source: string`, and a nonempty `hosts` map of
+hostname to `{ allow = true, headers = { Header = "Bearer $ENV" } }`. `allow`
+defaults to true; those hosts also join the sandbox allow list. Optional string:
+`placeholder`. Sources are host environment references or supported host-configured
+sources (`$(command)`, `file:...`, HTTP(S)). No literal `value` field. `$(command)`
+sources reject nested substitution. Secret resolution is host configuration
+authority, never a workspace Lua command API; the guest receives placeholders,
+with values injected only for configured hosts. A host list is not accepted.
 
 Both Lua states remove `os.execute`, `io.popen`, `os.exit`, and `package.loadlib`.
 Trusted host Lua otherwise retains ambient host capabilities and must never load
