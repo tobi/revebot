@@ -117,7 +117,20 @@ impl Session {
                             continue;
                         }
                         let result = match storage.commit(tx) {
-                            Ok(result) => Ok(Some(result)),
+                            // The commit is durable. If it produced a state
+                            // the model forbids, stop here rather than resume
+                            // from it later (docs/tla/DurableHarness.tla;
+                            // §1.4 fault semantics).
+                            Ok(result) => match crate::invariants::check(&storage).first() {
+                                None => Ok(Some(result)),
+                                Some(violation) => {
+                                    let why =
+                                        format!("invariant violated after commit: {violation}");
+                                    fault = Some(why.clone());
+                                    fault_flag.store(true, Ordering::SeqCst);
+                                    Err(SessionError::Faulted(why))
+                                }
+                            },
                             Err(StorageError::Io(e)) => {
                                 let why = e.to_string();
                                 fault = Some(why.clone());
@@ -456,7 +469,7 @@ pub enum Restored {
     Suspended(Box<Current>),
 }
 
-fn restore(s: &Storage, lane: &str) -> Result<Restored> {
+pub(crate) fn restore(s: &Storage, lane: &str) -> Result<Restored> {
     let corrupt = |m: String| SessionError::Corrupt(format!("lane {lane}: {m}"));
     // A lane *is* its `lane.state` register — that is what `lanes()`
     // enumerates. So no register means the lane was never created, which is
@@ -885,10 +898,12 @@ mod tests {
         ));
     }
 
+    /// Invariant 19: a settled `aborted` response has cancellation durable.
+    /// Two layers hold it. The owner task refuses to *produce* the state (the
+    /// commit lands, then the session faults), and `restore` refuses to
+    /// *resume from* it when a file written elsewhere already contains it.
     #[tokio::test]
-    async fn restore_rejects_an_aborted_response_under_running_control() {
-        let session = Session::spawn(Storage::memory("s"));
-        session.ensure_lane("main", None, &config()).await.unwrap();
+    async fn an_aborted_response_under_running_control_is_refused_at_commit_and_at_restore() {
         let prompt = user("go");
         let aborted =
             Entry::message(json!({"role": "assistant", "content": [], "stopReason": "aborted"}))
@@ -916,30 +931,54 @@ mod tests {
                 system_prompt_override: None,
             },
         };
-        session
-            .commit(
-                Transaction::new()
-                    .with(Write::entry(prompt))
-                    .with(Write::entry(aborted.clone()))
-                    .with(Write::set(
-                        Namespace::LaneLeaf,
-                        "main",
-                        Some(aborted.id.clone()),
-                    ))
-                    .with(Write::set(Namespace::OpMeta, op.as_str(), &meta))
-                    .with(Write::set(Namespace::OpState, op.as_str(), &state))
-                    .with(Write::set(
-                        Namespace::LaneState,
-                        "main",
-                        LaneState {
-                            current_operation_id: Some(op.clone()),
-                            pending_next_run: vec![],
-                        },
-                    )),
-            )
-            .await
-            .unwrap();
-        let err = session.restore("main").await.unwrap_err();
+        let corrupt = Transaction::new()
+            .with(Write::entry(prompt))
+            .with(Write::entry(aborted.clone()))
+            .with(Write::set(
+                Namespace::LaneLeaf,
+                "main",
+                Some(aborted.id.clone()),
+            ))
+            .with(Write::set(Namespace::OpMeta, op.as_str(), &meta))
+            .with(Write::set(Namespace::OpState, op.as_str(), &state))
+            .with(Write::set(
+                Namespace::LaneState,
+                "main",
+                LaneState {
+                    current_operation_id: Some(op.clone()),
+                    pending_next_run: vec![],
+                },
+            ));
+
+        // Layer one: the owner task faults instead of carrying on.
+        let session = Session::spawn(Storage::memory("s"));
+        session.ensure_lane("main", None, &config()).await.unwrap();
+        let err = session.commit(corrupt.clone()).await.unwrap_err();
+        assert!(
+            matches!(&err, SessionError::Faulted(why) if why.contains("aborted response under running control")),
+            "{err}"
+        );
+        assert!(session.is_faulted());
+
+        // Layer two: the same bytes arriving from outside are refused on restore.
+        let mut raw = Storage::memory("s");
+        raw.commit(
+            Transaction::new()
+                .with(Write::set(Namespace::LaneConfig, "main", config()))
+                .with(Write::set(
+                    Namespace::LaneLeaf,
+                    "main",
+                    Option::<EntryId>::None,
+                ))
+                .with(Write::set(
+                    Namespace::LaneState,
+                    "main",
+                    LaneState::default(),
+                )),
+        )
+        .unwrap();
+        raw.commit(corrupt).unwrap();
+        let err = restore(&raw, "main").unwrap_err();
         assert!(matches!(err, SessionError::Corrupt(_)), "{err}");
     }
 

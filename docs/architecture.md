@@ -336,7 +336,7 @@ code or the spec, never the invariant.
 | One writer per session, across processes | `storage::jsonl::tests::a_second_process_cannot_open_a_live_session`, `tests/crash.rs` |
 | A payload can never collide with the envelope | `entry::tests::a_payload_cannot_collide_with_the_envelope` |
 | A conditional commit is rejected when its token moved | `session::tests::a_conditional_commit_is_rejected_when_its_token_moved` |
-| Restore refuses a state that contradicts itself | `session::tests::restore_rejects_an_aborted_response_under_running_control` |
+| Restore refuses a state that contradicts itself | `session::tests::an_aborted_response_under_running_control_is_refused_at_commit_and_at_restore` |
 | Context stops at a compaction and drops failed attempts | `session::tests::context_projection_reads_nothing_past_a_compaction_and_drops_errors` |
 | A prompt becomes a user entry and an assistant reply, leaving no registers behind | `tests/harness.rs::a_prompt_becomes_a_user_entry_and_an_assistant_reply` |
 | One operation per lane; a second is refused | `tests/harness.rs::a_second_operation_on_a_busy_lane_is_refused` |

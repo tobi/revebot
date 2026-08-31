@@ -16,6 +16,7 @@ pub mod heartbeat;
 pub mod hooks;
 pub mod house;
 pub mod ids;
+pub mod invariants;
 pub mod lane;
 pub mod log;
 pub mod lua;
