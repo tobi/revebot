@@ -189,7 +189,7 @@ status, `revebot exec` outside a house.
 ## Running
 
 ```
-make spec                        # CI size; what make ci runs
+make spec                        # CI size (~3 min); what make ci runs
 make spec-full                   # deep bounds + coverage counts; up to an hour
 make spec-full REMOTE_HOST=gb300:~/src/tries/revebot   # rsync there; run in herdr workspace
                                                        # 'revebot-spec' (herdr --remote gb300)
@@ -197,11 +197,24 @@ tla docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.small.cfg \
     -s EntryIds -s OpIds -s Lanes -i                                            # step through
 ```
 
-Configurations: `DurableLog.cfg` (2 ids, 1 key, 3 commits), `DurableHarness.small.cfg`
-(2 lanes, 4 entry ids, 2 ops, batch of 2, 7 commits), `DurableHarness.cfg` (5 entry
-ids, 8 commits). Entry ids, op ids and lanes are interchangeable model values, so
-`-s` symmetry reduction is sound and cuts the state space roughly 8×. Deadlock checking
-is off: an idle session with every id consumed is a legal final state.
+Configurations and measured sizes (tla-checker 0.6.11, single thread):
+
+| file | lanes / entry ids / ops / commits | states | time | where |
+|---|---|---|---|---|
+| `DurableLog.cfg` | 2 ids, 1 key, 3 commits | 28,221 | 105 s | `spec` |
+| `DurableHarness.ci.cfg` | 1 / 4 / 1 / 7, batch of 2 | 58,572 | 51 s | `spec` |
+| `DurableHarness.lanes.cfg` | 2 / 3 / 2 / 5 | 11,559 | 13 s | `spec` |
+| `VmLifecycle.cfg` | 2 bots, 2 policies, 12 steps | 3,476 | 0.5 s | `spec` |
+| `DurableHarness.small.cfg` (MaxSeq 6 variant) | 2 / 4 / 2 / 6 | 253,775 | 7.7 min | `spec-full` |
+| `DurableHarness.small.cfg` | 2 / 4 / 2 / 7 | 652,386 | 21 min | `spec-full` |
+| `DurableHarness.cfg` | 2 / 5 / 2 / 8 | > 5 M, unfinished | hours | `spec-full` |
+
+Every `Cov*` probe is non-zero on `ci.cfg` (tool batch) and `lanes.cfg` reaches a
+completed batch with both lanes open. Entry ids, op ids and lanes are interchangeable
+model values, so `-s` symmetry reduction is sound. Deadlock checking is off: an idle
+session with every id consumed is a legal final state. The checker is single-threaded
+and a Neoverse-V2 core is about as fast as a desktop core, so a many-core box buys
+breadth (`make -j spec-full`), not depth.
 
 ### tla-rs parsing rules learned the hard way
 

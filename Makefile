@@ -55,13 +55,16 @@ REMOTE_HOST ?=
 tla: spec
 
 ifeq ($(strip $(REMOTE_HOST)),)
+# ci.cfg: one lane, four entry ids, a full tool batch (~1 min). lanes.cfg: two
+# lanes at tiny bounds for the cross-lane ownership rules (~15 s).
 spec:
 	$(TLA) docs/tla/DurableLog.tla --config docs/tla/DurableLog.cfg --max-states 3000000
-	$(TLA) docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.small.cfg $(SYM_HARNESS) --max-states 3000000
+	$(TLA) docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.ci.cfg -s EntryIds --max-states 3000000
+	$(TLA) docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.lanes.cfg $(SYM_HARNESS) --max-states 3000000
 	$(TLA) docs/tla/VmLifecycle.tla --config docs/tla/VmLifecycle.cfg $(SYM_VM) --max-states 3000000
 
-# Four independent checks; `make -j spec-full` runs them all at once (the
-# checker is single-threaded). Each writes target/spec-<name>.log.
+# Independent checks; `make -j spec-full` runs them all at once (the checker is
+# single-threaded). Each writes target/spec-<name>.log.
 spec-full: spec-full-log spec-full-vm spec-full-harness spec-full-harness-six spec-full-harness-deep
 	@for f in log vm harness harness-six harness-deep; do echo "== $$f"; grep -E "Reachable states|Time:|Cov|violated|error" target/spec-$$f.log; done
 
@@ -75,7 +78,7 @@ spec-full-vm:
 spec-full-harness:
 	@mkdir -p target
 	$(TLA) docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.small.cfg $(SYM_HARNESS) --max-states 50000000 $(COV_HARNESS) > target/spec-harness.log 2>&1
-# CI-sizing candidate: the small configuration one commit shorter.
+# The two-lane configuration one commit shorter than small.
 spec-full-harness-six:
 	@mkdir -p target
 	sed 's/MaxSeq = 7/MaxSeq = 6/' docs/tla/DurableHarness.small.cfg > target/DurableHarness.six.cfg
