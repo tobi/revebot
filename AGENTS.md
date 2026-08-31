@@ -17,7 +17,12 @@ touches — configuration, project tools, sandbox policy — is Lua.
 ## Rules
 
 - **Sandbox or no Reve.** Reve links the `microsandbox` Rust crate directly (pinned
-  `=0.6.8` in `Cargo.toml`). There is exactly one transport, no FFI shim, no CLI, no
+  exactly in `Cargo.toml`: currently a git rev on `tobi/microsandbox` carrying
+  upstream PR #1489, HTTP/HTTPS `403` on denied egress; return to a crates.io `=`
+  pin once it ships). The SDK spawns `~/.microsandbox/bin/msb` as a separate
+  process, so until that release the installed `msb` must be built from the same
+  rev (`cargo build --release -p microsandbox-cli` in the fork, then install it
+  there). There is exactly one transport, no FFI shim, no CLI, no
   daemon, and no host-shell fallback — ever, not for tests, diagnostics, degraded
   operation, or convenience. Every shell command a tool issues — `ctx.sh`, `reve exec` —
   executes inside that VM. Reve must refuse to start if the microVM cannot boot. Never

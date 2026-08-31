@@ -24,7 +24,7 @@ Reve combines three ideas:
 2. **The environment is a real sandbox.** Every model-authored command and every tool's
    `ctx.sh` runs in a full microVM — never in a host-shell fallback. Reve links the
    official [`microsandbox`](https://github.com/superradcompany/microsandbox) Rust crate
-   directly (pinned `=0.6.8`): no FFI shim, no CLI, no daemon, no host shell. The host
+   directly (pinned exactly): no FFI shim, no CLI, no daemon, no host shell. The host
    only orchestrates; the agent works inside its mounted `workspace/` with public
    internet by default and explicitly scoped secrets. Set `open = false` in
    `sandbox.lua` to lock down to an allowlist.
@@ -298,7 +298,9 @@ providers:
 
 ## The mandatory sandbox
 
-Reve links the `microsandbox` Rust crate directly (pinned `=0.6.8` in `Cargo.toml`). There
+Reve links the `microsandbox` Rust crate directly (pinned exactly in `Cargo.toml`; at the
+moment a git rev on `tobi/microsandbox` that carries upstream PR #1489, which answers denied
+HTTP/HTTPS egress with a `403` the agent can read). There
 is no CLI, no daemon, no FFI shim, and no host-shell path: if the VM cannot boot, the agent
 refuses to run rather than quietly executing model-authored commands on your machine.
 

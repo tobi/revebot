@@ -55,9 +55,11 @@ too_many_lines = "allow"
 
 [dependencies]
 # The sandbox. Pinned exactly: reve is written against this API and a silent
-# minor bump would rebind us to something we never read.
-microsandbox = "=0.6.8"
-microsandbox-network = "=0.6.8"
+# minor bump would rebind us to something we never read. Currently a git pin
+# on the fork carrying superradcompany/microsandbox#1489 (HTTP/HTTPS 403 on
+# denied egress); move back to a crates.io `=` pin once that ships.
+microsandbox = { git = "https://github.com/tobi/microsandbox", rev = "9ac3e517" }
+microsandbox-network = { git = "https://github.com/tobi/microsandbox", rev = "9ac3e517" }
 
 # Scripting. Lua is vendored so an agent directory needs no system Lua.
 mlua = { version = "0.11", features = ["lua54", "vendored", "send", "serialize", "async"] }
@@ -93,7 +95,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 tempfile = "3"
 
 [dev-dependencies]
-microsandbox = "=0.6.8"
+microsandbox = { git = "https://github.com/tobi/microsandbox", rev = "9ac3e517" }
 
 [profile.release]
 opt-level = 2

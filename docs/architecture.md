@@ -224,7 +224,10 @@ reloaded state instead of writing something it decided under stale assumptions.
   is re-executed only when the recorded *and* current replay declarations both say `safe`,
   and otherwise gets a synthetic result that admits the effect may or may not have
   happened. A prompt that was still a reservation is placed exactly once.
-- **The sandbox.** Links `microsandbox =0.6.8` directly. The default guest is wrap's
+- **The sandbox.** Links `microsandbox` directly, pinned exactly (currently git rev
+  `9ac3e517` on `tobi/microsandbox` = 0.6.16 + upstream PR #1489: denied HTTP/HTTPS
+  egress is answered with `403` and an agent-facing body instead of a reset; the
+  installed `~/.microsandbox/bin/msb` must be built from that rev until it ships). The default guest is wrap's
   desktop image (`ghcr.io/tobi/wrap:desktop`): toolchain at absolute paths under `/opt`,
   unprivileged `user` (`HOME=/home/user`) with uid/gid realigned to the host workspace
   owner and virtiofs stat virtualization off, XFCE on `:1`, noVNC/VNC published on
@@ -285,7 +288,7 @@ The specification describes more than this crate implements. These are choices, 
   the model can read, not a distinct state.
 - **No SQLite backend, no v3 compatibility.** Memory plus JSONL, v4 only. This is a new
   agent; there is nothing to be compatible with.
-- **Exactly one sandbox transport**, pinned `=0.6.8`. No second transport and no host-shell
+- **Exactly one sandbox transport**, pinned exactly. No second transport and no host-shell
   fallback, ever.
 - **The microVM tests are opt-in** (`#[ignore]`). The unit suite provisions no VM and makes
   no model request.
