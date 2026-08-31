@@ -34,10 +34,10 @@ test:
 TLA ?= tla
 tla:
 	$(TLA) docs/tla/DurableLog.tla --config docs/tla/DurableLog.cfg --max-states 3000000
-	$(TLA) docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.small.cfg --max-states 3000000
+	$(TLA) docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.small.cfg -s EntryIds -s OpIds -s Lanes --max-states 3000000
 
 tla-deep:
-	$(TLA) docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.cfg --max-states 5000000
+	$(TLA) docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.cfg -s EntryIds -s OpIds -s Lanes --max-states 20000000
 
 # Same gate locally and in GitHub Actions. Real microVM tests stay opt-in.
 ci: fmt-check warnings clippy test tla

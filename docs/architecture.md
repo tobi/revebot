@@ -309,7 +309,8 @@ Two layers hold the durable rules. The **design** is model-checked: `docs/tla/Du
 (file-is-replay-recipe, torn-line atomicity, write-once ids, seq monotonicity, compaction
 equivalence) and `docs/tla/DurableHarness.tla` (pending/entry exclusivity, one operation per
 lane, lane-owned `nextRun`, abort-drain payload survival, `aborted` only under cancel,
-intent-before-effect, no re-dispatch of an interrupted `never` tool, terminal cleanup) are
+intent-before-effect, source-ordered parallel tool batches with `op.tool_args` lifecycle, no
+re-dispatch of an interrupted `never` tool, every tool call has a result, terminal cleanup) are
 explored exhaustively on bounded constants by `make tla`, with a mutation table in
 `docs/tla/README.md` proving each invariant can fail. The **implementation** is held by the
 Rust tests below. When a row here and an `Inv*` there disagree, one of them is wrong; fix the
