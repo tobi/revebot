@@ -10,13 +10,13 @@ function extract(name) {
   assert(start >= 0, name);
   return html.slice(start, html.indexOf('\n}', start) + 2);
 }
-const element = () => ({ value:'', children:[], textContent:'', appendChild(n) { this.children.push(n); return n; } });
+const element = () => ({ value:'', dataset:{}, children:[], textContent:'', appendChild(n) { this.children.push(n); return n; } });
 const nodes = new Map();
 let profiles = [{id:'miku', name:'Miku', title:'Old'}];
 let header;
 const context = vm.createContext({
   document:{getElementById(id) { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); }},
-  current:'miku', toolsStarted:false, bots:[],
+  current:'miku', toolsStarted:false, bots:[], busy:{}, paintBusy(){},
   api:async () => ({bots:profiles}), ensureHouseEvents(){},
   el:(tag, cls, text) => ({...element(), textContent:text || ''}),
   avatar:element, modelBadge:() => '',

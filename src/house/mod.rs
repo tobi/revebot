@@ -2,6 +2,7 @@
 
 pub(crate) mod attach;
 pub(crate) mod files;
+pub mod fs;
 pub mod home;
 pub mod memory;
 pub mod profile;
@@ -277,6 +278,26 @@ impl House {
         views
     }
 
+    pub async fn bot_is_busy(&self, id: &str) -> bool {
+        let Ok(harness) = self.inner.ready_harness(id) else {
+            return false;
+        };
+        match harness.session().lane_state(MAIN_LANE).await {
+            Ok(Some((state, _))) => state.current_operation_id.is_some(),
+            _ => false,
+        }
+    }
+
+    pub async fn bots_view(&self) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        for mut value in self.profile_views() {
+            let id = value["id"].as_str().unwrap_or_default().to_string();
+            value["busy"] = serde_json::json!(self.bot_is_busy(&id).await);
+            out.push(value);
+        }
+        out
+    }
+
     pub async fn prompt(&self, bot: &str, text: &str) -> anyhow::Result<PromptAck> {
         self.inner.prompt(bot, text).await
     }
@@ -350,6 +371,18 @@ impl House {
         crate::provider::config::Models::load(&self.inner.project.root.join("models.yml"))
             .map(|m| m.catalog())
             .unwrap_or_default()
+    }
+
+    pub fn list_workspace(&self, path: &str) -> Result<fs::FsList, String> {
+        fs::list(self.inner.project.workspace().as_path(), path)
+    }
+
+    pub fn read_workspace(&self, path: &str) -> Result<fs::FsFile, String> {
+        fs::read(self.inner.project.workspace().as_path(), path)
+    }
+
+    pub fn stat_workspace(&self, path: &str) -> Result<fs::FsStat, String> {
+        fs::stat(self.inner.project.workspace().as_path(), path)
     }
 
     pub fn skills_for(&self, bot: &str) -> Vec<crate::skills::SkillListing> {
@@ -828,7 +861,7 @@ impl Inner {
                 .collect();
             self.skill_seen.lock().insert(id.clone(), snap);
         }
-        spawn_supervisor(harness, cmd_rx);
+        spawn_supervisor(harness, cmd_rx, Arc::downgrade(self), id.clone());
         let _ = self.house_events.send(Event::new(
             "house",
             None,
@@ -1209,7 +1242,26 @@ fn spawn_routines(inner: Arc<Inner>) {
     });
 }
 
-fn spawn_supervisor(harness: Arc<Harness>, mut cmds: mpsc::Receiver<BotCmd>) {
+fn publish_busy(house: &Weak<Inner>, bot_id: &str, busy: bool) {
+    let Some(inner) = house.upgrade() else {
+        return;
+    };
+    let _ = inner.house_events.send(Event::new(
+        "house",
+        None,
+        Kind::BotBusy {
+            bot_id: bot_id.into(),
+            busy,
+        },
+    ));
+}
+
+fn spawn_supervisor(
+    harness: Arc<Harness>,
+    mut cmds: mpsc::Receiver<BotCmd>,
+    house: Weak<Inner>,
+    bot_id: String,
+) {
     tokio::spawn(async move {
         let mut events = harness.subscribe();
         {
@@ -1247,11 +1299,20 @@ fn spawn_supervisor(harness: Arc<Harness>, mut cmds: mpsc::Receiver<BotCmd>) {
                 }
                 event = events.recv() => {
                     match event {
-                        Ok(ev) if matches!(ev.kind, Kind::RunEnd { .. }) => {
-                            let h = harness.clone();
-                            tokio::spawn(async move {
-                                let _ = h.kick(MAIN_LANE).await;
-                            });
+                        Ok(ev) => {
+                            match &ev.kind {
+                                Kind::RunStart | Kind::RunResume { .. } => {
+                                    publish_busy(&house, &bot_id, true);
+                                }
+                                Kind::RunEnd { .. } => {
+                                    publish_busy(&house, &bot_id, false);
+                                    let h = harness.clone();
+                                    tokio::spawn(async move {
+                                        let _ = h.kick(MAIN_LANE).await;
+                                    });
+                                }
+                                _ => {}
+                            }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             if let Ok(Some((state, _))) = harness.session().lane_state(MAIN_LANE).await
@@ -1265,7 +1326,6 @@ fn spawn_supervisor(harness: Arc<Harness>, mut cmds: mpsc::Receiver<BotCmd>) {
                             }
                         }
                         Err(_) => break,
-                        Ok(_) => {}
                     }
                 }
             }

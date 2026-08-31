@@ -77,6 +77,9 @@ fn router(state: AppState) -> Router {
         .route("/api/bots/{id}/soul", get(get_soul).put(put_soul))
         .route("/api/bots/{id}/abort", post(abort_bot))
         .route("/api/models", get(list_models))
+        .route("/api/fs", get(list_fs))
+        .route("/api/fs/file", get(read_fs))
+        .route("/api/fs/stat", get(stat_fs))
         .route("/api/bots/{id}/skills", get(list_skills))
         .route("/api/bots/{id}/secrets", post(complete_secret))
         .route("/api/bots/{id}/events", get(events_ws))
@@ -183,7 +186,7 @@ async fn list_bots(
     if !authorized(&headers, &q, &state.house) {
         return deny();
     }
-    Json(json!({ "bots": state.house.profile_views() })).into_response()
+    Json(json!({ "bots": state.house.bots_view().await })).into_response()
 }
 
 async fn get_bot(
@@ -354,6 +357,57 @@ async fn put_soul(
             Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+#[derive(Default, Deserialize)]
+struct FsQuery {
+    token: Option<String>,
+    path: Option<String>,
+}
+
+async fn list_fs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<FsQuery>,
+) -> Response {
+    let auth = QueryAuth { token: q.token };
+    if !authorized(&headers, &auth, &state.house) {
+        return deny();
+    }
+    match state.house.list_workspace(q.path.as_deref().unwrap_or("")) {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+async fn read_fs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<FsQuery>,
+) -> Response {
+    let auth = QueryAuth { token: q.token };
+    if !authorized(&headers, &auth, &state.house) {
+        return deny();
+    }
+    match state.house.read_workspace(q.path.as_deref().unwrap_or("")) {
+        Ok(file) => Json(file).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+async fn stat_fs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<FsQuery>,
+) -> Response {
+    let auth = QueryAuth { token: q.token };
+    if !authorized(&headers, &auth, &state.house) {
+        return deny();
+    }
+    match state.house.stat_workspace(q.path.as_deref().unwrap_or("")) {
+        Ok(stat) => Json(stat).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
     }
 }
 

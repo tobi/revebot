@@ -886,8 +886,25 @@ fn host_var_for_command(secret_env: &str) -> String {
     format!("REVEBOT_SECRET_{cleaned}")
 }
 
+/// `~` and `~/…` only. `$(command)` is argv, not a shell, so tilde would
+/// otherwise stay literal (`cat '~/.cache/token'`).
+fn expand_tilde(arg: &str) -> String {
+    let home = || std::env::var("HOME").ok().filter(|s| !s.is_empty());
+    if arg == "~" {
+        return home().unwrap_or_else(|| arg.to_string());
+    }
+    if let Some(rest) = arg.strip_prefix("~/")
+        && let Some(home) = home()
+    {
+        let home = home.trim_end_matches('/');
+        return format!("{home}/{rest}");
+    }
+    arg.to_string()
+}
+
 fn run_secret_command(script: &str) -> Result<String, String> {
     let words = shell_words::split(script).map_err(|e| e.to_string())?;
+    let words: Vec<String> = words.iter().map(|w| expand_tilde(w)).collect();
     let Some(program) = words.first() else {
         return Err("empty command".into());
     };
@@ -919,10 +936,12 @@ fn run_secret_command(script: &str) -> Result<String, String> {
 
 fn file_secret_path(source: &str, root: &Path) -> Option<PathBuf> {
     let rest = source.strip_prefix("file:")?;
-    let path = Path::new(rest.trim());
-    if rest.trim().is_empty() {
+    let rest = rest.trim();
+    if rest.is_empty() {
         return None;
     }
+    let expanded = expand_tilde(rest);
+    let path = Path::new(&expanded);
     Some(if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -1421,6 +1440,72 @@ mod tests {
         let var = bind_secret(&secret, root).expect("bind");
         assert_eq!(var, "REVEBOT_SECRET_TOKEN_CMD_TEST_9D2B");
         assert_eq!(std::env::var(&var).as_deref(), Ok("command-secret-ok"));
+    }
+
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let prev = std::env::var("HOME").ok();
+        // SAFETY: test-only HOME swap, restored before return; serialized by HOME_LOCK.
+        unsafe { std::env::set_var("HOME", home) };
+        let out = f();
+        match prev {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        out
+    }
+
+    #[test]
+    fn expand_tilde_only_rewrites_home() {
+        let got = with_home(Path::new("/home/reve"), || {
+            (
+                expand_tilde("~/cache/token"),
+                expand_tilde("~"),
+                expand_tilde("~root/x"),
+                expand_tilde("/abs"),
+            )
+        });
+        assert_eq!(
+            got,
+            (
+                "/home/reve/cache/token".into(),
+                "/home/reve".into(),
+                "~root/x".into(),
+                "/abs".into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_command_source_expands_tilde_in_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("token"), "tilde-secret-ok\n").unwrap();
+        let secret = Secret {
+            env: "TOKEN_TILDE_TEST".into(),
+            source: "$(cat ~/token)".into(),
+            placeholder: None,
+            hosts: vec!["example.com".into()],
+            ..Default::default()
+        };
+        let got = with_home(dir.path(), || secret_value(&secret, Path::new("/tmp")));
+        assert_eq!(got.as_deref(), Some("tilde-secret-ok"));
+    }
+
+    #[test]
+    fn a_file_source_expands_a_leading_tilde() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("token"), "file-tilde-ok\n").unwrap();
+        let secret = Secret {
+            env: "TOKEN_FILE_TILDE".into(),
+            source: "file:~/token".into(),
+            placeholder: None,
+            hosts: vec!["example.com".into()],
+            ..Default::default()
+        };
+        let got = with_home(dir.path(), || secret_value(&secret, Path::new("/tmp")));
+        assert_eq!(got.as_deref(), Some("file-tilde-ok"));
     }
 
     #[test]
