@@ -116,6 +116,12 @@ pub enum Kind {
         resources: Vec<String>,
         unknown: bool,
     },
+    /// A bot started or finished a run. House-wide; the rail uses it so a
+    /// working animation is not tied to which chat is open.
+    BotBusy {
+        bot_id: String,
+        busy: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -165,5 +171,21 @@ mod tests {
         assert_eq!(json["type"], "user_notice");
         assert_eq!(json["text"], "What's your timezone?");
         assert_eq!(json["bot_id"], "rune");
+    }
+
+    #[test]
+    fn a_bot_busy_event_names_the_bot() {
+        let event = Event::new(
+            "house",
+            None,
+            Kind::BotBusy {
+                bot_id: "rune".into(),
+                busy: true,
+            },
+        );
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "bot_busy");
+        assert_eq!(json["bot_id"], "rune");
+        assert_eq!(json["busy"], true);
     }
 }

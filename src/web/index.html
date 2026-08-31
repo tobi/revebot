@@ -107,8 +107,13 @@
   .chat-head .sub { font-size: 12px; color: var(--dim); }
   .log-wrap { flex: 1; min-height: 0; position: relative; display: flex; flex-direction: column; }
   #log { flex: 1; overflow: auto; padding: 20px 22px 8px; display: flex; flex-direction: column; gap: 6px; }
+  #status {
+    flex: none; height: 36px; padding: 0 28px; display: flex; align-items: center;
+    font-size: 13px; color: var(--dim); overflow: hidden; line-height: 1.3;
+  }
+  #status:empty { visibility: hidden; }
   .scroll-fab {
-    position: absolute; right: 22px; bottom: 12px; z-index: 3;
+    position: absolute; right: 22px; bottom: 44px; z-index: 3;
     width: 36px; height: 36px; border: 0; border-radius: 50%;
     background: var(--panel); color: var(--text); cursor: pointer;
     box-shadow: 0 4px 18px #000a; display: none; align-items: center; justify-content: center;
@@ -160,8 +165,8 @@
     font: 12.5px/1.45 ui-monospace, SFMono-Regular, monospace; white-space: pre; }
   .md .fence pre { scrollbar-color: var(--scroll) #141416; }
   .md code { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 0.9em; }
-  .bubble.default .md .fence { background: #ececee; border-color: #d4d4d8; }
-  .bubble.default .md .fence-bar { color: #52525b; }
+  .bubble.default .md .fence { background: #0066d6; border-color: #4da3ff66; }
+  .bubble.default .md .fence-bar { color: #cfe6ff; }
   .bubble.default .md pre { background: transparent; }
   .bubble.default .md a { color: inherit; }
   .tool {
@@ -181,7 +186,7 @@
   .msg.followed.end .bubble-content { border-bottom-right-radius: 8px; }
   .msg.cont.start .bubble-content { border-top-left-radius: 8px; }
   .msg.cont.end .bubble-content { border-top-right-radius: 8px; }
-  .bubble.default .bubble-content { background: var(--primary); color: var(--primary-fg); }
+  .bubble.default .bubble-content { background: #0a84ff; color: #fff; }
   .bubble.muted .bubble-content { background: var(--muted); color: var(--text); }
   .bubble.tinted .bubble-content { background: #1c1830; color: var(--text); }
   .bubble.outline .bubble-content { background: transparent; border: 1px solid var(--line); }
@@ -193,7 +198,7 @@
   .marker::before, .marker::after { content: ""; flex: 1; height: 1px; background: var(--line); max-width: 72px; }
   .chip { display: inline-block; background: var(--chip); color: var(--chip-text);
     border-radius: 6px; padding: 1px 6px; font-size: 12px; font-family: ui-monospace, SFMono-Regular, monospace; }
-  .bubble.default .chip { background: #d4d4d8; color: #27272a; }
+  .bubble.default .chip { background: #ffffff33; color: #fff; }
   a.chip { text-decoration: none; }
   .shimmer {
     background: linear-gradient(90deg, var(--quiet) 0%, var(--text) 45%, var(--quiet) 100%);
@@ -202,7 +207,6 @@
     animation: shimmer 1.5s linear infinite;
   }
   @keyframes shimmer { to { background-position: -200% 0; } }
-  #status { padding: 4px 28px 8px; min-height: 1.2em; font-size: 13px; color: var(--dim); flex: none; }
   .compose { padding: 10px 16px 16px; flex: none; position: sticky; bottom: 0; background: var(--bg); }
   .compose .box { display: flex; align-items: flex-end; gap: 8px;
     background: var(--panel); border-radius: 18px; padding: 8px 12px; border: 1px solid var(--line); }
@@ -256,15 +260,92 @@
   .send { width: 36px; height: 36px; border: 0; border-radius: 50%; background: var(--primary);
     color: var(--primary-fg); cursor: pointer; font-size: 16px; flex: none; }
 
-  .side-pad { padding: 16px 16px 8px; }
+  .side-tabs {
+    display: flex; gap: 2px; padding: 6px 10px 0; flex: none;
+    border-bottom: 1px solid var(--line);
+  }
+  .side-tab {
+    background: transparent; border: 0; color: var(--dim); cursor: pointer;
+    padding: 8px 10px; font: inherit; font-size: 12.5px; font-weight: 650;
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .side-tab:hover { color: var(--text); }
+  .side-tab.on { color: var(--text); border-bottom-color: var(--text); }
+  .side-pane { display: none; flex: 1; min-height: 0; flex-direction: column; overflow: hidden; }
+  .side-pane.on { display: flex; }
+  .file-ref {
+    color: var(--accent); text-decoration: underline; text-underline-offset: 2px;
+    cursor: pointer;
+  }
+  .bubble.default .file-ref { color: inherit; }
+  code.file-ref, .chip.file-ref { text-decoration: underline; text-underline-offset: 2px; }
+  .file-peek {
+    flex: none; max-height: 38%; min-height: 0; display: flex; flex-direction: column;
+    border-bottom: 1px solid var(--line);
+  }
+  .file-peek[hidden] { display: none !important; }
+  .file-peek-bar {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 6px 10px 0; font-size: 12px; color: var(--dim); flex: none;
+  }
+  .file-peek-bar span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-peek pre {
+    margin: 0; padding: 8px 12px 12px; overflow: auto; flex: 1; min-height: 0;
+    font: 11.5px/1.45 ui-monospace, SFMono-Regular, monospace;
+    white-space: pre-wrap; color: var(--text);
+  }
+  .side-pad { padding: 16px 16px 8px; flex: none; }
   .side h2 { font-size: 13px; font-weight: 650; margin: 0 0 10px; color: var(--dim); }
   .screen { background: #0a0a0c; border: 1px solid var(--line); border-radius: 14px;
-    overflow: hidden; aspect-ratio: 16/10; display: flex; flex-direction: column; }
+    overflow: hidden; aspect-ratio: 16/10; display: flex; flex-direction: column; flex: none; }
   .screen .bar { height: 22px; background: #161618; display: flex; align-items: center; gap: 5px; padding: 0 8px; }
   .screen .dot { width: 8px; height: 8px; border-radius: 50%; background: #3a3a40; }
-  .screen .body { flex: 1; color: var(--dim); font-size: 12px; padding: 16px; display: flex;
-    align-items: center; justify-content: center; text-align: center; }
-  #routines { flex: 1; overflow: auto; padding: 4px 16px 16px; }
+  .screen .body { flex: 1; color: var(--dim); font-size: 12px; padding: 10px 12px; display: flex;
+    align-items: center; justify-content: center; text-align: center; min-height: 0; overflow: auto; }
+  .screen .body.file { display: block; text-align: left; align-items: stretch; justify-content: start;
+    font: 11.5px/1.45 ui-monospace, SFMono-Regular, monospace; white-space: pre-wrap; color: var(--text); }
+  .tree-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .tree-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .tree-head h2 { margin: 0; }
+  .tree-acts { display: flex; gap: 2px; }
+  .tree-act {
+    background: transparent; border: 0; color: var(--dim); width: 24px; height: 24px;
+    border-radius: 4px; cursor: pointer; display: flex; align-items: center;
+    justify-content: center; padding: 0;
+  }
+  .tree-act:hover { background: var(--muted); color: var(--text); }
+  .tree-act svg { display: block; }
+  #tree { flex: 1; overflow: auto; padding: 0 0 8px; font-size: 13px; outline: none; }
+  .tree-row {
+    display: flex; align-items: center; gap: 4px; height: 22px;
+    padding: 0 8px 0 calc(4px + var(--d, 0) * 16px);
+    cursor: pointer; user-select: none; position: relative; white-space: nowrap;
+  }
+  .tree-row:hover { background: #18181b; }
+  .tree-row.on { background: var(--muted); }
+  .tree-row.on:hover { background: var(--muted); }
+  #tree:focus-visible .tree-row.on, #tree:focus .tree-row.on {
+    outline: 1px solid var(--accent); outline-offset: -1px;
+  }
+  .tree-tw {
+    width: 16px; height: 16px; flex: none; color: var(--quiet);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .tree-tw svg { width: 16px; height: 16px; transition: transform .1s ease; }
+  .tree-row.dir.open .tree-tw svg { transform: rotate(90deg); }
+  .tree-row:not(.dir) .tree-tw { visibility: hidden; }
+  .tree-ico { width: 16px; height: 16px; flex: none; display: flex; }
+  .tree-ico svg { width: 16px; height: 16px; display: block; }
+  .tree-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .tree-guide {
+    position: absolute; top: 0; bottom: 0; width: 1px; background: transparent;
+    pointer-events: none;
+  }
+  #tree:hover .tree-guide, #tree:focus-within .tree-guide { background: var(--line); }
+  .tree-kids { display: none; }
+  .tree-row.open + .tree-kids { display: block; }
+  .tree-kids[hidden] { display: none !important; }
+  #routines { flex: 1; min-height: 0; overflow: auto; padding: 4px 16px 16px; }
   .routine { padding: 10px 4px; border-bottom: 1px solid var(--line); cursor: pointer; border-radius: 8px; }
   .routine:hover { background: var(--muted); }
   .routine .rn { font-weight: 600; }
@@ -297,6 +378,19 @@
     border-radius: 10px; padding: 8px 14px; cursor: pointer; }
   .sheet .primary { background: var(--primary); color: var(--primary-fg); border: 0;
     border-radius: 10px; padding: 8px 14px; cursor: pointer; font-weight: 650; }
+  .ctx {
+    position: fixed; z-index: 40; display: none; min-width: 168px;
+    background: #141416; border: 1px solid var(--line); border-radius: 12px;
+    padding: 6px; box-shadow: 0 16px 40px #000d;
+  }
+  .ctx.on { display: block; }
+  .ctx button {
+    display: block; width: 100%; text-align: left; background: transparent;
+    color: var(--text); border: 0; padding: 8px 12px; border-radius: 8px;
+    cursor: pointer; font: inherit;
+  }
+  .ctx button:hover { background: var(--muted); }
+  .ctx button.danger { color: #fca5a5; }
   .av-preview { width: 72px; height: 72px; margin: 0 auto 12px; }
   .swatches, .shapes { display: flex; flex-wrap: wrap; gap: 6px; }
   .swatch, .shape {
@@ -339,9 +433,9 @@
     </div>
     <div class="log-wrap">
       <div id="log"></div>
+      <div id="status"></div>
       <button class="scroll-fab" id="fab" type="button" title="Scroll to bottom">↓<span class="n" id="fab-n" hidden></span></button>
     </div>
-    <div id="status"></div>
     <form class="compose" id="compose">
       <div class="box">
         <button class="icon" type="button" title="New agent" id="new2">+</button>
@@ -351,18 +445,50 @@
     </form>
   </main>
   <aside class="side">
-    <div class="side-pad">
-      <h2 id="screen-title">Screen</h2>
-      <div class="screen">
-        <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
-        <div class="body">House computer is the microVM.<br>/workspace is shared by every bot.</div>
+    <div class="side-tabs" role="tablist">
+      <button type="button" class="side-tab on" data-pane="screen" role="tab" aria-selected="true">Screen</button>
+      <button type="button" class="side-tab" data-pane="files" role="tab" aria-selected="false">Files</button>
+      <button type="button" class="side-tab" data-pane="routines" role="tab" aria-selected="false">Routines</button>
+    </div>
+    <div class="side-pane on" id="pane-screen" role="tabpanel">
+      <div class="side-pad">
+        <h2 id="screen-title">Screen</h2>
+        <div class="screen">
+          <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+          <div class="body">House computer is the microVM.<br>/workspace is shared by every bot.</div>
+        </div>
       </div>
     </div>
-    <div class="side-pad" style="display:flex;justify-content:space-between;align-items:center">
-      <h2 style="margin:0">Routines</h2>
-      <span class="plus" title="Edit routines/*.lua" style="padding:0">+</span>
+    <div class="side-pane" id="pane-files" role="tabpanel">
+      <div class="file-peek" id="file-peek" hidden>
+        <div class="file-peek-bar">
+          <span id="file-peek-name"></span>
+          <button type="button" class="tree-act" id="file-peek-close" title="Close preview">×</button>
+        </div>
+        <pre id="file-peek-body"></pre>
+      </div>
+      <div class="tree-wrap">
+        <div class="side-pad tree-head">
+          <h2>Files</h2>
+          <div class="tree-acts">
+            <button type="button" class="tree-act" id="tree-refresh" title="Refresh Explorer">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path stroke="currentColor" stroke-width="1.4" stroke-linecap="round" d="M3.2 8a4.8 4.8 0 1 1 .9 2.8M3.2 8V4.5M3.2 8H6.4"/></svg>
+            </button>
+            <button type="button" class="tree-act" id="tree-collapse" title="Collapse Folders in Explorer">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path stroke="currentColor" stroke-width="1.4" stroke-linecap="round" d="M3 4.5h10M3 8h10M3 11.5h6"/></svg>
+            </button>
+          </div>
+        </div>
+        <div id="tree" tabindex="0" role="tree" aria-label="Workspace"></div>
+      </div>
     </div>
-    <div id="routines"></div>
+    <div class="side-pane" id="pane-routines" role="tabpanel">
+      <div class="side-pad" style="display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0">Routines</h2>
+        <span class="plus" title="Edit routines/*.lua" style="padding:0">+</span>
+      </div>
+      <div id="routines"></div>
+    </div>
   </aside>
 </div>
 <div class="sheet" id="sheet">
@@ -395,6 +521,10 @@
   </form>
 </div>
 <div id="ac" class="ac" hidden></div>
+<div id="ctx" class="ctx" hidden>
+  <button type="button" id="ctx-edit">Edit…</button>
+  <button type="button" id="ctx-delete" class="danger">Delete</button>
+</div>
 <script>
 /*{{BLOUB}}*/
 const TOKEN = "{{TOKEN}}";
@@ -404,17 +534,7 @@ let bots = [];
 let skills = [];
 let ws = null;
 let houseWs = null;
-function ensureHouseEvents() {
-  if (houseWs && (houseWs.readyState === 0 || houseWs.readyState === 1)) return;
-  houseWs = new WebSocket((location.protocol === "https:" ? "wss:" : "ws:") + "//" + location.host +
-    "/api/events?token=" + encodeURIComponent(TOKEN));
-  houseWs.onmessage = (event) => {
-    const data = JSON.parse(event.data);
-    if (data.type === "roster_changed" || data.type === "lagged") loadBots().catch(console.error);
-  };
-  houseWs.onopen = () => loadBots().catch(console.error);
-  houseWs.onclose = () => { setTimeout(ensureHouseEvents, 1500); };
-}
+let busy = {};
 let toolsStarted = false;
 let pin = true;
 let unread = 0;
@@ -481,8 +601,15 @@ function flush() {
     anchor = node;
     items[i].height = node.offsetHeight || items[i].height || 56;
   }
-  if (pin) log.scrollTop = log.scrollHeight;
+  stickBottom();
   updateFab();
+}
+
+function stickBottom() {
+  if (!pin) return;
+  const log = logEl();
+  log.scrollTop = log.scrollHeight;
+  requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; });
 }
 
 function visibleFrom() {
@@ -527,13 +654,33 @@ function avatar(id, spec, size) {
   return wrap;
 }
 
-function setWorking(on) {
-  const head = document.getElementById("head-av");
-  if (head) head.classList.toggle("working", !!on);
+function setBusy(id, on) {
+  if (!id) return;
+  if (on) busy[id] = true;
+  else delete busy[id];
+  paintBusy();
+}
+
+function paintBusy() {
   document.querySelectorAll("#bots .bot").forEach((n) => {
     const av = n.querySelector(".av");
-    if (av) av.classList.toggle("working", !!on && n.classList.contains("on"));
+    if (av) av.classList.toggle("working", !!busy[n.dataset.id]);
   });
+  const head = document.getElementById("head-av");
+  if (head) head.classList.toggle("working", !!busy[current]);
+}
+
+function ensureHouseEvents() {
+  if (houseWs && (houseWs.readyState === 0 || houseWs.readyState === 1)) return;
+  houseWs = new WebSocket((location.protocol === "https:" ? "wss:" : "ws:") + "//" + location.host +
+    "/api/events?token=" + encodeURIComponent(TOKEN));
+  houseWs.onmessage = (ev) => {
+    const e = JSON.parse(ev.data);
+    if (e.type === "bot_busy") setBusy(e.bot_id || e.botId, !!e.busy);
+    if (e.type === "roster_changed" || e.type === "lagged") loadBots().catch(console.error);
+  };
+  houseWs.onopen = () => loadBots().catch(console.error);
+  houseWs.onclose = () => { setTimeout(ensureHouseEvents, 1500); };
 }
 
 function modelBadge(spec) {
@@ -1069,6 +1216,9 @@ async function loadBots() {
     if (!onlyDefault) box.appendChild(el("div", "group-label", g));
     for (const bot of groups[g]) {
       const d = el("div", "bot" + (current === bot.id ? " on" : ""));
+      d.dataset.id = bot.id;
+      if (bot.busy) busy[bot.id] = true;
+      else delete busy[bot.id];
       d.appendChild(avatar(bot.id, bot.avatar, 42));
       const meta = el("div", "meta");
       const l1 = el("div", "l1");
@@ -1079,6 +1229,7 @@ async function loadBots() {
       meta.appendChild(el("div", "prev", bot.profile_error ? "Profile error: " + bot.profile_error : (bot.title || bot.description || bot.id)));
       d.appendChild(meta);
       d.onclick = () => select(bot.id);
+      d.oncontextmenu = (e) => { e.preventDefault(); openCtx(e, bot); };
       box.appendChild(d);
     }
   }
@@ -1092,7 +1243,7 @@ async function loadBots() {
     }
   }
   if (current) paintHead(bots.find((bot) => bot.id === current));
-  if (toolsStarted) setWorking(true);
+  paintBusy();
 }
 
 function paintHead(bot) {
@@ -1145,6 +1296,7 @@ function paintLog(bot, msgs) {
       continue;
     }
     if (role === "user") {
+      sawTool = false;
       const raw = textOf(msg.content) || (typeof msg.content === "string" ? msg.content : "");
       const u = unwrapUser(raw);
       if (u.kind === "agent") {
@@ -1247,13 +1399,13 @@ async function select(id, fromRoute) {
   current = id;
   if (!fromRoute) setRoute(id);
   toolsStarted = false;
-  setWorking(false);
   pin = true;
   unread = 0;
   document.getElementById("status").textContent = "";
   resetTranscript();
   const bot = bots.find((b) => b.id === id);
   paintHead(bot);
+  paintBusy();
   await loadBots();
   await refreshLog(id);
   loadSkills(id).catch(() => {});
@@ -1266,14 +1418,14 @@ async function select(id, fromRoute) {
     const t = e.type;
     if (t === "run_start" || t === "run_resume") {
       toolsStarted = false;
-      setWorking(true);
+      setBusy(id, true);
       document.getElementById("status").innerHTML = '<span class="shimmer">Working…</span>';
     } else if (t === "message_update" && !toolsStarted) {
       const empty = logEl().querySelector(".empty");
       if (empty) empty.remove();
       ensureStream(bot).appendChild(document.createTextNode(e.delta || ""));
       scheduleFlush();
-      if (pin) logEl().scrollTop = logEl().scrollHeight;
+      if (pin) stickBottom();
       else { unread++; updateFab(); }
     } else if (t === "tool_start") {
       toolsStarted = true;
@@ -1297,12 +1449,12 @@ async function select(id, fromRoute) {
       if (empty) empty.remove();
       const text = e.text || "";
       if (text) addMessage("start", "muted", bot ? bot.name : "bot", text, bot && bot.avatar, bot && bot.id);
-      if (pin) logEl().scrollTop = logEl().scrollHeight;
+      if (pin) stickBottom();
       else { unread++; updateFab(); }
     } else if (t === "run_end") {
       document.getElementById("status").textContent = "";
       toolsStarted = false;
-      setWorking(false);
+      setBusy(id, false);
       loadBots().catch(() => {});
       refreshLog(id).catch(() => {});
     }
@@ -1333,7 +1485,473 @@ async function loadRoutines() {
   }
 }
 
+function joinPath(a, b) {
+  if (!a) return b;
+  return a.replace(/\/+$/, "") + "/" + b;
+}
+
+const TREE_ICO = {
+  chevron: '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M6.7 4.3a.75.75 0 0 0 0 1.06L9.34 8 6.7 10.64a.75.75 0 1 0 1.06 1.06l3.17-3.17a.75.75 0 0 0 0-1.06L7.76 4.3a.75.75 0 0 0-1.06 0z"/></svg>',
+  folder: '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="#dcb67a" d="M1.5 3.25c0-.69.56-1.25 1.25-1.25h3.17c.27 0 .53.09.74.25L8.1 3.5h6.15c.69 0 1.25.56 1.25 1.25v7.5c0 .69-.56 1.25-1.25 1.25h-11.5c-.69 0-1.25-.56-1.25-1.25z"/></svg>',
+  folderOpen: '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="#dcb67a" d="M1.5 3.25c0-.69.56-1.25 1.25-1.25h3.17c.27 0 .53.09.74.25L8.1 3.5h.65l-1.12 5.5H2.4L1.5 4.6zm.9 6.75h5.72c.3 0 .57-.2.66-.48l1.55-5.02h3.42c.69 0 1.25.56 1.25 1.25v7.5c0 .69-.56 1.25-1.25 1.25H2.75c-.69 0-1.25-.56-1.25-1.25V10z"/></svg>',
+  file: '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="#8b8b8b" d="M4 1.5h5.2L13.5 6v8.5H4z"/><path fill="#1e1e1e" d="M9.2 1.5V6h4.3z"/></svg>'
+};
+
+let treeGen = 0;
+let treeType = "";
+let treeTypeT = 0;
+let treeReady = false;
+let treeLoad = null;
+
+function treeDepth(row) {
+  return Number(row.style.getPropertyValue("--d")) || 0;
+}
+
+function treeKids(row) {
+  const n = row.nextElementSibling;
+  return n && n.classList.contains("tree-kids") ? n : null;
+}
+
+function parentRow(row) {
+  const kids = row.parentElement && row.parentElement.parentElement;
+  if (!kids || !kids.classList.contains("tree-kids")) return null;
+  return kids.previousElementSibling;
+}
+
+function visibleRows() {
+  return [...document.querySelectorAll("#tree .tree-row")].filter((r) => r.offsetParent);
+}
+
+function selectRow(row, scroll) {
+  if (!row) return;
+  document.querySelectorAll("#tree .tree-row.on").forEach((n) => {
+    n.classList.remove("on");
+    n.removeAttribute("aria-selected");
+  });
+  row.classList.add("on");
+  row.setAttribute("aria-selected", "true");
+  if (scroll) row.scrollIntoView({ block: "nearest" });
+}
+
+function setFolderIcon(row, open) {
+  const ico = row.querySelector(".tree-ico");
+  if (ico) ico.innerHTML = open ? TREE_ICO.folderOpen : TREE_ICO.folder;
+}
+
+async function expandRow(row) {
+  if (!row.classList.contains("dir") || row.classList.contains("open")) return;
+  row.classList.add("open");
+  row.setAttribute("aria-expanded", "true");
+  setFolderIcon(row, true);
+  const kids = treeKids(row);
+  if (!kids) return;
+  kids.hidden = false;
+  if (row.dataset.loaded || row.dataset.loading) return;
+  row.dataset.loading = "1";
+  try {
+    kids.appendChild(await treeBranch(row.dataset.path || "", treeDepth(row) + 1));
+    row.dataset.loaded = "1";
+  } catch (err) {
+    kids.appendChild(el("div", "rs", err.message || "unreadable"));
+  } finally {
+    delete row.dataset.loading;
+  }
+}
+
+function collapseRow(row) {
+  if (!row.classList.contains("dir") || !row.classList.contains("open")) return;
+  row.classList.remove("open");
+  row.setAttribute("aria-expanded", "false");
+  setFolderIcon(row, false);
+  const kids = treeKids(row);
+  if (kids) kids.hidden = true;
+}
+
+function collapseTree() {
+  document.querySelectorAll("#tree .tree-row.dir.open").forEach((row) => {
+    if (row.dataset.path) collapseRow(row);
+  });
+}
+
+async function expandPath(path) {
+  if (!path) return;
+  let acc = "";
+  for (const part of path.split("/")) {
+    acc = acc ? acc + "/" + part : part;
+    const row = document.querySelector("#tree .tree-row[data-path=\"" + CSS.escape(acc) + "\"]");
+    if (!row || !row.classList.contains("dir")) return;
+    await expandRow(row);
+  }
+}
+
+function openPaths() {
+  return [...document.querySelectorAll("#tree .tree-row.dir.open")]
+    .map((r) => r.dataset.path)
+    .filter((p) => p);
+}
+
+function treeNode(path, name, isDir, depth) {
+  const node = el("div", "tree-node");
+  const row = el("div", "tree-row" + (isDir ? " dir" : ""));
+  row.style.setProperty("--d", String(depth));
+  row.dataset.path = path;
+  row.title = path ? "/workspace/" + path : "/workspace";
+  row.setAttribute("role", "treeitem");
+  row.setAttribute("aria-level", String(depth + 1));
+  if (isDir) row.setAttribute("aria-expanded", "false");
+  for (let i = 0; i < depth; i++) {
+    const g = el("span", "tree-guide");
+    g.style.left = (4 + i * 16 + 8) + "px";
+    row.appendChild(g);
+  }
+  const tw = el("span", "tree-tw");
+  tw.innerHTML = TREE_ICO.chevron;
+  const ico = el("span", "tree-ico");
+  ico.innerHTML = isDir ? TREE_ICO.folder : TREE_ICO.file;
+  row.appendChild(tw);
+  row.appendChild(ico);
+  row.appendChild(el("span", "tree-name", name));
+  if (isDir) {
+    tw.onclick = async (e) => {
+      e.stopPropagation();
+      document.getElementById("tree").focus({ preventScroll: true });
+      selectRow(row);
+      if (row.classList.contains("open")) collapseRow(row);
+      else await expandRow(row);
+    };
+  }
+  row.onclick = async (e) => {
+    e.stopPropagation();
+    document.getElementById("tree").focus({ preventScroll: true });
+    selectRow(row);
+    if (isDir) {
+      if (!row.classList.contains("open")) await expandRow(row);
+    } else {
+      previewFile(path);
+    }
+  };
+  node.appendChild(row);
+  if (isDir) {
+    const kids = el("div", "tree-kids");
+    kids.hidden = true;
+    kids.setAttribute("role", "group");
+    node.appendChild(kids);
+  }
+  return node;
+}
+
+async function treeBranch(path, depth) {
+  const frag = document.createDocumentFragment();
+  const data = await api("/api/fs?path=" + encodeURIComponent(path));
+  for (const ent of data.entries || []) {
+    frag.appendChild(treeNode(joinPath(path, ent.name), ent.name, !!ent.dir, depth));
+  }
+  return frag;
+}
+
+async function ensureTree() {
+  if (treeReady && document.querySelector("#tree .tree-row")) return;
+  if (treeLoad) return treeLoad;
+  treeLoad = (async () => {
+    try {
+      await loadTree();
+      treeReady = true;
+    } catch (e) {
+      treeReady = false;
+      throw e;
+    } finally {
+      treeLoad = null;
+    }
+  })();
+  return treeLoad;
+}
+
+async function loadTree() {
+  const gen = ++treeGen;
+  const box = document.getElementById("tree");
+  const keep = openPaths();
+  const on = (box.querySelector(".tree-row.on") || {}).dataset;
+  const sel = on && on.path;
+  box.textContent = "";
+  try {
+    const root = treeNode("", "workspace", true, 0);
+    box.appendChild(root);
+    await expandRow(root.querySelector(".tree-row"));
+    if (gen !== treeGen) return;
+    for (const p of keep) {
+      await expandPath(p);
+      if (gen !== treeGen) return;
+    }
+    if (sel) {
+      const row = box.querySelector(".tree-row[data-path=\"" + CSS.escape(sel) + "\"]");
+      if (row) selectRow(row, true);
+    }
+  } catch (e) {
+    if (gen !== treeGen) return;
+    box.appendChild(el("div", "rs", e.message || "unreadable"));
+  }
+}
+
+function treeTypefind(ch) {
+  treeType += ch.toLowerCase();
+  clearTimeout(treeTypeT);
+  treeTypeT = setTimeout(() => { treeType = ""; }, 600);
+  const rows = visibleRows();
+  if (!rows.length) return;
+  const i = rows.findIndex((r) => r.classList.contains("on"));
+  const ordered = rows.slice(i + 1).concat(rows.slice(0, i + 1));
+  const hit = ordered.find((r) => {
+    const n = r.querySelector(".tree-name");
+    return n && n.textContent.toLowerCase().startsWith(treeType);
+  });
+  if (hit) selectRow(hit, true);
+}
+
+function treeKey(e) {
+  const rows = visibleRows();
+  if (!rows.length) return;
+  let i = rows.findIndex((r) => r.classList.contains("on"));
+  if (i < 0) i = 0;
+  const row = rows[i];
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    selectRow(rows[Math.min(i + 1, rows.length - 1)], true);
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    selectRow(rows[Math.max(i - 1, 0)], true);
+  } else if (e.key === "ArrowRight") {
+    e.preventDefault();
+    if (row.classList.contains("dir")) {
+      if (!row.classList.contains("open")) expandRow(row);
+      else if (rows[i + 1]) selectRow(rows[i + 1], true);
+    }
+  } else if (e.key === "ArrowLeft") {
+    e.preventDefault();
+    if (row.classList.contains("dir") && row.classList.contains("open")) collapseRow(row);
+    else {
+      const p = parentRow(row);
+      if (p) selectRow(p, true);
+    }
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    row.click();
+  } else if (e.key === "Home") {
+    e.preventDefault();
+    selectRow(rows[0], true);
+  } else if (e.key === "End") {
+    e.preventDefault();
+    selectRow(rows[rows.length - 1], true);
+  } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    treeTypefind(e.key);
+  }
+}
+
+async function previewFile(path) {
+  const body = document.querySelector(".screen .body");
+  const title = document.getElementById("screen-title");
+  const peek = document.getElementById("file-peek");
+  const peekBody = document.getElementById("file-peek-body");
+  const peekName = document.getElementById("file-peek-name");
+  const name = path.split("/").pop() || path || "workspace";
+  body.classList.add("file");
+  title.textContent = name;
+  peek.hidden = false;
+  peekName.textContent = path ? "/workspace/" + path : "/workspace";
+  try {
+    const data = await api("/api/fs/file?path=" + encodeURIComponent(path));
+    const text = data.binary
+      ? path + "\n\nbinary file"
+      : (data.text || "") + (data.truncated ? "\n\n… truncated" : "");
+    body.textContent = text;
+    peekBody.textContent = text;
+  } catch (e) {
+    const msg = e.message || "unreadable";
+    body.textContent = msg;
+    peekBody.textContent = msg;
+  }
+}
+
+function showSide(name) {
+  document.querySelectorAll(".side-tab").forEach((t) => {
+    const on = t.dataset.pane === name;
+    t.classList.toggle("on", on);
+    t.setAttribute("aria-selected", on ? "true" : "false");
+  });
+  document.querySelectorAll(".side-pane").forEach((p) => {
+    p.classList.toggle("on", p.id === "pane-" + name);
+  });
+  if (name === "files") ensureTree().catch(() => {});
+}
+
+const fsStat = new Map();
+
+function pathInfo(rel) {
+  const key = rel || "";
+  if (fsStat.has(key)) return fsStat.get(key);
+  const p = api("/api/fs/stat?path=" + encodeURIComponent(key))
+    .then((d) => ({ exists: !!d.exists, dir: !!d.dir }))
+    .catch(() => ({ exists: false, dir: false }));
+  fsStat.set(key, p);
+  return p;
+}
+
+function asWorkspacePath(raw) {
+  if (raw == null) return null;
+  let s = String(raw).trim();
+  s = s.replace(/^[`'"]+|['"`]+$/g, "");
+  s = s.replace(/[.,;:!?)]+$/g, "");
+  if (!s || /\s/.test(s) || s.includes("://")) return null;
+  if (s === "/workspace" || s === "/workspace/") return "";
+  if (s.startsWith("/workspace/")) s = s.slice("/workspace/".length);
+  else if (s.startsWith("/")) return null;
+  else s = s.replace(/^\.\//, "");
+  s = s.replace(/\/+$/, "");
+  if (!s) return "";
+  if (s.split("/").some((p) => !p || p === "." || p === "..")) return null;
+  if (!s.includes("/") && !/\.(md|txt|json|ya?ml|lua|rs|toml|html|css|js|ts|py|sh|svg|png|jpe?g|webp|lock|jsonl|mdc)$/i.test(s)) {
+    return null;
+  }
+  return s;
+}
+
+function pathMatchAt(text, offset) {
+  const re = /\/workspace(?:\/[\w.+\-]+)*\/?/g;
+  let m;
+  while ((m = re.exec(text))) {
+    if (offset >= m.index && offset <= m.index + m[0].length) return m;
+  }
+  return null;
+}
+
+function fileTokenAt(text, offset) {
+  const abs = pathMatchAt(text, offset);
+  if (abs) return abs;
+  let s = offset, e = offset;
+  while (s > 0 && /[\w./+\-]/.test(text[s - 1])) s--;
+  while (e < text.length && /[\w./+\-]/.test(text[e])) e++;
+  const tok = text.slice(s, e);
+  if (asWorkspacePath(tok) == null) return null;
+  return { 0: tok, index: s };
+}
+
+function caretFromPoint(x, y) {
+  if (document.caretRangeFromPoint) {
+    const r = document.caretRangeFromPoint(x, y);
+    if (!r) return null;
+    return { node: r.startContainer, offset: r.startOffset };
+  }
+  if (document.caretPositionFromPoint) {
+    const p = document.caretPositionFromPoint(x, y);
+    if (!p) return null;
+    return { node: p.offsetNode, offset: p.offset };
+  }
+  return null;
+}
+
+let liveRef = null;
+
+function unwrapFileRef(ref) {
+  if (!ref) return;
+  if (liveRef === ref) liveRef = null;
+  if (!ref.isConnected) return;
+  if (ref.tagName === "CODE") {
+    ref.classList.remove("file-ref");
+    delete ref.dataset.path;
+    ref.removeAttribute("title");
+    return;
+  }
+  const parent = ref.parentNode;
+  if (!parent) return;
+  parent.replaceChild(document.createTextNode(ref.textContent), ref);
+  parent.normalize();
+}
+
+function wrapTextRange(node, start, end, rel) {
+  if (!node || !node.parentNode) return null;
+  if (node.parentElement && node.parentElement.closest(".file-ref")) return null;
+  const text = node.data;
+  if (start < 0 || end > text.length || start >= end) return null;
+  const span = el("span", "file-ref");
+  span.dataset.path = rel;
+  span.title = rel ? "/workspace/" + rel : "/workspace";
+  span.textContent = text.slice(start, end);
+  const after = document.createTextNode(text.slice(end));
+  node.data = text.slice(0, start);
+  node.parentNode.insertBefore(span, node.nextSibling);
+  node.parentNode.insertBefore(after, span.nextSibling);
+  if (liveRef && liveRef !== span) unwrapFileRef(liveRef);
+  liveRef = span;
+  return span;
+}
+
+function maybeLinkCode(code) {
+  if (!code || code.classList.contains("file-ref")) return;
+  if (code.closest(".fence")) return;
+  const rel = asWorkspacePath(code.textContent);
+  if (rel == null) return;
+  pathInfo(rel).then((info) => {
+    if (!info.exists || !code.isConnected) return;
+    if (liveRef && liveRef !== code) unwrapFileRef(liveRef);
+    code.classList.add("file-ref");
+    code.dataset.path = rel;
+    code.title = rel ? "/workspace/" + rel : "/workspace";
+    liveRef = code;
+  });
+}
+
+function inspectHover(x, y) {
+  const hit = document.elementFromPoint(x, y);
+  if (!hit || !hit.closest || !hit.closest("#log")) {
+    unwrapFileRef(liveRef);
+    return;
+  }
+  const existing = hit.closest(".file-ref");
+  if (existing) {
+    if (liveRef && liveRef !== existing) unwrapFileRef(liveRef);
+    liveRef = existing;
+    return;
+  }
+  unwrapFileRef(liveRef);
+  if (hit.closest("a, textarea, input, .secret-form")) return;
+  const code = hit.closest("code");
+  if (code && !code.closest(".fence")) {
+    maybeLinkCode(code);
+    return;
+  }
+  const caret = caretFromPoint(x, y);
+  if (!caret || caret.node.nodeType !== 3) return;
+  if (caret.node.parentElement && caret.node.parentElement.closest("a")) return;
+  const text = caret.node.data || "";
+  const inFence = !!(caret.node.parentElement && caret.node.parentElement.closest(".fence"));
+  const m = inFence ? pathMatchAt(text, caret.offset) : fileTokenAt(text, caret.offset);
+  if (!m) return;
+  const rel = asWorkspacePath(m[0]);
+  if (rel == null) return;
+  const start = m.index, end = m.index + m[0].length;
+  const snap = text.slice(start, end);
+  pathInfo(rel).then((info) => {
+    if (!info.exists || !caret.node.isConnected) return;
+    if (caret.node.data.slice(start, end) !== snap) return;
+    wrapTextRange(caret.node, start, end, rel);
+  });
+}
+
+async function revealFile(path) {
+  const rel = asWorkspacePath(path);
+  if (rel == null && path !== "" && path !== "/workspace") return;
+  const guest = rel == null ? "" : rel;
+  showSide("files");
+  await ensureTree();
+  const parts = guest.split("/").filter(Boolean);
+  if (parts.length) await expandPath(parts.slice(0, -1).join("/"));
+  const row = document.querySelector("#tree .tree-row[data-path=\"" + CSS.escape(guest) + "\"]");
+  if (row) selectRow(row, true);
+  const info = await pathInfo(guest);
+  if (info.exists && !info.dir) previewFile(guest);
+}
+
 let sheetMode = "new";
+let sheetBotId = null;
 let sheetColor = "orange";
 let sheetShape = "goutte";
 
@@ -1373,20 +1991,37 @@ async function fillModels(selected) {
   const sel = document.getElementById("f-model");
   sel.textContent = "";
   sel.appendChild(Object.assign(el("option"), { value: "", textContent: "House default" }));
+  let ids = [];
   try {
     const data = await api("/api/models");
-    (data.models || []).forEach((id) => {
+    ids = data.models || [];
+  } catch (e) {
+    document.getElementById("status").textContent = e.message || "could not load models.yml";
+  }
+  if (selected && !ids.includes(selected)) ids = [selected].concat(ids);
+  const groups = {};
+  ids.forEach((id) => {
+    const i = id.indexOf("/");
+    const g = i > 0 ? id.slice(0, i) : "other";
+    (groups[g] = groups[g] || []).push(id);
+  });
+  Object.keys(groups).forEach((g) => {
+    const og = document.createElement("optgroup");
+    og.label = g;
+    groups[g].forEach((id) => {
       const o = el("option");
       o.value = id;
       o.textContent = id;
       if (id === selected) o.selected = true;
-      sel.appendChild(o);
+      og.appendChild(o);
     });
-  } catch (_) {}
+    sel.appendChild(og);
+  });
 }
 
 async function openSheet(mode, bot) {
   sheetMode = mode;
+  sheetBotId = bot && bot.id || null;
   document.getElementById("sheet-title").textContent = mode === "new" ? "New bot" : "Edit " + (bot && bot.name || "bot");
   document.getElementById("sheet-save").textContent = mode === "new" ? "Create" : "Save";
   const parsed = BLOUB.parseSpec(bot && bot.avatar, bot && bot.id);
@@ -1412,6 +2047,54 @@ async function openSheet(mode, bot) {
 function closeSheet() { document.getElementById("sheet").classList.remove("on"); }
 
 function createAgent() { openSheet("new", null); }
+
+let ctxBot = null;
+
+function openCtx(e, bot) {
+  ctxBot = bot;
+  const menu = document.getElementById("ctx");
+  menu.hidden = false;
+  menu.classList.add("on");
+  const pad = 8;
+  let x = e.clientX, y = e.clientY;
+  menu.style.left = "0px";
+  menu.style.top = "0px";
+  const w = menu.offsetWidth, h = menu.offsetHeight;
+  if (x + w > window.innerWidth - pad) x = window.innerWidth - w - pad;
+  if (y + h > window.innerHeight - pad) y = window.innerHeight - h - pad;
+  menu.style.left = Math.max(pad, x) + "px";
+  menu.style.top = Math.max(pad, y) + "px";
+}
+
+function closeCtx() {
+  const menu = document.getElementById("ctx");
+  menu.classList.remove("on");
+  menu.hidden = true;
+  ctxBot = null;
+}
+
+document.getElementById("ctx-edit").onclick = () => {
+  const bot = ctxBot;
+  closeCtx();
+  if (bot) openSheet("edit", bot);
+};
+document.getElementById("ctx-delete").onclick = async () => {
+  const bot = ctxBot;
+  closeCtx();
+  if (!bot) return;
+  if (!confirm("Delete " + bot.name + "? This cannot be undone.")) return;
+  await api("/api/bots/" + encodeURIComponent(bot.id), {
+    method: "DELETE", body: JSON.stringify({ confirm: true })
+  });
+  if (current === bot.id) { current = null; }
+  await loadBots();
+};
+document.addEventListener("mousedown", (e) => {
+  if (!e.target.closest("#ctx")) closeCtx();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeCtx();
+});
 
 document.getElementById("sheet-cancel").onclick = closeSheet;
 document.getElementById("sheet").addEventListener("click", (e) => {
@@ -1440,9 +2123,10 @@ document.getElementById("bot-form").onsubmit = async (ev) => {
     await loadBots();
     if (created && created.id) select(created.id);
   } else {
+    const id = sheetBotId || current;
     const { soul, ...profile } = body;
-    await api("/api/bots/" + encodeURIComponent(current), { method: "PATCH", body: JSON.stringify(profile) });
-    await api("/api/bots/" + encodeURIComponent(current) + "/soul", {
+    await api("/api/bots/" + encodeURIComponent(id), { method: "PATCH", body: JSON.stringify(profile) });
+    await api("/api/bots/" + encodeURIComponent(id) + "/soul", {
       method: "PUT", body: JSON.stringify({ text: soul })
     });
     closeSheet();
@@ -1468,13 +2152,16 @@ document.getElementById("compose").onsubmit = async (ev) => {
   if (!current) return;
   const text = document.getElementById("text").value.trim();
   if (!text) return;
-  document.getElementById("text").value = "";
+  const ta = document.getElementById("text");
+  ta.value = "";
+  ta.style.height = "auto";
   acHide();
   const empty = document.getElementById("log").querySelector(".empty");
   if (empty) empty.remove();
   pin = true;
   unread = 0;
   addMessage("end", "default", "you", text, null, "you");
+  stickBottom();
   await api("/api/bots/" + encodeURIComponent(current) + "/messages", {
     method: "POST", body: JSON.stringify({ text })
   });
@@ -1747,6 +2434,38 @@ window.addEventListener("popstate", () => {
   if (id && id !== current) select(id, true);
 });
 
+document.querySelectorAll(".side-tab").forEach((t) => {
+  t.onclick = () => showSide(t.dataset.pane);
+});
+document.getElementById("file-peek-close").onclick = () => {
+  document.getElementById("file-peek").hidden = true;
+};
+
+document.getElementById("tree").addEventListener("keydown", treeKey);
+document.getElementById("tree-refresh").onclick = () => {
+  fsStat.clear();
+  loadTree().catch(() => {});
+};
+document.getElementById("tree-collapse").onclick = collapseTree;
+
+let hoverRaf = 0;
+document.getElementById("log").addEventListener("mousemove", (e) => {
+  if (hoverRaf) return;
+  const x = e.clientX, y = e.clientY;
+  hoverRaf = requestAnimationFrame(() => {
+    hoverRaf = 0;
+    inspectHover(x, y);
+  });
+});
+document.getElementById("log").addEventListener("mouseleave", () => unwrapFileRef(liveRef));
+document.getElementById("log").addEventListener("click", (e) => {
+  const ref = e.target.closest && e.target.closest(".file-ref");
+  if (!ref) return;
+  e.preventDefault();
+  revealFile(ref.dataset.path || "").catch(() => {});
+});
+
+ensureHouseEvents();
 Promise.all([loadBots(), loadRoutines()]).catch((e) => {
   document.getElementById("status").textContent = e.message;
 });

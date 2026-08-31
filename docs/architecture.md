@@ -50,12 +50,16 @@ src/
   compaction.rs       threshold arithmetic, tail selection, summary request
   model.rs            Model trait, streaming callback, ScriptedModel, StopReason
   provider/           models.yml, SSE decoder, OpenAI + Anthropic adapters,
-                      post-startup model discovery (cached, best effort)
+                      post-startup model discovery (cached, best effort).
+                      `$ENV` apiKey is resolved; a non-`$` value is a dummy
+                      literal (local servers). One bad provider must not empty
+                      the catalog.
   sandbox.rs          mandatory microsandbox VM; public internet by default,
                       lock down with `open = false` + `allow`. Secret
                       `source` is a host env var or `$(command)` resolved
                       at apply into `REVEBOT_SECRET_*` for microsandbox —
-                      not a Lua host-exec path.
+                      not a Lua host-exec path. Command argv and `file:`
+                      paths expand a leading `~/`.
   lua.rs              host config/tools and a separate restricted workspace Lua
                       state; definitions retain their originating Lua state.
                       Workspace callbacks get explicit guest/messaging capabilities,
@@ -106,10 +110,22 @@ src/
                       Single-log rendering remains upcoming.
                       Compose autocomplete: `/` skills, `@` other bots.
                       AskUserForSecret renders an inline host-secret form.
+                      Right rail is tabbed (Screen / Files / Routines); Files
+                      is hidden until chosen. Hovering chat text that is a
+                      `/workspace/…` path or a PWD-resolvable name
+                      (`KNOWLEDGE.md`) wrap it as a file-ref; click reveals
+                      it in the explorer (GET /api/fs/stat). Tree itself is a
+                      VS Code-style explorer of `/workspace` (GET /api/fs,
+                      /api/fs/file): full-width rows, folder icons, indent
+                      guides, arrows / Enter / typeahead, Collapse All +
+                      Refresh. Rooted at the mount. Omits agents/*/sessions
+                      JSONL. Paths stay under the mount.
+                      Rail working-dots follow house `bot_busy` events, not
+                      which chat is open. GET /api/bots includes `busy`.
                       SendUserMessage is hidden from Working… and live-pushed
                       via user_notice. Transcript restore treats SendUserMessage
                       tool calls and custom user_notice entries as bubbles;
-                      assistant prose after the first tool is not.
+                      assistant prose after the first tool of that turn is not.
   eval/               catalog runner for evals/cases (offline / live / microvm);
                       live defaults to openrouter/x-ai/grok-4.6 (OPENROUTER_API_KEY)
   main.rs             init / info / exec / tool / serve / tui / eval; bare `revebot` serves

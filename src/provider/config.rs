@@ -4,10 +4,9 @@
 //! file, no environment-based discovery. Copy the directory and you copy which
 //! models it can reach.
 //!
-//! One rule is enforced rather than encouraged: **every `apiKey` must be a
-//! `$ENV_VAR` reference.** A literal key in this file would be committed,
-//! copied along with the directory, and read by anything that can read the
-//! agent — so it is refused at load, with the line that caused it.
+//! Prefer `$ENV_VAR` for `apiKey`. A literal is accepted for dummy local
+//! servers (`doesnt-matter`); a real secret in this file would be copied with
+//! the house.
 
 use std::collections::BTreeMap;
 
@@ -28,11 +27,6 @@ pub enum ConfigError {
         #[source]
         source: serde_yaml::Error,
     },
-    #[error(
-        "provider {provider}: apiKey must be a $ENV_VAR reference, not a literal key \
-         (got {got:?}). A key written here would be committed and copied with the agent."
-    )]
-    LiteralKey { provider: String, got: String },
     #[error("provider {provider}: {field} refers to ${var}, which is not set")]
     MissingEnv {
         provider: String,
@@ -137,18 +131,6 @@ impl Models {
             path: path.to_string(),
             source,
         })?;
-        // Fail at load, not at first request: a literal key is a mistake you
-        // want to hear about before the agent starts.
-        for (name, provider) in &models.providers {
-            if let Some(key) = &provider.api_key
-                && !key.starts_with('$')
-            {
-                return Err(ConfigError::LiteralKey {
-                    provider: name.clone(),
-                    got: key.clone(),
-                });
-            }
-        }
         Ok(models)
     }
 
@@ -276,21 +258,12 @@ providers:
 "#;
 
     #[test]
-    fn a_literal_api_key_is_refused_at_load() {
-        let yaml = "providers:\n  openai:\n    api: openai-responses\n    apiKey: sk-realkey123\n";
-        let err = Models::parse(yaml, "models.yml").unwrap_err();
-        assert!(matches!(err, ConfigError::LiteralKey { .. }), "got {err}");
-        assert!(
-            err.to_string().contains("committed"),
-            "and it says why: {err}"
-        );
-    }
-
-    #[test]
-    fn a_bare_env_name_without_the_dollar_is_also_refused() {
-        // `OPENAI_API_KEY` looks like a reference but is a literal value.
-        let yaml = "providers:\n  openai:\n    api: openai-responses\n    apiKey: OPENAI_API_KEY\n";
-        assert!(Models::parse(yaml, "models.yml").is_err());
+    fn a_literal_api_key_is_kept_for_local_dummy_servers() {
+        let yaml = "providers:\n  vllm:\n    api: openai-responses\n    apiKey: doesnt-matter\n    models:\n      - id: current\n";
+        let models = Models::parse(yaml, "models.yml").unwrap();
+        let resolved = models.resolve_with("vllm/current", &env(&[])).unwrap();
+        assert_eq!(resolved.api_key.as_deref(), Some("doesnt-matter"));
+        assert_eq!(models.catalog(), vec!["vllm/current".to_string()]);
     }
 
     /// A fixed environment, so nothing here depends on the real one.
