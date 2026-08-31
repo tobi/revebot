@@ -191,7 +191,8 @@ status, `revebot exec` outside a house.
 ```
 make spec                        # CI size; what make ci runs
 make spec-full                   # deep bounds + coverage counts; up to an hour
-make spec-full REMOTE_HOST=gb300:~/src/tries/revebot   # rsync the tree there and run it
+make spec-full REMOTE_HOST=gb300:~/src/tries/revebot   # rsync there; run in herdr workspace
+                                                       # 'revebot-spec' (herdr --remote gb300)
 tla docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.small.cfg \
     -s EntryIds -s OpIds -s Lanes -i                                            # step through
 ```

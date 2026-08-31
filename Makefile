@@ -39,7 +39,8 @@ test:
 #
 # Either runs on another machine when REMOTE_HOST is set to host:dir, e.g.
 #     make spec-full REMOTE_HOST=gb300:~/src/tries/revebot
-# The tree (minus target/) is rsynced there first; tla is installed if missing.
+# The tree (minus target/) is rsynced there first, tla is installed if missing,
+# and the run lives in a named herdr workspace there (`herdr --remote gb300`).
 TLA ?= tla
 SYM_HARNESS := -s EntryIds -s OpIds -s Lanes
 SYM_VM := -s Bots -s Policies
@@ -66,14 +67,12 @@ spec-full:
 	$(TLA) docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.small.cfg $(SYM_HARNESS) --max-states 50000000 $(COV_HARNESS)
 	$(TLA) docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.cfg $(SYM_HARNESS) --max-states 200000000 $(COV_HARNESS)
 else
-REMOTE_SSH := $(word 1,$(subst :, ,$(REMOTE_HOST)))
-REMOTE_DIR := $(word 2,$(subst :, ,$(REMOTE_HOST)))
+# scripts/spec-remote.sh rsyncs the tree, then runs the target inside a herdr
+# workspace labelled REMOTE_LABEL on the remote's herdr server (watch it with
+# `herdr --remote <host>`); without a remote herdr server it runs over plain ssh.
+REMOTE_LABEL ?= revebot-spec
 spec spec-full:
-	ssh $(REMOTE_SSH) 'mkdir -p $(REMOTE_DIR)'
-	rsync -az --delete --exclude target --exclude .git ./ $(REMOTE_HOST)/
-	ssh $(REMOTE_SSH) 'cd $(REMOTE_DIR) && export PATH="$$HOME/.cargo/bin:$$PATH" && \
-	  (command -v tla >/dev/null || cargo install tla-checker@0.6.11 --bin tla) && \
-	  make $@ TLA=tla'
+	scripts/spec-remote.sh '$(REMOTE_HOST)' $@ '$(REMOTE_LABEL)'
 endif
 
 # Same gate locally and in GitHub Actions. Real microVM tests stay opt-in.
