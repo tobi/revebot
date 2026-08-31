@@ -101,11 +101,10 @@ touches — configuration, project tools, sandbox policy — is Lua.
 ## Commands
 
     cargo build                              build the crate and the `revebot` binary
-    make install                             cargo install --path . --bin revebot --locked --force
-                                             (`--bin revebot` keeps the two test-helper
-                                             binaries out of ~/.cargo/bin; `--locked`
-                                             uses Cargo.lock so yanked transitive crates
-                                             do not break the install)
+    make install                             install revebot only, --locked --offline --force
+                                             (honors RUSTUP_TOOLCHAIN explicitly;
+                                             INSTALL_TOOLCHAIN overrides it)
+    cargo fetch --locked                     fill the cache after a lockfile update
     make ci                                  run the same strict gate as CI
     make warnings                            reject rustc warnings on all targets
     make clippy                              strict Cargo.toml policy, -D warnings

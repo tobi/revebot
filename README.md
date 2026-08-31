@@ -52,12 +52,18 @@ Requirements:
   `~/.microsandbox` and pull the VM image.
 
 ```bash
-make install                    # cargo install --path . --bin revebot --locked --force
+cargo fetch --locked            # once after setup or a lockfile update
+make install                    # selected toolchain; locked, offline, revebot only
 mkdir my-house && cd my-house
 revebot init
 export OPENROUTER_API_KEY=...
 revebot                         # boots the microVM and serves http://127.0.0.1:7420
 ```
+
+`make install` makes an inherited `RUSTUP_TOOLCHAIN` selection explicit. Use
+`make install INSTALL_TOOLCHAIN=<toolchain>` to choose a different installed toolchain;
+without either variable, Cargo uses its normal default. The reviewed lockfile is always
+used, and installation stays offline after dependencies are fetched.
 
 The first launch builds and provisions the microVM and shows live startup progress. Bare
 `reve` verifies that the VM can boot, then releases it until the first sandbox effect.

@@ -1,12 +1,15 @@
 .PHONY: install eval fmt-check warnings clippy test tla tla-deep ci
 .NOTPARALLEL: ci
 
-# `--locked` is required: `cargo install` otherwise re-resolves and dies on
-# yanked crates that Cargo.lock still pins (chacha20 0.10.x via microsandbox).
-# `--offline` skips the registry index (a proxy 403 HTML is not a Cargo error
-# you can recover from). `--force` overwrites the same-version binary.
+# Honor an inherited rustup selection explicitly instead of letting cargo
+# install warn about an implicit toolchain override. An unset selection keeps
+# cargo's normal default; INSTALL_TOOLCHAIN can also be supplied to make.
+INSTALL_TOOLCHAIN ?= $(RUSTUP_TOOLCHAIN)
+
+# Keep the reviewed dependency graph and use the local cache. Installing only
+# revebot keeps test-helper binaries out of ~/.cargo/bin.
 install:
-	cargo install --path . --bin revebot --locked --force --offline
+	cargo $(if $(strip $(INSTALL_TOOLCHAIN)),+$(INSTALL_TOOLCHAIN)) install --path . --bin revebot --locked --force --offline
 
 # Offline eval catalog. Extra flags: `make eval ARGS='--live'`.
 # Live cases use OPENROUTER_API_KEY (openrouter/x-ai/grok-4.6) unless
