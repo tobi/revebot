@@ -10,16 +10,15 @@
 -- The guest can reach the public internet. Set `open = false` and list
 -- hosts in `allow` to lock down to an allowlist.
 --
--- The default image already contains the toolchain -- rust, go, node, bun,
--- pnpm, python, and mise to add more -- so there is no provisioning step and
--- the first command runs as soon as the VM boots. Point `image` at a bare
--- distro instead and set `provision = true` to get the install-on-first-boot
--- behaviour back.
+-- The default image is wrap:desktop: toolchain (rust, go, node, bun, pnpm,
+-- python, mise), unprivileged `user`, XFCE on :1, VNC/noVNC, and a shared
+-- Chrome that agent-browser attaches to. Point `image` at a bare distro
+-- instead and set `provision = true` to get install-on-first-boot back.
 
 sandbox {
-  image = "ghcr.io/tobi/wrap:latest",
+  image = "ghcr.io/tobi/wrap:desktop",
   cpus = 2,
-  memory = 2048,
+  memory = 8192,
   -- The writable rootfs layer, in MiB. A real build tree needs room.
   root_disk = 16384,
 

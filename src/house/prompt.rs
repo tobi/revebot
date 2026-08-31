@@ -86,7 +86,11 @@ fn environment_prompt(project: &Project, bot: &Profile) -> String {
          shared filesystem root. Every tool runs in that VM.\n\
          mise is installed. Use it to install missing language runtimes and development tools.\n\
          {internet}\n\
-         Your HOME is /workspace/agents/{id}/. Your initial cwd is HOME/workspace; cd changes cwd, not your identity.\n\
+         Your agent home is /workspace/agents/{id}/. Your initial cwd is that home's workspace/; \
+         cd changes cwd, not your identity.\n\
+         The guest Unix account is `user` (HOME=/home/user, passwordless sudo). That is not your agent home.\n\
+         A desktop (XFCE on DISPLAY=:1) is shared with the user via the Screen panel. \
+         Steer Chrome with agent-browser (`/browser`); other GUI with xdotool (`/computer`).\n\
          Relative paths resolve against the current conversation cwd, shown in message headers.\n\
          </env>",
         id = bot.id

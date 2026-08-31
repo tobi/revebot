@@ -76,6 +76,7 @@ fn router(state: AppState) -> Router {
         .route("/api/bots/{id}/events", get(events_ws))
         .route("/api/exec", post(exec))
         .route("/api/tool", post(tool))
+        .route("/api/desktop", get(desktop))
         .route("/api/routines", get(list_routines))
         .route("/api/routines/{id}/run", post(run_routine))
         .with_state(state)
@@ -110,6 +111,30 @@ async fn index(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn health(State(_state): State<AppState>) -> Json<Value> {
     Json(json!({ "ok": true }))
+}
+
+async fn desktop(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<QueryAuth>,
+) -> Response {
+    if !authorized(&headers, &q, &state.house) {
+        return deny();
+    }
+    match state.house.sandbox().desktop() {
+        Some(d) => Json(json!({
+            "novnc": d.novnc_url(),
+            "vnc": d.vnc_addr(),
+            "display": crate::sandbox::DESKTOP_DISPLAY,
+        }))
+        .into_response(),
+        None => Json(json!({
+            "novnc": Value::Null,
+            "vnc": Value::Null,
+            "display": crate::sandbox::DESKTOP_DISPLAY,
+        }))
+        .into_response(),
+    }
 }
 
 fn deny() -> Response {

@@ -8,9 +8,9 @@ model: openrouter/x-ai/grok-4.6
 thinking: low
 
 sandbox:
-  image: ghcr.io/tobi/wrap:latest
+  image: ghcr.io/tobi/wrap:desktop
   cpus: 2
-  memory: 2048
+  memory: 8192
   root_disk: 16384
   open: true
   secrets:
