@@ -54,10 +54,11 @@ similar_names = "allow"
 too_many_lines = "allow"
 
 [dependencies]
-# The sandbox. Pinned exactly: reve is written against this API and a silent
-# minor bump would rebind us to something we never read.
-microsandbox = "=0.6.8"
-microsandbox-network = "=0.6.8"
+# The sandbox. Local checkout of our microsandbox fork (superradcompany/microsandbox PR
+# 1489, branch feat/http-deny-message): the 403 egress-deny answer reve's
+# agents need. Path, not registry: the dependency is developed alongside reve.
+microsandbox = { path = "../../microsandboxvm/sdk/rust" }
+microsandbox-network = { path = "../../microsandboxvm/crates/network" }
 
 # Scripting. Lua is vendored so an agent directory needs no system Lua.
 mlua = { version = "0.11", features = ["lua54", "vendored", "send", "serialize", "async"] }
@@ -93,7 +94,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 tempfile = "3"
 
 [dev-dependencies]
-microsandbox = "=0.6.8"
+microsandbox = { path = "../../microsandboxvm/sdk/rust" }
 
 [profile.release]
 opt-level = 2

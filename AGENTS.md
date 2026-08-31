@@ -16,8 +16,10 @@ touches — configuration, project tools, sandbox policy — is Lua.
 
 ## Rules
 
-- **Sandbox or no Reve.** Reve links the `microsandbox` Rust crate directly (pinned
-  `=0.6.8` in `Cargo.toml`). There is exactly one transport, no FFI shim, no CLI, no
+- **Sandbox or no Reve.** Reve links `microsandbox` and `microsandbox-network` directly
+  from the sibling `../../microsandboxvm` checkout of `tobi/microsandbox`'s
+  `feat/http-deny-message` branch (`superradcompany/microsandbox#1489`). There is exactly
+  one transport, no FFI shim, no CLI, no
   daemon, and no host-shell fallback — ever, not for tests, diagnostics, degraded
   operation, or convenience. Every shell command a tool issues — `ctx.sh`, `reve exec` —
   executes inside that VM. Reve must refuse to start if the microVM cannot boot. Never

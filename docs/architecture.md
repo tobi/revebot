@@ -224,8 +224,10 @@ reloaded state instead of writing something it decided under stale assumptions.
   is re-executed only when the recorded *and* current replay declarations both say `safe`,
   and otherwise gets a synthetic result that admits the effect may or may not have
   happened. A prompt that was still a reservation is placed exactly once.
-- **The sandbox.** Links `microsandbox =0.6.8` directly. The default guest is wrap's
-  desktop image (`ghcr.io/tobi/wrap:desktop`): toolchain at absolute paths under `/opt`,
+- **The sandbox.** Links `microsandbox` and `microsandbox-network` directly from the
+  sibling `../../microsandboxvm` checkout of `tobi/microsandbox:feat/http-deny-message`
+  (`superradcompany/microsandbox#1489`). The default guest is wrap's desktop image
+  (`ghcr.io/tobi/wrap:desktop`): toolchain at absolute paths under `/opt`,
   unprivileged `user` (`HOME=/home/user`) with uid/gid realigned to the host workspace
   owner and virtiofs stat virtualization off, XFCE on `:1`, noVNC/VNC published on
   localhost, and a shared Chrome that `agent-browser` attaches to. Provisioning is off
@@ -285,8 +287,8 @@ The specification describes more than this crate implements. These are choices, 
   the model can read, not a distinct state.
 - **No SQLite backend, no v3 compatibility.** Memory plus JSONL, v4 only. This is a new
   agent; there is nothing to be compatible with.
-- **Exactly one sandbox transport**, pinned `=0.6.8`. No second transport and no host-shell
-  fallback, ever.
+- **Exactly one sandbox transport**, linked from the sibling `../../microsandboxvm`
+  checkout. No second transport and no host-shell fallback, ever.
 - **The microVM tests are opt-in** (`#[ignore]`). The unit suite provisions no VM and makes
   no model request.
 - **Workspace Lua capability restriction is not process isolation.** Pure Lua is

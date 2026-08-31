@@ -47,7 +47,7 @@ The aesthetic we are aiming at is opengrok's, not a chatbot-SaaS clone: local, o
 | Single writer: `Storage` is not `Sync`; `Session::spawn` moves it into one owner task | `src/session.rs`, `docs/architecture.md` §0 |
 | Transcript vs context: `Session::transcript` is the raw branch (UI); `Session::context` is the model window (drops aborted/error turns, stops at compaction) | `src/session.rs` |
 | JSONL: exclusive `File::try_lock` (advisory), flush every append, torn tail discarded, malformed middle = corruption | `src/storage/jsonl.rs` |
-| Sandbox: `microsandbox =0.6.8`; workspace bind at `/workspace`; **refuses** if namesake is `Running \| Draining` — never adopts a live VM | `src/sandbox.rs` `Sandbox::start` ~339–350 |
+| Sandbox: local `../../microsandboxvm` path dependencies (`microsandbox` + `microsandbox-network`, `tobi/microsandbox:feat/http-deny-message`); workspace bind at `/workspace`; **refuses** if namesake is `Running \| Draining` — never adopts a live VM | `src/sandbox.rs` `Sandbox::start` ~339–350 |
 | Exec locking: `acquire()` holds `tokio::sync::Mutex<VmState>` only for lifecycle; clones the VM handle and increments `active`. Concurrent execs share the handle. Idle stop after 30s when `active == 0` | `src/sandbox.rs` `acquire` / `release` / `IDLE_TIMEOUT` |
 | Bare `reve`: boot VM, `sandbox.stop()`, TUI, stop again | `src/main.rs` `run()` |
 | Channels: `Hub` broadcast + namespaced KV at `.reve/channels.json`. Not a multi-bot bus | `src/channels.rs` |

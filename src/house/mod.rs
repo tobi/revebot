@@ -1099,7 +1099,7 @@ impl Inner {
 
     pub(crate) async fn create_bot(self: &Arc<Self>, spec: CreateSpec) -> anyhow::Result<Profile> {
         let inner = self.clone();
-        self.owned(async move { inner.create_inner(spec).await })
+        self.owned(async move { Box::pin(inner.create_inner(spec)).await })
             .await
     }
 
