@@ -24,7 +24,7 @@ use thiserror::Error;
 
 use crate::cron::Cron;
 use crate::hooks::{BeforeToolEvent, BeforeToolResult, Block};
-use crate::sandbox::{Policy, Sandbox, Secret};
+use crate::sandbox::{Policy, Sandbox, Secret, SecretHost};
 use crate::state::Replay;
 
 #[derive(Debug, Error)]
@@ -904,8 +904,8 @@ fn trusted_sources(dir: &Path) -> Result<Vec<(PathBuf, String)>> {
 /// Translate the `sandbox { ... }` table into a [`Policy`].
 ///
 /// Written by hand rather than derived because the Lua shape is friendlier than
-/// the struct: `allow` is a flat list of hostnames, and secrets carry their own
-/// host scope.
+/// the struct: `allow` is a flat list of hostnames, and secrets carry a per-host
+/// map (`allow`, `headers`) that also feeds the sandbox allow list.
 fn policy_from_table(table: &Table) -> Result<Policy> {
     let mut policy = Policy::default();
     // `Option<T>`, not `T`: mlua converts a missing key to `false` for `bool`,
@@ -989,12 +989,10 @@ fn policy_from_table(table: &Table) -> Result<Policy> {
                     ),
                 ));
             }
-            let hosts = entry
-                .get::<Table>("hosts")
-                .ok()
-                .map(|t| string_list(&t))
-                .transpose()?
-                .unwrap_or_default();
+            let hosts = match entry.get::<Table>("hosts") {
+                Ok(table) => secret_hosts_from_table(&table, &env)?,
+                Err(_) => BTreeMap::new(),
+            };
             if hosts.is_empty() {
                 return Err(invalid(
                     "sandbox secret",
@@ -1003,8 +1001,6 @@ fn policy_from_table(table: &Table) -> Result<Policy> {
                     ),
                 ));
             }
-            let header = entry.get::<String>("header").ok().filter(|s| !s.is_empty());
-            let prefix = entry.get::<String>("prefix").ok().filter(|s| !s.is_empty());
             secrets.push(Secret {
                 env,
                 source,
@@ -1013,8 +1009,6 @@ fn policy_from_table(table: &Table) -> Result<Policy> {
                     .ok()
                     .filter(|s| !s.is_empty()),
                 hosts,
-                header,
-                prefix,
             });
         }
         policy.secrets = secrets;
@@ -1028,6 +1022,53 @@ fn string_list(table: &Table) -> Result<Vec<String>> {
         out.push(value?);
     }
     Ok(out)
+}
+
+fn secret_hosts_from_table(table: &Table, env: &str) -> Result<BTreeMap<String, SecretHost>> {
+    if table.get::<Option<LuaValue>>(1)?.is_some() {
+        return Err(invalid(
+            "sandbox secret",
+            format!(
+                "secret {env} hosts must be a map of hostname to {{ allow, headers }}; a list is not accepted"
+            ),
+        ));
+    }
+    let mut hosts = BTreeMap::new();
+    for pair in table.clone().pairs::<String, LuaValue>() {
+        let (host, value) = pair?;
+        let host = host.trim().to_string();
+        if host.is_empty() {
+            continue;
+        }
+        let cfg = secret_host_from_value(&value, env, &host)?;
+        hosts.insert(host, cfg);
+    }
+    Ok(hosts)
+}
+
+fn secret_host_from_value(value: &LuaValue, env: &str, host: &str) -> Result<SecretHost> {
+    let Some(table) = value.as_table() else {
+        return Err(invalid(
+            "sandbox secret",
+            format!("secret {env} host {host} must be a table with allow/headers"),
+        ));
+    };
+    let allow = table.get::<Option<bool>>("allow")?.unwrap_or(true);
+    let mut headers = BTreeMap::new();
+    if let Ok(header_table) = table.get::<Table>("headers") {
+        for pair in header_table.pairs::<String, String>() {
+            let (name, value) = pair?;
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                return Err(invalid(
+                    "sandbox secret",
+                    format!("secret {env} host {host} has an empty header name"),
+                ));
+            }
+            headers.insert(name, value);
+        }
+    }
+    Ok(SecretHost { allow, headers })
 }
 
 #[cfg(test)]
@@ -1225,7 +1266,8 @@ mod tests {
             sandbox {
               secrets = {
                 { env = "GITHUB_TOKEN", source = "HOST_GITHUB_TOKEN",
-                  placeholder = "reve-github-token", hosts = { "github.com" } },
+                  placeholder = "reve-github-token",
+                  hosts = { ["github.com"] = { allow = true } } },
               },
             }
         "#,
@@ -1236,7 +1278,65 @@ mod tests {
         assert_eq!(secret.env, "GITHUB_TOKEN");
         assert_eq!(secret.source, "HOST_GITHUB_TOKEN");
         assert_eq!(secret.placeholder.as_deref(), Some("reve-github-token"));
-        assert_eq!(secret.hosts, vec!["github.com".to_string()]);
+        assert_eq!(secret.hostnames(), vec!["github.com".to_string()]);
+        assert!(secret.hosts["github.com"].allow);
+    }
+
+    #[test]
+    fn a_secret_host_map_carries_headers_and_joins_allow() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            "sandbox.lua",
+            r#"
+            sandbox {
+              open = false,
+              secrets = {
+                { env = "TOOL_GATEWAY", source = "TOOL_GATEWAY",
+                  placeholder = "reve-tool-gateway",
+                  hosts = {
+                    ["tool-gateway.shopify.io"] = {
+                      allow = true,
+                      headers = { Authorization = "Bearer $TOOL_GATEWAY" },
+                    },
+                  } },
+              },
+            }
+        "#,
+        );
+        let mut rt = Runtime::new().unwrap();
+        rt.load_sandbox(&path).unwrap();
+        let secret = &rt.policy.secrets[0];
+        let host = &secret.hosts["tool-gateway.shopify.io"];
+        assert!(host.allow);
+        assert_eq!(
+            host.headers.get("Authorization").map(String::as_str),
+            Some("Bearer $TOOL_GATEWAY")
+        );
+        assert_eq!(
+            rt.policy.egress_hosts(),
+            vec!["tool-gateway.shopify.io".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_secret_host_list_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            "sandbox.lua",
+            r#"
+            sandbox {
+              secrets = {
+                { env = "TOKEN", source = "HOST_TOKEN",
+                  hosts = { "github.com" } },
+              },
+            }
+        "#,
+        );
+        let mut rt = Runtime::new().unwrap();
+        let err = rt.load_sandbox(&path).unwrap_err();
+        assert!(err.to_string().contains("map of hostname"), "got {err}");
     }
 
     #[test]
@@ -1249,7 +1349,7 @@ mod tests {
             sandbox {
               secrets = {
                 { env = "GITHUB_TOKEN", source = "$(gh auth token)",
-                  hosts = { "github.com" } },
+                  hosts = { ["github.com"] = { allow = true } } },
               },
             }
         "#,
@@ -1269,7 +1369,7 @@ mod tests {
             sandbox {
               secrets = {
                 { env = "TOKEN", source = "$(gh auth token",
-                  hosts = { "github.com" } },
+                  hosts = { ["github.com"] = { allow = true } } },
               },
             }
         "#,
@@ -1289,7 +1389,7 @@ mod tests {
             sandbox {
               secrets = {
                 { env = "TOKEN", value = "must-not-be-persisted",
-                  hosts = { "example.com" } },
+                  hosts = { ["example.com"] = { allow = true } } },
               },
             }
         "#,
