@@ -6,7 +6,7 @@
 
 use std::ffi::OsStr;
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
@@ -145,6 +145,44 @@ pub(crate) fn read_text(root: &Path, relative: &Path, limit: u64) -> io::Result<
         ));
     }
     Ok(text)
+}
+
+pub(crate) fn write_new_bytes(root: &Path, relative: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = create_new(root, relative)?;
+    file.write_all(bytes)?;
+    Ok(())
+}
+
+pub(crate) fn read_bytes(root: &Path, relative: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    let parent = relative
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing parent"))?;
+    let name = relative
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing filename"))?;
+    let dir = open_dir(root, parent)?;
+    let file: File = openat(
+        &dir,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    )?
+    .into();
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "expected regular file",
+        ));
+    }
+    let mut buf = Vec::new();
+    file.take(limit + 1).read_to_end(&mut buf)?;
+    if buf.len() as u64 > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "file exceeds read limit",
+        ));
+    }
+    Ok(buf)
 }
 
 pub(crate) fn files(root: &Path, relative: &Path) -> io::Result<Vec<PathBuf>> {

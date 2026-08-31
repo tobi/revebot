@@ -1,3 +1,4 @@
 .reve/
 workspace/agents/*/sessions/
+workspace/tmp/
 .reve/secrets/

@@ -100,6 +100,17 @@ src/
                       `content` is a part list (text + toolCall); the page
                       parses it into bubbles and compact tool cards, never
                       JSON.stringify. GET / is Cache-Control: no-store.
+                      PWA: manifest, SVG icon, service worker (shell only;
+                      HTML stays uncached because the token is embedded).
+                      Phone layout is 100dvh + safe-area; drawers are CSS
+                      radios/:has(); the bot sheet is a popover with
+                      ::backdrop and @starting-style; bot switches use the
+                      View Transition API; compose uses field-sizing and CSS
+                      anchor positioning. Attachments POST to
+                      /api/bots/<id>/attachments and land in
+                      workspace/tmp/{id}/{name} (guest /workspace/tmp/…);
+                      the message names them as <file/> pills. Large pastes
+                      and dropped/picked files take the same path.
                       House events refresh sidebar/header metadata from profile.json;
                       invalid edits show a labelled last-good profile, not silent stale UI.
                       Soul editor reads/writes SOUL.md through /api/bots/<id>/soul.
@@ -311,6 +322,7 @@ Every row names a real test. A claim with no test says so instead of appearing c
 | Model discovery contacts only upstreams whose key is set, and never fails the agent | `provider::discovery::tests::{only_upstreams_that_have_a_key_are_probed, an_unreachable_upstream_is_recorded_not_fatal, a_missing_or_corrupt_cache_is_simply_absent}` |
 | A namespaced model id survives discovery intact (`openrouter/x-ai/grok-4.6`) | `provider::discovery::tests::the_openrouter_shape_yields_a_pasteable_reference` |
 | Public-internet egress by default; lock-down is `open = false` | `sandbox::tests::default_egress_is_the_public_internet`, `tests/microvm.rs` (opt-in) |
+| Chat attachments stay under `workspace/tmp/{id}/` and are named in the message | `house::attach::tests::{save_writes_under_workspace_tmp_id_and_tags_the_guest_path, names_are_basenames_without_traversal, read_refuses_traversal_and_bad_ids}` |
 
 **Not covered yet.** Standalone `compact()` and `navigate()` have no end-to-end test — the
 machinery is shared with the in-run compaction path, which is exercised only through the

@@ -1,5 +1,6 @@
 //! A house: one microVM, many bots, one shared `/workspace`.
 
+pub(crate) mod attach;
 pub(crate) mod files;
 pub mod home;
 pub mod memory;
@@ -322,6 +323,27 @@ impl House {
         self.inner
             .workspace_changed(bot, vec![format!("/{}", relative.display())], false)
             .await
+    }
+
+    pub fn save_attachment(
+        &self,
+        bot: &str,
+        name: &str,
+        bytes: &[u8],
+        mime: Option<&str>,
+    ) -> anyhow::Result<attach::Saved> {
+        self.inner.ready_harness(bot)?;
+        Ok(attach::save(&self.inner.project.root, name, bytes, mime)?)
+    }
+
+    pub fn read_attachment(
+        &self,
+        bot: &str,
+        id: &str,
+        name: &str,
+    ) -> anyhow::Result<(attach::Saved, Vec<u8>)> {
+        self.inner.ready_harness(bot)?;
+        Ok(attach::read(&self.inner.project.root, id, name)?)
     }
 
     pub fn configured_models(&self) -> Vec<String> {

@@ -94,6 +94,7 @@ const KEEP_DIRS: &[&str] = &[
     "workspace/skills",
     "workspace/plugins",
     "workspace/routines",
+    "workspace/tmp",
     "workspace/agents",
     "workspace/agents/chief-of-staff/skills",
     "workspace/agents/chief-of-staff/sessions",
