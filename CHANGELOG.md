@@ -12,6 +12,14 @@ starts in microseconds. Concurrency is tokio tasks over single-owner session sta
 
 ### Added
 
+- TLA+ models of the durable rules, checked by `make tla` inside `make ci` with
+  [tla-rs](https://github.com/fabracht/tla-rs): `docs/tla/DurableLog.tla` (the JSONL file
+  as replay recipe, torn-line atomicity, write-once ids, seq monotonicity, compaction
+  equivalence) and `docs/tla/DurableHarness.tla` (two interleaved lanes; steer, follow-up,
+  deferred-write and nextRun inboxes; abort as control; the effect sandwich; crash and
+  recovery; the terminal transaction). Fourteen `Inv*` properties, each proven falsifiable
+  by an injected bug. Modelling `cancelQueued` fixed its triage before it is implemented:
+  an abort-drained id is `not_found` and keeps its payload register.
 - Default guest is [`ghcr.io/tobi/wrap:desktop`](https://github.com/tobi/wrap): unprivileged
   `user`, XFCE on `:1`, noVNC/VNC on localhost, shared Chrome with `agent-browser` on CDP
   9222. The house Screen panel is a live preview; click takes over the desktop. House

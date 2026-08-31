@@ -298,6 +298,16 @@ The specification describes more than this crate implements. These are choices, 
 
 Every row names a real test. A claim with no test says so instead of appearing covered.
 
+Two layers hold the durable rules. The **design** is model-checked: `docs/tla/DurableLog.tla`
+(file-is-replay-recipe, torn-line atomicity, write-once ids, seq monotonicity, compaction
+equivalence) and `docs/tla/DurableHarness.tla` (pending/entry exclusivity, one operation per
+lane, lane-owned `nextRun`, abort-drain payload survival, `aborted` only under cancel,
+intent-before-effect, no re-dispatch of an interrupted `never` tool, terminal cleanup) are
+explored exhaustively on bounded constants by `make tla`, with a mutation table in
+`docs/tla/README.md` proving each invariant can fail. The **implementation** is held by the
+Rust tests below. When a row here and an `Inv*` there disagree, one of them is wrong; fix the
+code or the spec, never the invariant.
+
 | Invariant | Test |
 |---|---|
 | A transaction is all-or-none | `storage::tests::a_failing_transaction_applies_nothing` |
@@ -355,4 +365,7 @@ Every row names a real test. A claim with no test says so instead of appearing c
 **Not covered yet.** Standalone `compact()` and `navigate()` have no end-to-end test — the
 machinery is shared with the in-run compaction path, which is exercised only through the
 overflow route. Lane concurrency is implemented (a lane claim per operation, drivers as
-independent tasks) but there is no test that runs two lanes at once.
+independent tasks) but there is no Rust test that runs two lanes at once — the TLA+ harness
+model interleaves two lanes, but the Rust side is unexercised. `cancel_queued` is specified
+(§3.11) and modelled (`CancelQueued`, triaged on queue-list membership so an abort-drained id
+is `not_found`) but not implemented.

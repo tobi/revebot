@@ -88,7 +88,15 @@ touches — configuration, project tools, sandbox policy — is Lua.
   weaken the gate. Any genuinely necessary exception must be narrowly scoped and
   explain the invariant/safety argument. A SAFETY comment is not proof by itself.
 - Every new behaviour gets a test. Keep `make ci` green (format, rustc warnings,
-  strict Clippy, tests); the microVM tests stay opt-in.
+  strict Clippy, tests, TLA+ model checks); the microVM tests stay opt-in.
+- **The durable rules are model-checked.** `docs/tla/DurableLog.tla` and
+  `docs/tla/DurableHarness.tla` are the executable form of the storage, lane, inbox,
+  abort, recovery and terminal rules above; `make tla` explores every reachable
+  state of the bounded models. A change to a transaction shape, a queue rule, a
+  recovery policy or an invariant in `docs/harness.md` changes the spec in the same
+  commit, and a new durable rule gets an `Inv*` definition plus a mutation that
+  violates it (see `docs/tla/README.md`). Do not weaken an invariant to make a
+  trace pass; the trace is the bug report.
 
 ## Commands
 
@@ -102,6 +110,8 @@ touches — configuration, project tools, sandbox policy — is Lua.
     make warnings                            reject rustc warnings on all targets
     make clippy                              strict Cargo.toml policy, -D warnings
     make test                                run the locked test suite
+    make tla                                 model-check docs/tla (needs `cargo install tla-checker --bin tla`)
+    make tla-deep                            larger harness configuration, opt-in
     make eval                                offline eval catalog (no VM, no model)
     make eval ARGS='--live'                  live cases; OPENROUTER_API_KEY by default
     cargo test --test microvm -- --ignored   opt-in microVM integration tests

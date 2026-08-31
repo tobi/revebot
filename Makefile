@@ -1,4 +1,4 @@
-.PHONY: install eval fmt-check warnings clippy test ci
+.PHONY: install eval fmt-check warnings clippy test tla tla-deep ci
 .NOTPARALLEL: ci
 
 # `--locked` is required: `cargo install` otherwise re-resolves and dies on
@@ -28,5 +28,16 @@ clippy:
 test:
 	cargo test --locked
 
+# Model-check the durable log and the lane/inbox state machine against
+# docs/harness.md. Needs `tla` (cargo install tla-checker --bin tla).
+# The small harness configuration is the CI size; `tla-deep` is opt-in.
+TLA ?= tla
+tla:
+	$(TLA) docs/tla/DurableLog.tla --config docs/tla/DurableLog.cfg --max-states 3000000
+	$(TLA) docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.small.cfg --max-states 3000000
+
+tla-deep:
+	$(TLA) docs/tla/DurableHarness.tla --config docs/tla/DurableHarness.cfg --max-states 5000000
+
 # Same gate locally and in GitHub Actions. Real microVM tests stay opt-in.
-ci: fmt-check warnings clippy test
+ci: fmt-check warnings clippy test tla
