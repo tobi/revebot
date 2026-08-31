@@ -1,5 +1,4 @@
 .PHONY: install eval fmt-check warnings clippy test ci
-.NOTPARALLEL: ci
 
 # Honor an inherited rustup selection explicitly instead of letting cargo
 # install warn about an implicit toolchain override. An unset selection keeps
@@ -93,5 +92,12 @@ spec spec-full:
 	scripts/spec-remote.sh '$(REMOTE_HOST)' $@ '$(REMOTE_LABEL)'
 endif
 
-# Same gate locally and in GitHub Actions. Real microVM tests stay opt-in.
-ci: fmt-check warnings clippy test spec
+# Same gate locally and in GitHub Actions. Real microVM tests stay opt-in. The
+# steps run in this order even under -j (a `.NOTPARALLEL: ci` would disable
+# parallelism for every target on GNU make < 4.4).
+ci:
+	$(MAKE) fmt-check
+	$(MAKE) warnings
+	$(MAKE) clippy
+	$(MAKE) test
+	$(MAKE) spec
