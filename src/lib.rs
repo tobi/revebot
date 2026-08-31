@@ -23,6 +23,7 @@ pub mod progress;
 pub mod project;
 pub mod provider;
 pub mod sandbox;
+mod script_fs;
 pub mod session;
 pub mod skills;
 pub mod state;

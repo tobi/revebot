@@ -1,54 +1,17 @@
 ---
 name: lua-plugins
-description: Write Reve workspace Lua plugins — tools, cron, and before-tool guards. ctx.sh is the only command path and runs in the microVM.
+description: >
+  Write or debug Reve Lua plugins. Read the plugins skill for the complete,
+  tested API reference covering tools, guards, routines and sandbox restrictions.
 ---
 
 # Lua plugins
 
-Drop a `.lua` file in `workspace/plugins/` (every bot) or
-`workspace/agents/<id>/plugins/` (that bot). Routines go in
-`workspace/agents/<id>/routines/` or `workspace/routines/`.
+Read `/workspace/skills/plugins/SKILL.md` for the full implemented API. It is the
+single reference for declarations, parameter schemas, callback contexts, results,
+replay/cancellation, host-only configuration, and restricted workspace Lua.
 
-Edits are syntax-checked and reloaded. A broken file is skipped; the last
-good set stays. New tools show up on the next turn.
-
-Host-trusted roster tools (`CreateAgent`, `SendAgentMessage`, …) are Rust.
-You cannot replace them.
-
-```lua
-tool("web_fetch", {
-  description = "Fetch a URL",
-  replay = "safe",
-  params = { { name = "url", type = "string", required = true } },
-  run = function(args, ctx)
-    return ctx.sh("curl -fsSL --max-time 30 -- " .. ctx.shellescape(args.url))
-  end,
-})
-
-guard("no-force-push", {
-  tools = { "bash" },
-  run = function(event)
-    local cmd = event.args.command or ""
-    if cmd:find("git push") and cmd:find("%-%-force") then
-      return { block = "force-push is user-gated", terminate = false }
-    end
-  end,
-})
-
-cron("morning", {
-  name = "Morning",
-  cron = "0 9 * * 1-5",
-  run = function(ctx)
-    ctx.send(ctx.bot, "What needs attention?")
-  end,
-})
-```
-
-`ctx.sh(cmd)` — microVM only.
-`ctx.shellescape(s)` — quote for the guest shell.
-`ctx.workdir` — `/workspace`.
-`ctx.bot` — this bot's id (agent plugins and routines).
-`ctx.bots()` — `{ {id, name, title}, ... }` ready roster.
-`ctx.send(id, text, { priority = true })` — async, same as SendAgentMessage.
-
-Do not use `os.execute`. There is no host shell.
+Workspace scripts have no ambient host IO, environment or module access.
+`ctx.sh` in a tool is the only command path and always enters the microVM.
+Current source loading is at house startup; automatic next-turn reload is not
+implemented. Do not assume undocumented context methods exist.

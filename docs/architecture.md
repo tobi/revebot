@@ -56,9 +56,12 @@ src/
                       `source` is a host env var or `$(command)` resolved
                       at apply into `REVEBOT_SECRET_*` for microsandbox —
                       not a Lua host-exec path.
-  lua.rs              config.yml (or legacy agent.lua/sandbox.lua), host
-                      plugins/*.lua, workspace plugins/routines; host door closed.
-                      Workspace Lua may ctx.send; it cannot os.execute.
+  lua.rs              host config/tools and a separate restricted workspace Lua
+                      state; definitions retain their originating Lua state.
+                      Workspace callbacks get explicit guest/messaging capabilities,
+                      never ambient host IO/environment/module access.
+  script_fs.rs        descriptor-relative, NOFOLLOW workspace-source loading;
+                      no symlink traversal, regular UTF-8 text <= 1 MiB.
   cron.rs             five-field cron for house routines
   tools.rs            the Tools trait plus seven built-ins, replay declarations
   skills.rs           recursive SKILL.md catalog; workspace ∪ bot, bot shadows
@@ -161,11 +164,18 @@ reloaded state instead of writing something it decided under stale assumptions.
   at a bare distro. Public-internet egress by default (`NetworkProfile::Public`);
   `open = false` plus `allow` is the lock-down. Scoped source-backed secrets, fail-closed boot,
   idle shutdown, workspace bind mount at `/workspace`.
-- **The scripting surface.** `agent { }`, `sandbox { }`, `tool("name", { })`. `ctx.sh` is
-  the only command path and it goes to the VM. The host command path — `os.execute`,
-  `io.popen`, `os.exit`, `package.loadlib` — is deleted from the Lua VM before any script
-  runs, so "the microVM is the only way to run anything" is structural rather than a
-  convention to re-check.
+- **The scripting surface.** Trusted host `agent { }`, `sandbox { }` and installed
+  tools use one Lua state. Bot-editable plugins/routines use a **separate** state
+  with an allowlist of pure libraries/base functions: no `io`, `os`, `package`,
+  `require`, `debug`, `load`, `loadfile`, `dofile`, host streams or bytecode loading.
+  Registry keys retain their owning Lua state; host globals/cached capabilities
+  cannot cross into workspace code. The original four-function command denylist
+  (`os.execute`, `io.popen`, `os.exit`, `package.loadlib`) remains on both states.
+  `ctx.sh` stays VM-only; routine `ctx.send` collects sends for house delivery and
+  `ctx.bot` is the resolved target/owner. `script_fs` walks directory descriptors
+  with `O_NOFOLLOW`, so a source-file or ancestor symlink cannot import host data
+  before Lua even starts. The complete implemented API is documented in the
+  `plugins` skill, whose examples are exercised by tests.
 - **The terminal.** Ratatui inline renderer driven by the passive event stream. A run is a
   spawned task, so a steer typed mid-run is a conditional commit rather than a message the
   loop has to be free to receive.
@@ -186,6 +196,14 @@ The specification describes more than this crate implements. These are choices, 
   fallback, ever.
 - **The microVM tests are opt-in** (`#[ignore]`). The unit suite provisions no VM and makes
   no model request.
+- **Workspace Lua capability restriction is not process isolation.** Pure Lua is
+  not preemptively cancelled or CPU/memory-budgeted; use the VM for substantial
+  computation. Host-installed Lua is still trusted and must not import bot-authored
+  files or expose host callbacks to the restricted state.
+- **Plugin/routine loading is startup-only for now.** No next-turn hot reload or
+  last-good fallback yet; a broken file fails startup. Per-bot ownership filtering,
+  consistent duplicate resolution, complete messaging contexts and routine-chat
+  isolation remain follow-up work. The plugins skill states these limits.
 
 ## 5. Invariants, and the test that holds each one
 
@@ -222,6 +240,11 @@ Every row names a real test. A claim with no test says so instead of appearing c
 | A really-killed process leaves a resumable session | `tests/crash.rs` (spawns and SIGKILLs a real child) |
 | The compaction tail is widened to a user turn | `compaction::tests::the_tail_is_widened_to_a_user_turn_and_the_head_is_summarised` |
 | Lua cannot execute a command on the host | `lua::tests::{the_host_command_path_is_gone_before_any_script_runs, a_tool_that_tries_to_shell_out_on_the_host_fails_to_load}` |
+| Workspace Lua has no ambient host authority and cannot inherit trusted aliases | `lua::workspace_tests::{workspace_lua_has_no_ambient_host_authority, workspace_scripts_cannot_read_or_write_host_sentinels, workspace_mutation_cannot_change_the_host_lua_state}` |
+| All workspace loaders and callbacks use the restricted state | `lua::workspace_tests::{all_workspace_script_locations_use_the_restricted_loader, workspace_guards_and_routines_execute_in_the_restricted_state, deferred_workspace_callback_cannot_use_host_io}` |
+| Workspace source cannot traverse symlinks, load nonfiles/oversized files, or import bytecode | `script_fs::tests::{script_and_ancestor_symlinks_are_refused, traversal_nonfiles_and_oversized_sources_are_refused}`, `lua::workspace_tests::{symlinked_script_files_and_bot_directories_are_rejected_before_load, workspace_bytecode_is_never_loaded}` |
+| The complete plugins reference's examples load; pure callbacks execute | `lua::workspace_tests::plugins_skill_examples_load_and_pure_callbacks_execute` |
+| The documented workspace tool actually enters the microVM | `tests/workspace_microvm.rs::documented_workspace_tool_reads_a_note_inside_the_microvm` (opt-in) |
 | The default guest is pre-provisioned, and git reads its token from the environment | `sandbox::tests::{the_default_policy_boots_a_preprovisioned_guest, git_reads_its_token_from_the_environment_not_a_credential_store}` |
 | Every invokable tool is offered to the model | `tools::tests::the_active_tool_list_covers_every_builtin` |
 | An unmentioned Lua flag keeps its default | `lua::tests::an_unmentioned_flag_keeps_its_default` |

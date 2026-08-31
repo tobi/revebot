@@ -1,12 +1,11 @@
 //! The scripting surface.
 //!
-//! Everything an agent author writes is Lua: `agent.lua` configures the model,
-//! `sandbox.lua` states the VM policy, each `tools/*.lua` adds a tool the model
-//! can call, and each `routines/*.lua` declares a cron-fired job. Those files
-//! are *trusted launch code* — they run on the host before any work starts,
-//! exactly like the Rust they extend. What they must never do is execute a
-//! command on the host: `ctx.sh` goes to the microVM, and it is the only way
-//! out of a tool. A routine's `ctx.send` queues a message to a bot.
+//! Host configuration and host-installed tools are trusted launch code.
+//! Bot-editable workspace plugins/routines use a SEPARATE restricted Lua state:
+//! pure standard libraries, no ambient host filesystem, environment, modules,
+//! native code, or streams. Only explicit Rust callbacks grant capabilities.
+//! In both states `ctx.sh` is the sole command path and enters the microVM.
+//! A routine's `ctx.send` collects messages for durable house delivery.
 //!
 //! Lua rather than a config format because a real tool needs branching, string
 //! handling, and a standard library. Lua rather than embedding a second large
@@ -18,7 +17,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use mlua::{Lua, LuaSerdeExt, Table, Value as LuaValue};
+use mlua::{ChunkMode, Lua, LuaOptions, LuaSerdeExt, StdLib, Table, Value as LuaValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -95,8 +94,10 @@ pub struct ToolDef {
     pub description: String,
     pub params: Vec<Param>,
     pub replay: Replay,
-    /// `None` = house-wide. `Some(id)` = only that bot.
+    /// Owning folder (`None` = house-wide). Currently metadata, not access control.
     pub owner: Option<String>,
+    // A registry key never crosses the host/workspace trust boundary.
+    lua: Lua,
     key: mlua::RegistryKey,
 }
 
@@ -161,6 +162,7 @@ pub struct RoutineDef {
     pub enabled: bool,
     pub bot: Option<String>,
     pub message: Option<String>,
+    lua: Lua,
     run: Option<mlua::RegistryKey>,
 }
 
@@ -170,9 +172,10 @@ impl RoutineDef {
     }
 }
 
-/// Owns the Lua VM and everything the agent's scripts declared.
+/// Owns separate trusted-host/restricted-workspace Lua states and their definitions.
 pub struct Runtime {
     lua: Lua,
+    workspace_lua: Lua,
     pub agent: AgentConfig,
     pub policy: Policy,
     pub tools: Vec<ToolDef>,
@@ -184,6 +187,7 @@ pub struct Runtime {
 pub struct GuardDef {
     pub id: String,
     pub tools: Vec<String>,
+    lua: Lua,
     key: mlua::RegistryKey,
 }
 
@@ -212,12 +216,62 @@ impl Runtime {
         Self::close_the_host_door(&lua)?;
         Ok(Self {
             lua,
+            workspace_lua: Self::restricted_lua()?,
             agent: AgentConfig::default(),
             policy: Policy::default(),
             tools: Vec::new(),
             routines: Vec::new(),
             guards: Vec::new(),
         })
+    }
+
+    /// Allowlist pure libraries in a separate VM, so workspace code cannot
+    /// recover privileged functions cached by a trusted host script.
+    fn restricted_lua() -> Result<Lua> {
+        let lua = Lua::new_with(
+            StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8 | StdLib::COROUTINE,
+            LuaOptions::default(),
+        )?;
+        Self::close_the_host_door(&lua)?;
+        let allowed = [
+            "_G",
+            "_VERSION",
+            "assert",
+            "error",
+            "getmetatable",
+            "ipairs",
+            "next",
+            "pairs",
+            "pcall",
+            "rawequal",
+            "rawget",
+            "rawlen",
+            "rawset",
+            "select",
+            "setmetatable",
+            "tonumber",
+            "tostring",
+            "type",
+            "xpcall",
+            "table",
+            "string",
+            "math",
+            "utf8",
+            "coroutine",
+        ];
+        let globals = lua.globals();
+        let keys = globals
+            .pairs::<String, LuaValue>()
+            .map(|pair| pair.map(|(key, _)| key))
+            .collect::<mlua::Result<Vec<_>>>()?;
+        for key in keys {
+            if !allowed.contains(&key.as_str()) {
+                globals.set(key, LuaValue::Nil)?;
+            }
+        }
+        // No bytecode export/import path. Source loaded by Rust is text only.
+        globals.get::<Table>("string")?.set("dump", LuaValue::Nil)?;
+        Ok(lua)
     }
 
     /// Delete the host command path from the VM's globals.
@@ -272,63 +326,72 @@ impl Runtime {
         self.load_tools_for(dir, None)
     }
 
+    /// Trusted host-installed tools. Workspace callers must use the rooted,
+    /// restricted loader below, never this ambient-filesystem entry point.
     pub fn load_tools_for(&mut self, dir: &Path, owner: Option<&str>) -> Result<()> {
-        if !dir.is_dir() {
-            return Ok(());
-        }
+        self.load_tool_sources(self.lua.clone(), trusted_sources(dir)?, owner)
+    }
+
+    pub fn load_workspace_tools(
+        &mut self,
+        root: &Path,
+        relative: &Path,
+        owner: Option<&str>,
+    ) -> Result<()> {
+        self.load_tool_sources(
+            self.workspace_lua.clone(),
+            workspace_sources(root, relative)?,
+            owner,
+        )
+    }
+
+    fn load_tool_sources(
+        &mut self,
+        lua: Lua,
+        sources: Vec<(PathBuf, String)>,
+        owner: Option<&str>,
+    ) -> Result<()> {
         let collected: Arc<Mutex<Vec<(String, Table)>>> = Arc::default();
         let sink = collected.clone();
-        let tool_fn = self
-            .lua
-            .create_function(move |_, (name, spec): (String, Table)| {
-                sink.lock().push((name, spec));
-                Ok(())
-            })?;
-        self.lua.globals().set("tool", tool_fn)?;
+        let tool_fn = lua.create_function(move |_, (name, spec): (String, Table)| {
+            sink.lock().push((name, spec));
+            Ok(())
+        })?;
+        lua.globals().set("tool", tool_fn)?;
         let guards: Arc<Mutex<Vec<(String, Table)>>> = Arc::default();
         let guard_sink = guards.clone();
-        let guard_fn = self
-            .lua
-            .create_function(move |_, (name, spec): (String, Table)| {
-                guard_sink.lock().push((name, spec));
-                Ok(())
-            })?;
-        self.lua.globals().set("guard", guard_fn)?;
+        let guard_fn = lua.create_function(move |_, (name, spec): (String, Table)| {
+            guard_sink.lock().push((name, spec));
+            Ok(())
+        })?;
+        lua.globals().set("guard", guard_fn)?;
         let crons: Arc<Mutex<Vec<(String, Table)>>> = Arc::default();
         let cron_sink = crons.clone();
-        let cron_fn = self
-            .lua
-            .create_function(move |_, (id, spec): (String, Table)| {
-                cron_sink.lock().push((id, spec));
-                Ok(())
-            })?;
-        self.lua.globals().set("cron", cron_fn)?;
-
-        let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
-            .map_err(|source| LuaError::Io {
-                path: dir.to_path_buf(),
-                source,
-            })?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|e| e == "lua"))
-            .collect();
-        paths.sort();
-        for path in &paths {
-            self.exec_file(path)?;
+        let cron_fn = lua.create_function(move |_, (id, spec): (String, Table)| {
+            cron_sink.lock().push((id, spec));
+            Ok(())
+        })?;
+        lua.globals().set("cron", cron_fn)?;
+        for (path, source) in sources {
+            Self::exec_source(&lua, &path, &source)?;
         }
 
         let declared = std::mem::take(&mut *collected.lock());
         for (name, spec) in declared {
-            self.tools
-                .push(self.tool_from_table(name, spec, owner.map(str::to_string))?);
+            self.tools.push(Self::tool_from_table(
+                &lua,
+                name,
+                spec,
+                owner.map(str::to_string),
+            )?);
         }
         let declared_guards = std::mem::take(&mut *guards.lock());
         for (name, spec) in declared_guards {
-            self.guards.push(self.guard_from_table(name, spec)?);
+            self.guards.push(Self::guard_from_table(&lua, name, spec)?);
         }
         let declared_crons = std::mem::take(&mut *crons.lock());
         for (id, spec) in declared_crons {
-            let mut def = self.routine_from_table(id, spec)?;
+            let mut def = Self::routine_from_table(&lua, id, spec)?;
             if def.bot.is_none() {
                 def.bot = owner.map(str::to_string);
             }
@@ -345,35 +408,34 @@ impl Runtime {
     /// Like [`Self::load_routines`], filling in `bot` from the owning folder
     /// when the file omits it.
     pub fn load_routines_for(&mut self, dir: &Path, default_bot: Option<&str>) -> Result<()> {
-        if !dir.is_dir() {
-            return Ok(());
-        }
+        let root = dir.parent().unwrap_or(Path::new("."));
+        let relative = dir
+            .file_name()
+            .ok_or_else(|| invalid("routine", "expected a directory name"))?;
+        self.load_workspace_routines(root, Path::new(relative), default_bot)
+    }
+
+    pub fn load_workspace_routines(
+        &mut self,
+        root: &Path,
+        relative: &Path,
+        default_bot: Option<&str>,
+    ) -> Result<()> {
+        let lua = self.workspace_lua.clone();
+        let sources = workspace_sources(root, relative)?;
         let collected: Arc<Mutex<Vec<(String, Table)>>> = Arc::default();
         let sink = collected.clone();
-        let routine_fn = self
-            .lua
-            .create_function(move |_, (id, spec): (String, Table)| {
-                sink.lock().push((id, spec));
-                Ok(())
-            })?;
-        self.lua.globals().set("routine", routine_fn)?;
-
-        let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
-            .map_err(|source| LuaError::Io {
-                path: dir.to_path_buf(),
-                source,
-            })?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|e| e == "lua"))
-            .collect();
-        paths.sort();
-        for path in &paths {
-            self.exec_file(path)?;
+        let routine_fn = lua.create_function(move |_, (id, spec): (String, Table)| {
+            sink.lock().push((id, spec));
+            Ok(())
+        })?;
+        lua.globals().set("routine", routine_fn)?;
+        for (path, source) in sources {
+            Self::exec_source(&lua, &path, &source)?;
         }
-
         let declared = std::mem::take(&mut *collected.lock());
         for (id, spec) in declared {
-            let mut def = self.routine_from_table(id, spec)?;
+            let mut def = Self::routine_from_table(&lua, id, spec)?;
             if def.bot.is_none() {
                 def.bot = default_bot.map(str::to_string);
             }
@@ -399,17 +461,19 @@ impl Runtime {
             .routine(id)
             .ok_or_else(|| invalid("routine", format!("no routine named {id:?}")))?;
         if let Some(key) = &def.run {
+            let lua = &def.lua;
             let queued: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
             let sink = queued.clone();
-            let ctx = self.lua.create_table()?;
-            let send = self
-                .lua
-                .create_function(move |_, (bot, text): (String, String)| {
-                    sink.lock().push((bot, text));
-                    Ok(())
-                })?;
+            let ctx = lua.create_table()?;
+            if let Some(bot) = &def.bot {
+                ctx.set("bot", bot.clone())?;
+            }
+            let send = lua.create_function(move |_, (bot, text): (String, String)| {
+                sink.lock().push((bot, text));
+                Ok(())
+            })?;
             ctx.set("send", send)?;
-            let function: mlua::Function = self.lua.registry_value(key)?;
+            let function: mlua::Function = lua.registry_value(key)?;
             function.call_async::<()>(ctx).await?;
             return Ok(std::mem::take(&mut *queued.lock()));
         }
@@ -422,7 +486,7 @@ impl Runtime {
         }
     }
 
-    fn routine_from_table(&self, id: String, spec: Table) -> Result<RoutineDef> {
+    fn routine_from_table(lua: &Lua, id: String, spec: Table) -> Result<RoutineDef> {
         let cron_src: String = spec
             .get("cron")
             .map_err(|_| invalid("routine", format!("{id} needs a `cron` field")))?;
@@ -435,7 +499,7 @@ impl Runtime {
         let message = spec.get::<Option<String>>("message")?;
         let run = spec
             .get::<Option<mlua::Function>>("run")?
-            .map(|f| self.lua.create_registry_value(f))
+            .map(|f| lua.create_registry_value(f))
             .transpose()?;
         Ok(RoutineDef {
             id,
@@ -445,6 +509,7 @@ impl Runtime {
             enabled,
             bot,
             message,
+            lua: lua.clone(),
             run,
         })
     }
@@ -462,15 +527,14 @@ impl Runtime {
             if !guard.tools.is_empty() && !guard.tools.iter().any(|t| t == &event.tool_name) {
                 continue;
             }
-            let function: mlua::Function = self
-                .lua
-                .registry_value(&guard.key)
-                .map_err(|e| e.to_string())?;
-            let table = self.lua.create_table().map_err(|e| e.to_string())?;
+            let lua = &guard.lua;
+            let function: mlua::Function =
+                lua.registry_value(&guard.key).map_err(|e| e.to_string())?;
+            let table = lua.create_table().map_err(|e| e.to_string())?;
             table
                 .set("tool_name", event.tool_name.clone())
                 .map_err(|e| e.to_string())?;
-            let args = self.lua.to_value(&event.args).map_err(|e| e.to_string())?;
+            let args = lua.to_value(&event.args).map_err(|e| e.to_string())?;
             table.set("args", args).map_err(|e| e.to_string())?;
             let result: LuaValue = function
                 .call_async(table)
@@ -479,7 +543,7 @@ impl Runtime {
             if result.is_nil() {
                 continue;
             }
-            let parsed: Value = self.lua.from_value(result).map_err(|e| e.to_string())?;
+            let parsed: Value = lua.from_value(result).map_err(|e| e.to_string())?;
             if let Some(reason) = parsed.get("block").and_then(Value::as_str) {
                 return Ok(Some(BeforeToolResult {
                     args: None,
@@ -498,9 +562,9 @@ impl Runtime {
 
     /// Run a Lua tool.
     ///
-    /// `ctx.sh` is wired to this sandbox for the duration of the call, so a
-    /// tool physically cannot reach the host: there is no other command path
-    /// exposed to the VM-facing side of the API.
+    /// `ctx.sh` is wired to this sandbox for the duration of the call. It is
+    /// the only command path. Workspace definitions additionally lack ambient
+    /// host capabilities; host-installed definitions remain trusted.
     pub async fn call_tool(
         &self,
         name: &str,
@@ -511,8 +575,8 @@ impl Runtime {
     }
 
     /// Run a Lua tool while allowing each `ctx.sh` guest command to be
-    /// interrupted. Lua itself is trusted launch code; cancellation applies to
-    /// the sandbox effects it awaits.
+    /// interrupted. Neither Lua state is preemptively cancelled; cancellation
+    /// applies to the sandbox effects the callback awaits.
     pub async fn call_tool_cancelled(
         &self,
         name: &str,
@@ -524,11 +588,11 @@ impl Runtime {
             .tool(name)
             .ok_or_else(|| invalid("tool call", format!("no tool named {name:?}")))?;
         let args = def.prepare(args)?;
-
-        let ctx = self.lua.create_table()?;
+        let lua = &def.lua;
+        let ctx = lua.create_table()?;
         let sh_sandbox = sandbox.clone();
         let sh_cancel = cancel.clone();
-        let sh = self.lua.create_async_function(move |_, command: String| {
+        let sh = lua.create_async_function(move |_, command: String| {
             let sandbox = sh_sandbox.clone();
             let cancel = sh_cancel.clone();
             async move {
@@ -536,8 +600,8 @@ impl Runtime {
                     .exec(&command, ExecOptions::default(), cancel)
                     .await
                     .map_err(|e| mlua::Error::external(e.to_string()))?;
-                // Tools want the text. The exit code is still reachable, but
-                // the common case reads like a shell pipeline.
+                // This API exposes text only, not exit/cancellation status.
+                // A structured exec result is a separate future API.
                 Ok(if output.stderr.is_empty() {
                     output.stdout
                 } else {
@@ -552,18 +616,17 @@ impl Runtime {
         }
         ctx.set(
             "shellescape",
-            self.lua
-                .create_function(|_, s: String| Ok(shell_words::quote(&s).into_owned()))?,
+            lua.create_function(|_, s: String| Ok(shell_words::quote(&s).into_owned()))?,
         )?;
 
-        let function: mlua::Function = self.lua.registry_value(&def.key)?;
-        let lua_args = self.lua.to_value(&Value::Object(args))?;
+        let function: mlua::Function = lua.registry_value(&def.key)?;
+        let lua_args = lua.to_value(&Value::Object(args))?;
         let result: LuaValue = function.call_async((lua_args, ctx)).await?;
         Ok(match result {
             LuaValue::String(s) => s.to_string_lossy().to_string(),
             LuaValue::Nil => String::new(),
             other => {
-                let json: Value = self.lua.from_value(other)?;
+                let json: Value = lua.from_value(other)?;
                 match json {
                     Value::String(s) => s,
                     other => serde_json::to_string_pretty(&other).unwrap_or_default(),
@@ -580,8 +643,12 @@ impl Runtime {
             path: path.to_path_buf(),
             source,
         })?;
-        self.lua
-            .load(&source)
+        Self::exec_source(&self.lua, path, &source)
+    }
+
+    fn exec_source(lua: &Lua, path: &Path, source: &str) -> Result<()> {
+        lua.load(source)
+            .set_mode(ChunkMode::Text)
             .set_name(path.to_string_lossy().as_ref())
             .exec()
             .map_err(|source| LuaError::Script {
@@ -590,11 +657,16 @@ impl Runtime {
             })
     }
 
-    fn tool_from_table(&self, name: String, spec: Table, owner: Option<String>) -> Result<ToolDef> {
+    fn tool_from_table(
+        lua: &Lua,
+        name: String,
+        spec: Table,
+        owner: Option<String>,
+    ) -> Result<ToolDef> {
         let run: mlua::Function = spec
             .get("run")
             .map_err(|_| invalid("tool", format!("{name} has no `run` function")))?;
-        let key = self.lua.create_registry_value(run)?;
+        let key = lua.create_registry_value(run)?;
         let description: String = spec
             .get::<Option<String>>("description")?
             .unwrap_or_default();
@@ -624,12 +696,12 @@ impl Runtime {
                         .get::<LuaValue>("default")
                         .ok()
                         .filter(|v| !v.is_nil())
-                        .and_then(|v| self.lua.from_value(v).ok()),
+                        .and_then(|v| lua.from_value(v).ok()),
                     enum_values: table
                         .get::<LuaValue>("enum")
                         .ok()
                         .filter(|v| !v.is_nil())
-                        .and_then(|v| self.lua.from_value::<Vec<Value>>(v).ok()),
+                        .and_then(|v| lua.from_value::<Vec<Value>>(v).ok()),
                 });
             }
         }
@@ -639,20 +711,56 @@ impl Runtime {
             params,
             replay,
             owner,
+            lua: lua.clone(),
             key,
         })
     }
 
-    fn guard_from_table(&self, id: String, spec: Table) -> Result<GuardDef> {
+    fn guard_from_table(lua: &Lua, id: String, spec: Table) -> Result<GuardDef> {
         let run: mlua::Function = spec
             .get("run")
             .map_err(|_| invalid("guard", format!("{id} has no `run` function")))?;
-        let key = self.lua.create_registry_value(run)?;
+        let key = lua.create_registry_value(run)?;
         let tools = spec
             .get::<Option<Vec<String>>>("tools")?
             .unwrap_or_default();
-        Ok(GuardDef { id, tools, key })
+        Ok(GuardDef {
+            id,
+            tools,
+            lua: lua.clone(),
+            key,
+        })
     }
+}
+
+fn workspace_sources(root: &Path, relative: &Path) -> Result<Vec<(PathBuf, String)>> {
+    crate::script_fs::scripts(root, relative).map_err(|source| LuaError::Io {
+        path: root.join(relative),
+        source,
+    })
+}
+
+fn trusted_sources(dir: &Path) -> Result<Vec<(PathBuf, String)>> {
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut paths: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|source| LuaError::Io {
+            path: dir.into(),
+            source,
+        })?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "lua"))
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            std::fs::read_to_string(&path)
+                .map(|source| (path.clone(), source))
+                .map_err(|source| LuaError::Io { path, source })
+        })
+        .collect()
 }
 
 /// Translate the `sandbox { ... }` table into a [`Policy`].
@@ -783,6 +891,10 @@ fn string_list(table: &Table) -> Result<Vec<String>> {
     }
     Ok(out)
 }
+
+#[cfg(test)]
+#[path = "lua_workspace_tests.rs"]
+mod workspace_tests;
 
 #[cfg(test)]
 mod tests {

@@ -178,28 +178,18 @@ impl Project {
         load_host_config(&root, &mut runtime)?;
         runtime.load_tools(&root.join("tools"))?;
         runtime.load_tools(&root.join("plugins"))?;
-        runtime.load_tools(&root.join("workspace/plugins"))?;
-        runtime.load_routines(&root.join("workspace/routines"))?;
-        let agents = root.join("workspace/agents");
-        if agents.is_dir() {
-            let mut dirs: Vec<_> = std::fs::read_dir(&agents)
-                .map_err(|source| ProjectError::Io {
-                    path: agents.clone(),
-                    source,
-                })?
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.is_dir())
-                .collect();
-            dirs.sort();
-            for dir in dirs {
-                let id = dir
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("")
-                    .to_string();
-                runtime.load_tools_for(&dir.join("plugins"), Some(&id))?;
-                runtime.load_routines_for(&dir.join("routines"), Some(&id))?;
-            }
+        runtime.load_workspace_tools(&root, Path::new("workspace/plugins"), None)?;
+        runtime.load_workspace_routines(&root, Path::new("workspace/routines"), None)?;
+        let dirs = crate::script_fs::child_dirs(&root, Path::new("workspace/agents")).map_err(
+            |source| ProjectError::Io {
+                path: root.join("workspace/agents"),
+                source,
+            },
+        )?;
+        for dir in dirs {
+            let id = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            runtime.load_workspace_tools(&root, &dir.join("plugins"), Some(id))?;
+            runtime.load_workspace_routines(&root, &dir.join("routines"), Some(id))?;
         }
         Ok(Self {
             root,

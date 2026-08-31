@@ -13,6 +13,11 @@
 
 ## Overview
 
+**Historical draft:** the Lua trust split and current APIs below have been superseded
+by `docs/architecture.md` and `src/templates/plugins_skill.md`. Workspace Lua is now
+bot-editable but restricted in a separate state; host-installed Lua remains trusted.
+The planned tests/PR list here is not a claim that those behaviors are implemented.
+
 Reve is already the right engine for a Grok-Bot-like product: a durable Rust harness, Lua as trusted launch code, a mandatory microsandbox microVM, and the philosophy that you inspect an agent with ordinary filesystem tools. What it is *not* yet is a house. Today `reve` with no subcommand boots the VM, **stops it**, and opens a single-agent ratatui TUI (`src/main.rs`). Identity files (`instructions.md`, `agent.lua`, `sandbox.lua`, `tools/*.lua`) live *outside* the VM mount, so the bot cannot self-edit the things that make it itself. There is one conversation, one session file under `.reve/sessions/`, and no way for a teammate to exist.
 
 This design rearranges the loadout, not the engine, and ships it as the **`revebot`** command (crate and binary renamed; durable host state stays under `.reve/` because that is still the Reve engine's runtime). A house directory becomes a **house of bots**: one microVM, one shared `/workspace`, many bots. Each bot is a sibling folder under `workspace/agents/<id>/` with a profile, standing instructions, skills, its own JSONL session, and an optional per-bot `model`. The first bot is `chief-of-staff` (display name **Chief of Staff**): it already has a job — coordinate the house, ask how it can help, and `CreateAgent` specialists when a job has a distinct owner. `update_state` can still change the display name; the folder id does not move. Bots message each other asynchronously — send returns an ack, the target wakes later on a fresh turn with cue `[agent]`. The model's opening assistant text is the first user-visible bubble; after tools start, the UI shows Working… and further bubbles go through `SendUserMessage` in the same run. The default CLI starts a localhost HTTP+WebSocket server, keeps the VM warm, and refuses to serve if the microVM cannot boot. Lua launch code stays on the host, outside the mount, so a bot that can `write` its own `instructions.md` still cannot open the host door.

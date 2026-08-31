@@ -1,4 +1,4 @@
--- Trusted launch code: loaded at house boot, never by the model.
+-- Bot-editable, restricted Lua: loaded at house boot. No host IO or shell.
 -- Cron is five fields: minute hour day-of-month month day-of-week.
 -- `ctx.send(bot_id, text)` queues a user-visible turn for that bot.
 

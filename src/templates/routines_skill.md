@@ -7,41 +7,35 @@ description: >
 
 # Routines
 
-Trusted Lua, loaded at house boot — not model output. A broken file is skipped.
+Read `/workspace/skills/plugins/SKILL.md` for the complete Lua API, including
+routine fields, callback context, errors, loading behavior and current limits.
 
-## Where
+Bot-editable routines execute in restricted Lua at house startup. A broken file
+fails startup; automatic reload/last-good fallback is not yet implemented.
 
 - This bot: `/workspace/agents/<your-id>/routines/<file>.lua`
-- Whole house: `/workspace/routines/<file>.lua`
+- House: `/workspace/routines/<file>.lua`
 
-Cron is five fields: `minute hour day-of-month month day-of-week`.
-
-## Declare
+Use a house-unique id. Cron has five numeric fields:
+`minute hour day-of-month month day-of-week`.
 
 ```lua
-routine("standup", {
+routine("chief_standup", {
   name = "Standup ping",
   cron = "0 10 * * 1-5",
-  enabled = true,
-  -- `bot` defaults to this agent folder when the file lives under agents/<id>/routines/.
+  enabled = false, -- enable after testing
+  -- bot defaults to the owning folder in agents/<id>/routines/.
+  bot = "chief-of-staff", -- required for this house-level example
   message = "Collect standup notes from the roster.",
 })
 ```
 
-Several sends from one tick:
+Instead of `message`, `run = function(ctx) ... end` can collect multiple sends
+with `ctx.send(bot_id, text)`. `ctx.bot` is the resolved target/owning bot, or nil
+for a house routine without `bot`. There is no `ctx.bots()` or priority option.
+The sends are delivered only after the callback succeeds; collecting is not a
+durable receipt. There is no `ctx.sh` in routines: tell the bot to do guest work.
 
-```lua
-routine("morning", {
-  name = "Morning",
-  cron = "0 9 * * 1-5",
-  run = function(ctx)
-    ctx.send(ctx.bot, "What needs attention?")
-  end,
-})
-```
-
-`ctx.send(id, text, { priority = true })` queues a turn for that bot (same as SendAgentMessage). `ctx.bot` is this bot's id. `ctx.bots()` is the ready roster.
-
-`enabled = false` keeps the file without firing. The user can run an enabled routine from the rail.
-
-Do not `os.execute`. There is no host shell. If a routine needs a command, it does not belong here — a tool with `ctx.sh` runs in the microVM.
+`enabled = false` disables scheduled firing. Current ticks enter the bot's main
+conversation; persistent independent routine chats and durable run history are
+planned. Do not promise isolation or recovery of missed ticks yet.

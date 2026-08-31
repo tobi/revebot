@@ -48,14 +48,21 @@ touches — configuration, project tools, sandbox policy — is Lua.
   line; on reopen we truncate the torn tail and resume. A malformed line in the middle is
   corruption and we refuse to open. An agent that reports work it did not persist is worse
   than one that is slow.
-- **Lua is trusted launch code, in two layers.** Host `plugins/*.lua` and leftover
-  `tools/*.lua` sit outside the mount. Workspace `workspace/plugins/` and
-  `workspace/agents/<id>/{plugins,routines}/` are bot-editable: syntax-checked, reloaded,
-  available as tools on the next turn. Both layers still have no host command path:
-  `ctx.sh` is the only way out and it goes to the microVM. `ctx.send` is the house
-  messaging API, not a shell. Roster tools (`CreateAgent`, `SendAgentMessage`, …) stay
-  Rust and win on name. `Runtime::new` deletes `os.execute`, `io.popen`, `os.exit`, and
-  `package.loadlib` before any script runs; keep that list closed.
+- **Lua has two separate trust states.** Host `plugins/*.lua` and leftover
+  `tools/*.lua` sit outside the mount and remain trusted. Bot-editable workspace
+  plugins/routines run in a separate restricted Lua state, with no ambient host
+  IO, environment, modules, dynamic loading or bytecode. Read their source with
+  the descriptor-rooted `script_fs` loader, never an ambient host Lua loader.
+  Both states still have no host command path: `ctx.sh` goes only to the microVM;
+  routine `ctx.send` collects messages for house delivery, not shell execution.
+  Roster tools (`CreateAgent`, `SendAgentMessage`, …) stay Rust and win on name.
+  `Runtime::new` deletes `os.execute`, `io.popen`, `os.exit`, and `package.loadlib`
+  before any script runs; keep that list closed. Loading is currently at startup
+  and fails on bad source; next-turn/last-good reload is not implemented yet.
+- **Document the entire Lua API in the plugins skill.** Update
+  `src/templates/plugins_skill.md` in the same change as any Lua API. Cover all
+  declarations, fields, contexts, results, scope, replay/cancellation and limits.
+  Test executable examples. Do not describe planned APIs as implemented.
 - **Host config is `config.yml`** (model, sandbox, secrets). `models.yml` stays the
   provider catalog. Existing `agent.lua` / `sandbox.lua` still load if `config.yml` is
   missing.

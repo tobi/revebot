@@ -196,7 +196,10 @@ There is no `host-exec`, and omitting a secret does not create an invisible host
 
 Host-trusted tools live in `tools/*.lua` (outside the mount). Bot-editable plugins live in
 `workspace/plugins/` and `workspace/agents/<id>/plugins/` — they reload on the next house
-start and are documented as the `plugins` skill. `ctx.sh` always runs in the microVM.
+start and are documented in full by the `plugins` skill. Workspace Lua uses a separate,
+restricted state with no host IO, environment or module loading; symlinked source is
+refused. `ctx.sh` always runs in the microVM. A bad script currently fails startup;
+last-good hot reload is not implemented yet.
 The real host template, `tools/example.lua`:
 
 ```lua
@@ -232,9 +235,9 @@ is rejected before the tool runs. `replay` is `"safe"` (read-only, may be re-run
 recovery) or `"never"` (the default). The `ctx` table passed to `run` exposes:
 
 - `ctx.sh(command)` — run a command in the microVM; returns stdout, or stdout+stderr when
-  stderr is non-empty. The exit code is data, not an error.
-- `ctx.workdir` — the guest working directory (`/workspace`), so a relative path means the
-  same thing on the host and in the VM.
+  stderr is non-empty. Nonzero exit is not automatically a Lua error; this API does not
+  return the exit code or cancellation flag.
+- `ctx.workdir` — the guest working directory (`/workspace`), not a host path.
 - `ctx.shellescape(s)` — quote a string for safe shell interpolation.
 
 A file may declare several tools and use any Lua logic needed to implement a complex

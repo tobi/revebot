@@ -35,7 +35,8 @@ Reve deliberately fails closed:
   `Cargo.toml`. It is Reve's only sandbox dependency, linked and called directly — no FFI
   shim, no daemon, no CLI transport.
 - Only `workspace/` is bind-mounted into the VM, at `/workspace`, and set as the working
-  directory. The agent's own definition files stay outside the mount.
+  directory. Host configuration and installed host tools stay outside the mount;
+  bot profiles, instructions and workspace Lua are editable inside it.
 - Network access is the public internet by default (`NetworkProfile::Public` plus
   gateway DNS). `sandbox.lua` can set `open = false` and list hosts in `allow` to
   lock down; that path starts from `NetworkPolicy::none()`. Private/LAN and cloud
@@ -48,8 +49,20 @@ Reve deliberately fails closed:
 - Durable intent records are written before effects so recovery does not guess whether an
   effectful operation should be replayed.
 
-The host Rust process, the Lua launch code (`agent.lua`, `sandbox.lua`, `tools/*.lua`), the
-configured model providers, and the upstream microsandbox runtime remain trusted
-components. Lua launch code runs on the host and is not model output; install an agent's
-tools only as trusted code. They do not authorize model-authored host commands — there is
-no host command path exposed to Lua.
+The host Rust process, host-installed Lua (`agent.lua`, `sandbox.lua`, `tools/*.lua`,
+`plugins/*.lua`), configured model providers, and the upstream microsandbox runtime
+remain trusted. Host Lua must not import bot-provided source or expose privileged
+functions to it. There is no host command path in either Lua state.
+
+Bot-editable workspace plugins/routines execute in a **separate restricted Lua
+state**. Its allowlisted pure libraries exclude ambient host filesystem, environment,
+module/native loading and stdio access. Registry values are tied to their originating
+state. Workspace source is read beneath the house with descriptor-relative
+`O_NOFOLLOW` opens; symlinked files/ancestors, non-regular files, oversized source
+(> 1 MiB) and bytecode are refused. `ctx.sh` executes only in the guest.
+
+This restricts capabilities, not resources: pure Lua is not preemptively cancelled
+or CPU/memory-budgeted. It is not a hostile-code process sandbox; substantial
+computation belongs in the VM. Other shared-workspace risks (including bot-authored
+profile paths and writable session files) are separate from this Lua boundary.
+The complete supported API and current limits are in the `plugins` skill.
