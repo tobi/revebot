@@ -59,4 +59,4 @@ Writes are serialized, compare existing bytes before atomic guest replacement,
 and acknowledge only successful publication. A conflict asks you to retry rather
 than overwrite a changed file. A file is limited to 64 KiB and an active memory
 scope to 256 files: archive older files outside the injected tier directories.
-Do not store secrets in memory. Use `AskUserForSecret`.
+Do not store secrets in memory. Use `AskUserSandboxPolicyChange`.

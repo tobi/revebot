@@ -5,11 +5,11 @@ pub(crate) mod files;
 pub mod fs;
 pub mod home;
 pub mod memory;
+pub mod policy;
 pub mod profile;
 pub mod prompt;
 pub mod resources;
 mod roster;
-pub mod secret;
 pub mod serve;
 pub mod tools;
 pub mod usage;
@@ -47,7 +47,6 @@ use crate::storage::Storage;
 use crate::tools::Toolbox;
 
 use profile::{BOT_CAP, Profile, scan_checked, slug_from_name, unique_slug};
-use prompt::system_prompt;
 use tools::HouseTools;
 use wrap::wrap_agent_arrival;
 
@@ -89,17 +88,23 @@ pub(crate) struct Inner {
     /// Per-bot skill fingerprints so a created/edited SKILL.md is attached to
     /// the next user turn. Empty map = first snapshot, not "all new".
     skill_seen: Mutex<HashMap<String, BTreeMap<String, u64>>>,
-    /// One in-flight AskUserForSecret per bot.
-    secret_asks: Mutex<HashMap<String, tokio::sync::oneshot::Sender<SecretAskResult>>>,
+    /// One in-flight AskUserSandboxPolicyChange per bot.
+    policy_asks: Mutex<HashMap<String, tokio::sync::oneshot::Sender<PolicyAskResult>>>,
     usage: usage::UsageLog,
     memory_edits: tokio::sync::Mutex<()>,
     profile_edits: tokio::sync::Mutex<()>,
 }
 
+/// How an `AskUserSandboxPolicyChange` card was answered.
 #[derive(Debug, Clone)]
-pub(crate) enum SecretAskResult {
+pub(crate) enum PolicyAskResult {
     Declined,
-    Saved { env: String, hosts: Vec<String> },
+    Applied {
+        /// Hosts the user allowed and how the sandbox took them.
+        hosts: Option<crate::sandbox::AllowOutcome>,
+        /// The saved secret: env name and the hosts it is scoped to.
+        secret: Option<(String, Vec<String>)>,
+    },
 }
 
 type MinuteStamp = (i32, u32, u32, u32, u32);
@@ -251,7 +256,7 @@ impl House {
             me: Mutex::new(Weak::new()),
             last_fired: Mutex::new(HashMap::new()),
             skill_seen: Mutex::new(HashMap::new()),
-            secret_asks: Mutex::new(HashMap::new()),
+            policy_asks: Mutex::new(HashMap::new()),
             usage: usage::UsageLog::open(&project.state_dir()),
             memory_edits: tokio::sync::Mutex::new(()),
             profile_edits: tokio::sync::Mutex::new(()),
@@ -513,12 +518,12 @@ impl House {
         )
     }
 
-    pub async fn complete_secret(
+    pub async fn complete_policy_change(
         &self,
         bot: &str,
-        decision: secret::SecretDecision,
+        decision: policy::PolicyDecision,
     ) -> anyhow::Result<String> {
-        self.inner.complete_secret(bot, decision).await
+        self.inner.complete_policy_change(bot, decision).await
     }
 
     pub fn subscribe(&self, bot: &str) -> anyhow::Result<(String, broadcast::Receiver<Event>)> {
@@ -843,16 +848,16 @@ impl Inner {
         }
     }
 
-    pub(crate) async fn ask_secret(
+    pub(crate) async fn ask_policy_change(
         &self,
         bot: &str,
         cancel: Option<crate::sandbox::tokio_util_lite::CancelRx>,
-    ) -> Result<SecretAskResult, String> {
+    ) -> Result<PolicyAskResult, String> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         {
-            let mut asks = self.secret_asks.lock();
+            let mut asks = self.policy_asks.lock();
             if asks.contains_key(bot) {
-                return Err("a secret prompt is already waiting for this bot".into());
+                return Err("a sandbox policy prompt is already waiting for this bot".into());
             }
             asks.insert(bot.to_string(), tx);
         }
@@ -865,50 +870,88 @@ impl Inner {
         };
         tokio::select! {
             result = rx => {
-                result.map_err(|_| "secret prompt was dropped".to_string())
+                result.map_err(|_| "sandbox policy prompt was dropped".to_string())
             }
             _ = cancelled => {
-                self.secret_asks.lock().remove(bot);
+                self.policy_asks.lock().remove(bot);
                 Err("cancelled".into())
             }
         }
     }
 
-    pub(crate) async fn complete_secret(
+    /// Apply the user's answer: persist to `config.yml` first (the file is
+    /// authoritative), then take effect — a secret live, hosts by rebuilding
+    /// the VM definition — and only then release the waiting tool call.
+    pub(crate) async fn complete_policy_change(
         &self,
         bot: &str,
-        decision: secret::SecretDecision,
+        decision: policy::PolicyDecision,
     ) -> anyhow::Result<String> {
         self.ready_harness(bot)?;
-        if !self.secret_asks.lock().contains_key(bot) {
-            anyhow::bail!("no pending secret prompt");
+        if !self.policy_asks.lock().contains_key(bot) {
+            anyhow::bail!("no pending sandbox policy prompt");
         }
-        if !decision.accept {
-            let tx = self
-                .secret_asks
+        let take_ask = || {
+            self.policy_asks
                 .lock()
                 .remove(bot)
-                .ok_or_else(|| anyhow::anyhow!("no pending secret prompt"))?;
-            let _ = tx.send(SecretAskResult::Declined);
+                .ok_or_else(|| anyhow::anyhow!("no pending sandbox policy prompt"))
+        };
+        if !decision.accept {
+            let _ = take_ask()?.send(PolicyAskResult::Declined);
             return Ok("declined".into());
         }
-        let secret =
-            secret::to_secret(&self.project.root, &decision).map_err(|e| anyhow::anyhow!(e))?;
+        let hosts = policy::normalize_hosts(&decision.hosts).map_err(|e| anyhow::anyhow!(e))?;
+        let secret = decision
+            .secret
+            .as_ref()
+            .map(|s| policy::to_secret(&self.project.root, s))
+            .transpose()
+            .map_err(|e| anyhow::anyhow!(e))?;
+        if hosts.is_empty() && secret.is_none() {
+            anyhow::bail!("nothing to apply: no hosts and no secret");
+        }
+
         let path = self.project.root.join("config.yml");
-        let text = std::fs::read_to_string(&path).unwrap_or_else(|_| "sandbox: {}\n".into());
-        let next = secret::upsert_config_yml(&text, &secret).map_err(|e| anyhow::anyhow!(e))?;
-        std::fs::write(&path, next)?;
-        self.sandbox.upsert_secret(secret.clone()).await?;
-        let tx = self
-            .secret_asks
-            .lock()
-            .remove(bot)
-            .ok_or_else(|| anyhow::anyhow!("no pending secret prompt"))?;
-        let _ = tx.send(SecretAskResult::Saved {
-            env: secret.env.clone(),
-            hosts: secret.hostnames(),
+        let mut text = std::fs::read_to_string(&path).unwrap_or_else(|_| "sandbox: {}\n".into());
+        if !hosts.is_empty() {
+            text =
+                policy::upsert_allow_config_yml(&text, &hosts).map_err(|e| anyhow::anyhow!(e))?;
+        }
+        if let Some(secret) = &secret {
+            text =
+                policy::upsert_secret_config_yml(&text, secret).map_err(|e| anyhow::anyhow!(e))?;
+        }
+        std::fs::write(&path, text)?;
+
+        let mut saved_secret = None;
+        // A secret's hosts must be reachable too; fold them into the allow
+        // step so the VM is rebuilt once with everything.
+        let mut to_allow = hosts.clone();
+        if let Some(secret) = secret {
+            self.sandbox.upsert_secret(secret.clone()).await?;
+            to_allow.extend(secret.allowed_hostnames());
+            saved_secret = Some((secret.env.clone(), secret.hostnames()));
+        }
+        to_allow.sort();
+        to_allow.dedup();
+        let allowed = if to_allow.is_empty() {
+            None
+        } else {
+            Some(self.sandbox.allow_hosts(&to_allow).await?)
+        };
+
+        let summary = match (&allowed, &saved_secret) {
+            (Some(_), Some((env, _))) => format!("allowed {} and saved {env}", hosts.join(", ")),
+            (Some(_), None) => format!("allowed {}", hosts.join(", ")),
+            (None, Some((env, _))) => format!("saved {env}"),
+            (None, None) => "nothing applied".to_string(),
+        };
+        let _ = take_ask()?.send(PolicyAskResult::Applied {
+            hosts: allowed,
+            secret: saved_secret,
         });
-        Ok(format!("saved {}", secret.env))
+        Ok(summary)
     }
 
     async fn spawn_ready(self: &Arc<Self>, profile: Profile) -> anyhow::Result<()> {
@@ -980,7 +1023,12 @@ impl Inner {
                     };
                     format!(
                         "{}\n\nCurrent directory: {}\n{}",
-                        system_prompt(&inner.project, &prompt_profile, &inner.ready_profiles()),
+                        prompt::system_prompt_with_policy(
+                            &inner.project,
+                            &inner.sandbox.effective_policy(),
+                            &prompt_profile,
+                            &inner.ready_profiles()
+                        ),
                         prompt_context.cwd(),
                         prompt_context.instructions()
                     )
@@ -1280,7 +1328,7 @@ impl Inner {
             Ok(()) => {
                 self.snapshot.write().finish_delete(id, &token)?;
                 self.skill_seen.lock().remove(id);
-                self.secret_asks.lock().remove(id);
+                self.policy_asks.lock().remove(id);
             }
             Err(error) => {
                 self.snapshot

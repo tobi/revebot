@@ -11,6 +11,17 @@ use super::profile::Profile;
 use super::wrap::house_kernel;
 
 pub fn system_prompt(project: &Project, bot: &Profile, teammates: &[Profile]) -> String {
+    system_prompt_with_policy(project, &project.runtime.policy, bot, teammates)
+}
+
+/// [`system_prompt`] with the policy as it currently applies (runtime-allowed
+/// hosts folded in), so the model is told what it can reach *now*.
+pub fn system_prompt_with_policy(
+    project: &Project,
+    policy: &crate::sandbox::Policy,
+    bot: &Profile,
+    teammates: &[Profile],
+) -> String {
     let current = match Profile::load_for(&project.root, &bot.id) {
         Ok(profile) => profile,
         Err(error) => {
@@ -74,12 +85,12 @@ pub fn system_prompt(project: &Project, bot: &Profile, teammates: &[Profile]) ->
         parts.push(format!("# Available skills\n\n{}", lines.join("\n")));
     }
 
-    parts.push(environment_prompt(project, bot));
+    parts.push(environment_prompt(policy, bot));
     parts.join("\n\n")
 }
 
-fn environment_prompt(project: &Project, bot: &Profile) -> String {
-    let internet = project.runtime.policy.internet_prompt();
+fn environment_prompt(policy: &crate::sandbox::Policy, bot: &Profile) -> String {
+    let internet = policy.internet_prompt();
     format!(
         "<env>\n\
          You are running inside a microVM. The workspace is mounted at /workspace and is the \
@@ -200,6 +211,6 @@ mod tests {
             prompt.contains("Create a new Reve skill"),
             "folded YAML descriptions must list as real text, not `>`"
         );
-        assert!(prompt.contains("AskUserForSecret"));
+        assert!(prompt.contains("AskUserSandboxPolicyChange"));
     }
 }

@@ -957,8 +957,8 @@ function argsPreview(name, args) {
   args = asArgs(args);
   const prefer = name === "bash" || name === "example"
     ? ["command", "path", "name", "id", "pattern", "text"]
-    : name === "AskUserForSecret"
-    ? ["title", "env", "reason", "description"]
+    : name === "AskUserSandboxPolicyChange"
+    ? ["title", "reason"]
     : ["name", "path", "id", "command", "pattern", "text"];
   for (const k of prefer) {
     if (typeof args[k] === "string" && args[k]) {
@@ -1221,18 +1221,18 @@ function clipOut(out) {
   return s.length > 240 ? s.slice(0, 240) + "…" : s;
 }
 
-function addSecretAsk(args, opt) {
+function addPolicyAsk(args, opt) {
   args = asArgs(args);
   const col = openStart(opt.bot);
   const card = el("div", "tool secret-card" + (opt.running ? " running" : "") + (opt.err ? " err" : ""));
   if (opt.id) card.dataset.id = opt.id;
   const row = el("div", "tool-row");
-  row.appendChild(el("span", "tool-name", "AskUserForSecret"));
-  row.appendChild(el("span", "tool-args", args.title || args.env || "secret"));
+  row.appendChild(el("span", "tool-name", "AskUserSandboxPolicyChange"));
+  row.appendChild(el("span", "tool-args", args.title || "sandbox policy"));
   card.appendChild(row);
   const live = !!opt.running && !opt.out;
   if (live) {
-    const form = buildSecretForm(args, card);
+    const form = buildPolicyForm(args, card);
     card.appendChild(form);
   } else if (opt.out) {
     card.appendChild(el("div", "tool-out", clipOut(opt.out)));
@@ -1242,98 +1242,125 @@ function addSecretAsk(args, opt) {
   return card;
 }
 
-function buildSecretForm(args, card) {
+function splitHosts(value) {
+  return String(value || "").split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+}
+
+// One card for both halves of a request: egress hosts to allow, and/or a
+// host-scoped secret. Secret fields appear only when the model asked for one.
+function buildPolicyForm(args, card) {
   const form = el("form", "secret-form");
-  const title = args.title || "Secret";
-  const why = [args.description, args.reason].filter(Boolean).join(" — ");
+  const title = args.title || "Sandbox policy change";
+  const why = args.reason || args.description || "";
   form.appendChild(el("div", "secret-why", why || title));
 
-  const envLab = el("label", "", "ENV_NAME");
-  const env = el("input");
-  env.type = "text";
-  env.value = args.env || args.ENV_NAME || "";
-  env.autocomplete = "off";
-  env.spellcheck = false;
-  form.appendChild(envLab);
-  form.appendChild(env);
+  const wantHosts = Array.isArray(args.hosts) && args.hosts.length > 0;
+  const secretReq = args.secret && typeof args.secret === "object" ? args.secret : null;
 
-  const hostsLab = el("label", "", "Only attach to these HTTP hosts (comma-separated)");
-  const hosts = el("input");
-  hosts.type = "text";
-  hosts.placeholder = "api.github.com, github.com";
-  hosts.autocomplete = "off";
-  form.appendChild(hostsLab);
-  form.appendChild(hosts);
-
-  const headLab = el("label", "", "Overwrite this request header with the secret");
-  const header = el("input");
-  header.type = "text";
-  header.value = "Authorization";
-  header.autocomplete = "off";
-  form.appendChild(headLab);
-  form.appendChild(header);
-
-  const preLab = el("label", "", "Header prefix");
-  const prefix = el("input");
-  prefix.type = "text";
-  prefix.value = "Bearer";
-  prefix.placeholder = "Bearer, Token, or empty";
-  prefix.autocomplete = "off";
-  form.appendChild(preLab);
-  form.appendChild(prefix);
-
-  const kindBox = el("div", "secret-radios");
-  kindBox.appendChild(el("label", "", "How to obtain it"));
-  const kinds = [
-    ["paste", "Paste the secret (password field)"],
-    ["env", "Read a host environment variable"],
-    ["command", "Run a shell script on the host"],
-    ["http", "GET an HTTP URL on the host"]
-  ];
-  kinds.forEach(([val, label], i) => {
-    const row = el("label");
-    const r = el("input");
-    r.type = "radio";
-    r.name = "secret-kind-" + (card.dataset.id || "x");
-    r.value = val;
-    if (i === 0) r.checked = true;
-    row.appendChild(r);
-    row.appendChild(document.createTextNode(label));
-    kindBox.appendChild(row);
-  });
-  form.appendChild(kindBox);
-
-  const srcLab = el("label", "", "Value");
-  const src = el("input");
-  src.type = "password";
-  src.placeholder = "paste secret";
-  src.autocomplete = "off";
-  form.appendChild(srcLab);
-  form.appendChild(src);
-
-  function kind() {
-    const r = form.querySelector("input[type=radio]:checked");
-    return r ? r.value : "paste";
+  let hosts = null;
+  if (wantHosts || !secretReq) {
+    const hostsLab = el("label", "", "Allow the sandbox to reach these hosts (comma-separated)");
+    hosts = el("input");
+    hosts.type = "text";
+    hosts.value = (args.hosts || []).join(", ");
+    hosts.placeholder = "pypi.org, files.pythonhosted.org";
+    hosts.autocomplete = "off";
+    hosts.spellcheck = false;
+    form.appendChild(hostsLab);
+    form.appendChild(hosts);
   }
-  function paintKind() {
-    const k = kind();
-    src.type = k === "paste" ? "password" : "text";
-    src.placeholder = k === "paste" ? "paste secret"
-      : k === "env" ? "HOST_ENV_NAME"
-      : k === "command" ? "gh auth token"
-      : "https://…";
-    srcLab.textContent = k === "paste" ? "Secret"
-      : k === "env" ? "Host env var"
-      : k === "command" ? "Host command"
-      : "HTTP URL";
+
+  let secret = null;
+  if (secretReq) {
+    const envLab = el("label", "", "Secret ENV_NAME");
+    const env = el("input");
+    env.type = "text";
+    env.value = secretReq.env || "";
+    env.autocomplete = "off";
+    env.spellcheck = false;
+    form.appendChild(envLab);
+    form.appendChild(env);
+
+    const shostsLab = el("label", "", "Only attach the secret to these HTTP hosts (comma-separated)");
+    const shosts = el("input");
+    shosts.type = "text";
+    shosts.value = (secretReq.hosts || []).join(", ");
+    shosts.placeholder = "api.github.com, github.com";
+    shosts.autocomplete = "off";
+    form.appendChild(shostsLab);
+    form.appendChild(shosts);
+
+    const headLab = el("label", "", "Overwrite this request header with the secret");
+    const header = el("input");
+    header.type = "text";
+    header.value = secretReq.header || "Authorization";
+    header.autocomplete = "off";
+    form.appendChild(headLab);
+    form.appendChild(header);
+
+    const preLab = el("label", "", "Header prefix");
+    const prefix = el("input");
+    prefix.type = "text";
+    prefix.value = secretReq.prefix === undefined ? "Bearer" : secretReq.prefix;
+    prefix.placeholder = "Bearer, Token, or empty";
+    prefix.autocomplete = "off";
+    form.appendChild(preLab);
+    form.appendChild(prefix);
+
+    const kindBox = el("div", "secret-radios");
+    kindBox.appendChild(el("label", "", "How to obtain it"));
+    const kinds = [
+      ["paste", "Paste the secret (password field)"],
+      ["env", "Read a host environment variable"],
+      ["command", "Run a shell script on the host"],
+      ["http", "GET an HTTP URL on the host"]
+    ];
+    kinds.forEach(([val, label], i) => {
+      const row = el("label");
+      const r = el("input");
+      r.type = "radio";
+      r.name = "secret-kind-" + (card.dataset.id || "x");
+      r.value = val;
+      if (i === 0) r.checked = true;
+      row.appendChild(r);
+      row.appendChild(document.createTextNode(label));
+      kindBox.appendChild(row);
+    });
+    form.appendChild(kindBox);
+
+    const srcLab = el("label", "", "Value");
+    const src = el("input");
+    src.type = "password";
+    src.placeholder = "paste secret";
+    src.autocomplete = "off";
+    form.appendChild(srcLab);
+    form.appendChild(src);
+
+    function kind() {
+      const r = form.querySelector("input[type=radio]:checked");
+      return r ? r.value : "paste";
+    }
+    function paintKind() {
+      const k = kind();
+      src.type = k === "paste" ? "password" : "text";
+      src.placeholder = k === "paste" ? "paste secret"
+        : k === "env" ? "HOST_ENV_NAME"
+        : k === "command" ? "gh auth token"
+        : "https://\u2026";
+      srcLab.textContent = k === "paste" ? "Secret"
+        : k === "env" ? "Host env var"
+        : k === "command" ? "Host command"
+        : "HTTP URL";
+    }
+    form.querySelectorAll("input[type=radio]").forEach((r) => { r.onchange = paintKind; });
+    paintKind();
+    secret = { env, shosts, header, prefix, src, kind };
   }
-  form.querySelectorAll("input[type=radio]").forEach((r) => { r.onchange = paintKind; });
-  paintKind();
 
   const actions = el("div", "secret-actions");
   const no = el("button", "no", "Decline");
   no.type = "button";
-  const go = el("button", "go", "Save");
+  const go = el("button", "go", "Apply");
   go.type = "submit";
   actions.appendChild(no);
   actions.appendChild(go);
@@ -1342,22 +1369,24 @@ function buildSecretForm(args, card) {
   async function submit(accept) {
     go.disabled = true;
     no.disabled = true;
-    const k = kind();
-    const body = {
-      accept,
-      env: env.value.trim(),
-      kind: k,
-      source: k === "paste" ? "" : src.value.trim(),
-      value: k === "paste" ? src.value : "",
-      hosts: hosts.value.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean),
-      header: header.value.trim() || null,
-      prefix: prefix.value.trim() || null
-    };
+    const body = { accept, hosts: hosts ? splitHosts(hosts.value) : [] };
+    if (accept && secret) {
+      const k = secret.kind();
+      body.secret = {
+        env: secret.env.value.trim(),
+        kind: k,
+        source: k === "paste" ? "" : secret.src.value.trim(),
+        value: k === "paste" ? secret.src.value : "",
+        hosts: splitHosts(secret.shosts.value),
+        header: secret.header.value.trim() || null,
+        prefix: secret.prefix.value.trim() || null
+      };
+    }
     try {
-      await api("/api/bots/" + encodeURIComponent(current) + "/secrets", {
+      await api("/api/bots/" + encodeURIComponent(current) + "/policy", {
         method: "POST", body: JSON.stringify(body)
       });
-      src.value = "";
+      if (secret) secret.src.value = "";
     } catch (e) {
       go.disabled = false;
       no.disabled = false;

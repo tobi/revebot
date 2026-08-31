@@ -54,7 +54,7 @@ async fn homes_cwd_memory_and_profile_notifications_work_in_the_guest() -> anyho
         let duplicate = house.inner.update_memory(&second.id, request).await?;
         anyhow::ensure!(duplicate.contains("Already remembered"));
         let roster = house.ready_profiles();
-        anyhow::ensure!(!system_prompt(house.project(), &roster.iter().find(|p| p.id == first).unwrap().clone(), &roster).contains("PRIVATE_MUSIC_FACT"));
+        anyhow::ensure!(!prompt::system_prompt(house.project(), &roster.iter().find(|p| p.id == first).unwrap().clone(), &roster).contains("PRIVATE_MUSIC_FACT"));
         let mut events = house.subscribe_house();
         let profile_path = format!("/workspace/agents/{}/profile.json", second.id);
         tools.invoke("write", serde_json::json!({"path":profile_path,"content":serde_json::json!({"id":second.id,"name":"Miku Renamed","title":"Composer","avatar":"blue:blob"}).to_string()}).as_object().unwrap().clone(), None).await.map_err(anyhow::Error::msg)?;

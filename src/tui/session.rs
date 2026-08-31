@@ -1002,7 +1002,8 @@ mod tests {
         assert!(prompt.starts_with("<env>\n"));
         assert!(prompt.ends_with("\n</env>"));
         assert!(prompt.contains("mise is installed"));
-        assert!(prompt.contains("You have internet access to github.com, registry.npmjs.org."));
+        assert!(prompt.contains("you can reach only: github.com, registry.npmjs.org."));
+        assert!(prompt.contains("AskUserSandboxPolicyChange"));
     }
 
     #[test]
@@ -1011,12 +1012,16 @@ mod tests {
             open: false,
             ..Default::default()
         });
-        assert!(prompt.contains("You have no internet access."));
+        assert!(prompt.contains("denied by default; no hosts are allowed yet."));
+        assert!(prompt.contains("AskUserSandboxPolicyChange"));
     }
 
     #[test]
     fn environment_prompt_says_when_the_internet_is_open() {
-        let prompt = environment_prompt(&crate::sandbox::Policy::default());
+        let prompt = environment_prompt(&crate::sandbox::Policy {
+            open: true,
+            ..Default::default()
+        });
         assert!(prompt.contains("You have internet access."));
         assert!(!prompt.contains("to github.com"));
     }

@@ -39,7 +39,7 @@ is not accepted. Do not put secrets into source files.
 
 Registers a model-callable tool. Rust house names (`update_state`, `cd`,
 `CreateAgent`, `UpdateAgent`, `SendAgentMessage`, `SendUserMessage`,
-`AskUserForSecret`) cannot be replaced. `update_state` supports `target="profile"`
+`AskUserSandboxPolicyChange`) cannot be replaced. `update_state` supports `target="profile"`
 (default) and `target="memory"`; the memory skill documents facts/tiers/scopes.
 These are model tools, not Lua globals or context functions. `CreateAgent` accepts
 `soul` for the initial SOUL.md, not a separate standing-instructions file.
@@ -123,7 +123,7 @@ Return values:
 There is currently **no** `ctx.send`, `ctx.bots`, host exec, host read/write,
 filesystem object, progress callback, or cancellation-token API on tool context.
 Use Rust house tools such as `SendAgentMessage`, `SendUserMessage`, and
-`AskUserForSecret` for those workflows. Lua cannot replace those reserved names.
+`AskUserSandboxPolicyChange` for those workflows. Lua cannot replace those reserved names.
 
 ### Replay and cancellation
 

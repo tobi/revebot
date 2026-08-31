@@ -1168,8 +1168,8 @@ mod tests {
         assert_eq!(rt.policy.cpus, 1);
         assert!(!rt.policy.provision);
         assert!(
-            rt.policy.open,
-            "internet stays on unless sandbox.lua turns it off"
+            !rt.policy.open,
+            "egress stays denied unless sandbox.lua opens it"
         );
         assert_eq!(
             rt.policy.egress_hosts(),
@@ -1212,7 +1212,10 @@ mod tests {
         let mut rt = Runtime::new().unwrap();
         rt.load_sandbox(&path).unwrap();
         assert!(rt.policy.mount_workspace, "the workspace is still mounted");
-        assert!(rt.policy.open, "an unmentioned open flag keeps internet on");
+        assert!(
+            !rt.policy.open,
+            "an unmentioned open flag keeps egress denied"
+        );
         assert_eq!(
             rt.policy.root_disk,
             crate::sandbox::DEFAULT_ROOT_DISK_MIB,

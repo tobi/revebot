@@ -7,7 +7,7 @@
 -- The microVM is mandatory: Reve links the microsandbox Rust crate directly
 -- and refuses to run without it. There is no host or local mode.
 --
--- The guest can reach the public internet. Set `open = false` and list
+-- Egress is denied by default. List hosts in `allow`, or set `open = true`; see
 -- hosts in `allow` to lock down to an allowlist.
 --
 -- The default image is wrap:desktop: toolchain (rust, go, node, bun, pnpm,
@@ -22,9 +22,11 @@ sandbox {
   -- The writable rootfs layer, in MiB. A real build tree needs room.
   root_disk = 16384,
 
-  -- Public internet. Flip to false and fill `allow` to lock down.
-  open = true,
-  -- allow = { "github.com", "api.github.com" },
+  -- Egress is denied by default: only `allow` plus the hosts of secrets below
+  -- are reachable, and the bot can ask for more with AskUserSandboxPolicyChange.
+  -- `open = true` opens the public internet instead.
+  open = false,
+  allow = {},
 
   -- A credential the VM may use without ever holding it: the guest sees only
   -- the placeholder and the proxy substitutes the real value for these hosts.

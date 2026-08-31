@@ -1,5 +1,5 @@
 //! House tools: `update_state`, `CreateAgent`, `UpdateAgent`,
-//! `SendAgentMessage`, `SendUserMessage`, `AskUserForSecret`. Names win over Lua.
+//! `SendAgentMessage`, `SendUserMessage`, `AskUserSandboxPolicyChange`. Names win over Lua.
 
 use std::sync::{Arc, Weak};
 
@@ -112,18 +112,33 @@ const HOUSE_TOOLS: &[HouseTool] = &[
         },
     ),
     (
-        "AskUserForSecret",
-        "Ask the user for a host-side secret. The microVM never holds the value — only a placeholder scoped to named HTTP hosts. Pass title, description, reason, and env (ENV_NAME). Do not ask them to paste a key in chat.",
+        crate::sandbox::POLICY_TOOL,
+        "Ask the user to change the sandbox policy: allow egress to `hosts` (a gateway 403 told you a host is not in the allowed-host list), and/or add a host-scoped `secret` (an API key, token, or password). The user answers an inline form; the microVM never holds a secret value, only a placeholder for the secret's hosts. Pass `title` and `reason`, then `hosts` and/or `secret`. Do not ask the user to paste a key in chat. Do not retry or route around a denied host before they answer.",
         || {
             json!({
                 "type": "object",
                 "properties": {
                     "title": {"type": "string", "description": "Short heading for the form"},
-                    "description": {"type": "string", "description": "What the secret is for"},
-                    "reason": {"type": "string", "description": "Why you need it now"},
-                    "env": {"type": "string", "description": "ENV_NAME, e.g. GITHUB_TOKEN"}
+                    "reason": {"type": "string", "description": "Why you need this now, in one or two sentences"},
+                    "hosts": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Hostnames to allow egress to, e.g. [\"pypi.org\", \"files.pythonhosted.org\"]"
+                    },
+                    "secret": {
+                        "type": "object",
+                        "description": "A secret to add. The value is entered by the user, never by you.",
+                        "properties": {
+                            "env": {"type": "string", "description": "ENV_NAME, e.g. GITHUB_TOKEN"},
+                            "hosts": {"type": "array", "items": {"type": "string"}, "description": "Hosts that may receive the real value"},
+                            "header": {"type": "string", "description": "Request header to inject it into, default Authorization"},
+                            "prefix": {"type": "string", "description": "Header value prefix, default Bearer"}
+                        },
+                        "required": ["env"],
+                        "additionalProperties": false
+                    }
                 },
-                "required": ["title", "description", "reason", "env"],
+                "required": ["title", "reason"],
                 "additionalProperties": false
             })
         },
@@ -195,7 +210,9 @@ impl Tools for HouseTools {
                 "UpdateAgent" => self.update_agent(arguments).await,
                 "SendAgentMessage" => self.send_agent(arguments).await,
                 "SendUserMessage" => self.send_user(arguments).await,
-                "AskUserForSecret" => self.ask_secret(arguments, cancel).await,
+                name if name == crate::sandbox::POLICY_TOOL => {
+                    self.ask_policy_change(arguments, cancel).await
+                }
                 other => {
                     if let Some(house) = self.house.upgrade()
                         && let Some(def) = house.project.runtime.tool(other)
@@ -345,30 +362,72 @@ impl HouseTools {
         Ok(format!("Message accepted: {id}"))
     }
 
-    async fn ask_secret(
+    async fn ask_policy_change(
         &self,
         args: Map<String, Value>,
         cancel: Option<CancelRx>,
     ) -> Result<String, String> {
         let house = self.house()?;
-        let env = args
-            .get("env")
-            .or_else(|| args.get("ENV_NAME"))
-            .or_else(|| args.get("env_name"))
-            .and_then(Value::as_str)
-            .ok_or("missing env")?
-            .trim()
-            .to_string();
-        super::secret::validate_env(&env)?;
-        let _title = args.get("title").and_then(Value::as_str);
-        let _description = args.get("description").and_then(Value::as_str);
-        let _reason = args.get("reason").and_then(Value::as_str);
-        match house.ask_secret(&self.bot_id, cancel).await? {
-            super::SecretAskResult::Declined => Err("the user declined to add this secret".into()),
-            super::SecretAskResult::Saved { env, hosts } => Ok(format!(
-                "Saved {env} for hosts {}. The microVM never holds the value — only a placeholder. Use ${env} in requests to those hosts. Do not print it.",
-                hosts.join(", ")
-            )),
+        // Validate the request before the user sees it, so a malformed call
+        // is the model's error, not a broken form.
+        let hosts: Vec<String> = args
+            .get("hosts")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let hosts = super::policy::normalize_hosts(&hosts)?;
+        let secret_env = match args.get("secret") {
+            Some(Value::Object(secret)) => {
+                let env = secret
+                    .get("env")
+                    .and_then(Value::as_str)
+                    .ok_or("secret.env is required")?
+                    .trim()
+                    .to_string();
+                super::policy::validate_env(&env)?;
+                Some(env)
+            }
+            Some(Value::Null) | None => None,
+            Some(_) => return Err("secret must be an object with env".into()),
+        };
+        if hosts.is_empty() && secret_env.is_none() {
+            return Err("nothing requested: pass hosts and/or secret".into());
+        }
+        match house.ask_policy_change(&self.bot_id, cancel).await? {
+            super::PolicyAskResult::Declined => {
+                Err("the user declined this sandbox policy change".into())
+            }
+            super::PolicyAskResult::Applied { hosts, secret } => {
+                let mut lines = Vec::new();
+                match hosts {
+                    Some(crate::sandbox::AllowOutcome::Rebuilt { added }) => lines.push(format!(
+                        "Allowed egress to {}. The sandbox was restarted with the new policy; \
+                         re-run any command that was interrupted.",
+                        added.join(", ")
+                    )),
+                    Some(crate::sandbox::AllowOutcome::OpenPolicy { added }) => lines.push(format!(
+                        "Recorded {} in the allow list; egress is open, so they were already reachable.",
+                        added.join(", ")
+                    )),
+                    Some(crate::sandbox::AllowOutcome::AlreadyAllowed) => {
+                        lines.push("Those hosts were already allowed.".to_string());
+                    }
+                    None => {}
+                }
+                if let Some((env, hosts)) = secret {
+                    lines.push(format!(
+                        "Saved {env} for hosts {}. The microVM never holds the value — only a \
+                         placeholder. Use ${env} in requests to those hosts. Do not print it.",
+                        hosts.join(", ")
+                    ));
+                }
+                Ok(lines.join("\n"))
+            }
         }
     }
 }

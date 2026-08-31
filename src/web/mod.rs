@@ -77,9 +77,10 @@ mod tests {
         assert!(html.contains("/api/events"));
         assert!(html.contains("name === 'SendUserMessage'"));
         assert!(html.contains("user_notice"));
-        assert!(html.contains("AskUserForSecret"));
-        assert!(html.contains("function addSecretAsk"));
-        assert!(html.contains("function buildSecretForm"));
+        assert!(html.contains("AskUserSandboxPolicyChange"));
+        assert!(html.contains("function addPolicyAsk"));
+        assert!(html.contains("function buildPolicyForm"));
+        assert!(html.contains("/policy\""));
         assert!(html.contains("/api/bots/"));
         assert!(html.contains("/skills"));
         assert!(html.contains("id=\"ac\""));

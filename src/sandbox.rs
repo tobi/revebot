@@ -4,10 +4,12 @@
 //! FFI shim, and no host-shell path: if the VM cannot boot, the agent refuses
 //! to run rather than quietly executing model-authored commands on your machine.
 //!
-//! Egress is open to the public internet by default. The guest can reach
-//! [`NetworkProfile::Public`] (plus the gateway-DNS rule names need). Set
-//! `open = false` in `sandbox.lua` and list hosts in `allow` to lock down to
-//! an allowlist; that path still starts from [`NetworkPolicy::none`].
+//! Egress is denied by default. The policy starts from [`NetworkPolicy::none`]
+//! plus the gateway-DNS rule, and only the hosts in `allow` (and the hosts of
+//! configured secrets) are reachable; anything else answers `403` with a note
+//! that names `AskUserSandboxPolicyChange`, so the agent can ask the user for
+//! more. `open = true` in `config.yml` opens the public internet
+//! ([`NetworkProfile::Public`]) instead.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -55,18 +57,19 @@ pub const DESKTOP_DISPLAY: &str = ":1";
 const DESKTOP_VNC_GUEST_PORT: u16 = 5900;
 const DESKTOP_NOVNC_GUEST_PORT: u16 = 6080;
 
-/// Name of the house tool that asks the user to allow a host. Referenced
-/// from the gateway's 403 body so the model knows what to call.
-pub const ASK_HOST_TOOL: &str = "AskForHostPermission";
+/// Name of the house tool that asks the user to change the sandbox policy
+/// (allow hosts, add a scoped secret). Referenced from the gateway's 403
+/// body so the model knows what to call.
+pub const POLICY_TOOL: &str = "AskUserSandboxPolicyChange";
 
 /// The 403 body the gateway returns for a host outside the allow list.
 /// `{host}` is substituted by microsandbox.
 const HTTP_DENY_MESSAGE: &str = "\
 This host is not allowed by the sandbox network policy config.\n\
 \n\
-Note to agent: `{host}` is not in the allowed-host list. Call the AskForHostPermission tool \
-with this host and the reason you need it; the user decides. Do not retry the request until \
-they have answered, and do not try to reach the host another way.\n";
+Note to agent: `{host}` is not in the allowed-host list. Call the AskUserSandboxPolicyChange \
+tool with this host and the reason you need it; the user decides. Do not retry the request \
+until they have answered, and do not try to reach the host another way.\n";
 
 /// The image ships a full Rust, Go, Node, and Python toolchain, so the
 /// writable rootfs layer has to be big enough for a real build tree.
@@ -190,7 +193,9 @@ pub struct Policy {
     pub packages: Vec<String>,
     pub mise: Vec<String>,
     pub npm: Vec<String>,
-    /// Public internet. The default. `false` plus `allow_hosts` is the lock-down.
+    /// Open the public internet. Off by default: only `allow_hosts` (plus the
+    /// hosts of configured secrets) are reachable, and the agent asks for more
+    /// with `AskUserSandboxPolicyChange`.
     #[serde(default = "default_open")]
     pub open: bool,
     pub allow_hosts: Vec<String>,
@@ -216,7 +221,7 @@ impl Default for Policy {
             packages: APT_PACKAGES.iter().map(|s| s.to_string()).collect(),
             mise: MISE_TOOLS.iter().map(|s| s.to_string()).collect(),
             npm: NPM_TOOLS.iter().map(|s| s.to_string()).collect(),
-            open: true,
+            open: false,
             allow_hosts: Vec::new(),
             secrets: Vec::new(),
             bootstrap: Vec::new(),
@@ -234,19 +239,24 @@ fn default_root_disk() -> u32 {
 }
 
 fn default_open() -> bool {
-    true
+    false
 }
 
 impl Policy {
-    /// Hosts named in `allow`, plus secret hosts with `allow: true`.
-    /// When [`Self::open`] is true the guest can already reach the public
-    /// internet; this list is extra (or the whole allowlist when `open` is
-    /// false).
+    /// Hosts the guest may reach: `allow` plus every secret host with
+    /// `allow: true` (a credential for a host you cannot reach is useless).
+    /// Canonicalized (lowercase, no trailing dot). When [`Self::open`] is
+    /// true the public internet is reachable anyway and this list is
+    /// informational.
     pub fn egress_hosts(&self) -> Vec<String> {
         let mut hosts = self.allow_hosts.clone();
         for secret in &self.secrets {
             hosts.extend(secret.allowed_hostnames());
         }
+        for host in &mut hosts {
+            *host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+        }
+        hosts.retain(|h| !h.is_empty());
         hosts.sort();
         hosts.dedup();
         hosts
@@ -275,15 +285,22 @@ impl Policy {
 
     pub fn internet_prompt(&self) -> String {
         if self.open {
-            "You have internet access.".into()
-        } else {
-            let hosts = self.egress_hosts();
-            if hosts.is_empty() {
-                "You have no internet access.".into()
-            } else {
-                format!("You have internet access to {}.", hosts.join(", "))
-            }
+            return "You have internet access.".into();
         }
+        let hosts = self.egress_hosts();
+        let reach = if hosts.is_empty() {
+            "Network egress is denied by default; no hosts are allowed yet.".to_string()
+        } else {
+            format!(
+                "Network egress is denied by default; you can reach only: {}.",
+                hosts.join(", ")
+            )
+        };
+        format!(
+            "{reach} A request to any other host answers HTTP 403 with a note. To reach one, \
+             call {POLICY_TOOL} with the host(s) and your reason; the user decides. Do not \
+             retry or route around a denial."
+        )
     }
 
     /// A stable VM name per workspace, so a second launch restarts the
@@ -312,9 +329,12 @@ impl Policy {
 
     /// Identifies the *disk and VM shape*. Runtime environment and secret
     /// sources are deliberately excluded: they are refreshed live and must
-    /// never force a rebuild or place credential material in this file.
+    /// never force a rebuild or place credential material in this file. The
+    /// hosts a secret is scoped to do count: they are part of the egress
+    /// policy baked into the VM definition.
     pub fn fingerprint(&self, host_workspace: &Path) -> String {
         let mut shape = self.clone();
+        shape.allow_hosts = self.egress_hosts();
         shape.secrets.clear();
         shape.env.clear();
         let mut hasher = Sha256::new();
@@ -428,12 +448,30 @@ pub struct Sandbox {
     host_workspace: PathBuf,
     /// House root (parent of `.reve/`). `file:` secret sources resolve here.
     secret_root: PathBuf,
-    /// Live secret list. Starts as `policy.secrets`; AskUserForSecret upserts
+    /// Live secret list. Starts as `policy.secrets`; AskUserSandboxPolicyChange upserts
     /// here so a save takes effect without rebuilding the VM fingerprint.
     secrets: parking_lot::Mutex<Vec<Secret>>,
+    /// Live egress allow list. Starts as `policy.allow_hosts`;
+    /// AskUserSandboxPolicyChange adds here and rebuilds the VM definition,
+    /// since microsandbox has no live network-policy update.
+    allow_hosts: parking_lot::Mutex<Vec<String>>,
+    /// Where the disk/VM-shape fingerprint lives; rewritten after a rebuild.
+    fingerprint_path: PathBuf,
     name: String,
     desktop: Option<Desktop>,
     vm: Arc<Mutex<VmState>>,
+}
+
+/// What [`Sandbox::allow_hosts`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AllowOutcome {
+    /// Every host was already on the list; nothing changed.
+    AlreadyAllowed,
+    /// Egress is open; the hosts are recorded for a later lock-down but
+    /// were already reachable.
+    OpenPolicy { added: Vec<String> },
+    /// The VM definition was rebuilt with the extended list and is running.
+    Rebuilt { added: Vec<String> },
 }
 
 struct VmState {
@@ -550,6 +588,8 @@ impl Sandbox {
                 let secret_digests = runtime_secret_digests(&policy.secrets, &secret_root);
                 let sandbox = Self {
                     secrets: parking_lot::Mutex::new(policy.secrets.clone()),
+                    allow_hosts: parking_lot::Mutex::new(policy.egress_hosts()),
+                    fingerprint_path,
                     secret_root,
                     policy,
                     host_workspace,
@@ -577,10 +617,12 @@ impl Sandbox {
         // `InvFingerprintHonest`). Forget the old promise before breaking it.
         forget_fingerprint(&fingerprint_path).await?;
         progress.stage(&format!("building microVM {name} from {}", policy.image));
-        let (vm, desktop) = build(&policy, &name, &host_workspace, &secret_root).await?;
+        let (vm, desktop) = build(&policy, &name, &host_workspace, &secret_root, None).await?;
         let secret_digests = runtime_secret_digests(&policy.secrets, &secret_root);
         let sandbox = Self {
             secrets: parking_lot::Mutex::new(policy.secrets.clone()),
+            allow_hosts: parking_lot::Mutex::new(policy.egress_hosts()),
+            fingerprint_path: fingerprint_path.clone(),
             secret_root,
             policy,
             host_workspace,
@@ -833,7 +875,7 @@ impl Sandbox {
         if !self.policy.mise.is_empty() {
             extras.push(format!("mise {}", self.policy.mise.join(",")));
         }
-        extras.push(format!("net {}", self.policy.egress_summary()));
+        extras.push(format!("net {}", self.effective_policy().egress_summary()));
         extras.push(format!("idle {}s", IDLE_TIMEOUT.as_secs()));
         if let Some(desktop) = self.desktop {
             extras.push(format!("novnc {}", desktop.novnc_url()));
@@ -891,6 +933,84 @@ impl Sandbox {
             install_secret_definitions(vm.modify(), &secrets, true, &self.secret_root).await?;
         }
         Ok(())
+    }
+
+    /// Hosts the guest may reach: the policy's list plus everything the user
+    /// allowed at runtime. Sorted and deduplicated.
+    pub fn allowed_hosts(&self) -> Vec<String> {
+        self.allow_hosts.lock().clone()
+    }
+
+    /// The policy as it currently applies: runtime-allowed hosts and live
+    /// secrets folded in.
+    pub fn effective_policy(&self) -> Policy {
+        let mut policy = self.policy.clone();
+        policy.allow_hosts = self.allowed_hosts();
+        policy.secrets = self.secrets();
+        policy
+    }
+
+    /// Allow egress to `hosts` from now on. microsandbox cannot change a
+    /// running network policy, so the VM definition is rebuilt with the
+    /// extended list: the current VM stops (in-flight commands end), the
+    /// definition is recreated with the same name and desktop ports, and the
+    /// new VM is booted and prepared before this returns. The root disk is
+    /// fresh; `/workspace` is a bind mount and survives. Hosts must already
+    /// be validated hostnames; they are lowercased here.
+    pub async fn allow_hosts(&self, hosts: &[String]) -> Result<AllowOutcome> {
+        let added = {
+            let mut list = self.allow_hosts.lock();
+            let mut added: Vec<String> = hosts
+                .iter()
+                .map(|h| h.trim().trim_end_matches('.').to_ascii_lowercase())
+                .filter(|h| !h.is_empty() && !list.contains(h))
+                .collect();
+            added.sort();
+            added.dedup();
+            list.extend(added.iter().cloned());
+            list.sort();
+            list.dedup();
+            added
+        };
+        if added.is_empty() {
+            return Ok(AllowOutcome::AlreadyAllowed);
+        }
+        if self.policy.open {
+            return Ok(AllowOutcome::OpenPolicy { added });
+        }
+        let policy = self.effective_policy();
+        {
+            let mut state = self.vm.lock().await;
+            if let Some(vm) = state.vm.take() {
+                vm.stop()
+                    .await
+                    .map_err(|e| SandboxError::Failed(e.to_string()))?;
+            }
+            state.secret_digests.clear();
+            let (vm, _) = build(
+                &policy,
+                &self.name,
+                &self.host_workspace,
+                &self.secret_root,
+                self.desktop,
+            )
+            .await?;
+            state.vm = Some(vm);
+            state.secret_digests = runtime_secret_digests(&policy.secrets, &self.secret_root);
+            state.generation = state.generation.wrapping_add(1);
+            // The disk is new: record the shape that produced it so the next
+            // start with this config reuses it instead of rebuilding again.
+            if let Some(parent) = self.fingerprint_path.parent() {
+                let _ = tokio::fs::create_dir_all(parent).await;
+            }
+            let _ = tokio::fs::write(
+                &self.fingerprint_path,
+                format!("{}\n", policy.fingerprint(&self.host_workspace)),
+            )
+            .await;
+        }
+        self.prepare_guest().await?;
+        Ok(AllowOutcome::Rebuilt { added })
     }
 
     fn absolute(&self, path: &str) -> String {
@@ -1471,6 +1591,7 @@ async fn build(
     name: &str,
     host_workspace: &Path,
     secret_root: &Path,
+    reuse_desktop: Option<Desktop>,
 ) -> Result<(MsbSandbox, Option<Desktop>)> {
     let wrap = is_wrap_image(&policy.image);
     let host_uid = host_identity(host_workspace)
@@ -1502,18 +1623,21 @@ async fn build(
         });
     }
 
-    let desktop_ports = if is_desktop_image(&policy.image) {
+    let desktop_ports = if !is_desktop_image(&policy.image) {
+        None
+    } else if let Some(desktop) = reuse_desktop {
+        // A rebuild keeps the host listeners the Screen panel already points at.
+        Some(desktop)
+    } else {
         let ports = reserve_localhost_ports(2)?;
         Some(Desktop {
             novnc_port: ports[0],
             vnc_port: ports[1],
         })
-    } else {
-        None
     };
 
-    // Open (the default): public internet + gateway DNS.
-    // Locked down: deny both directions, gateway DNS, then named hosts.
+    // Default: deny both directions, gateway DNS, then the named hosts.
+    // `open = true`: public internet + gateway DNS.
     let mut network = if policy.open {
         NetworkPolicy::from_profiles([NetworkProfile::Public])
     } else {
@@ -1521,10 +1645,19 @@ async fn build(
         network.rules.push(Rule::allow_dns());
         network
     };
-    let hosts = policy.egress_hosts();
-    if !hosts.is_empty() {
+    let (suffixes, exact): (Vec<String>, Vec<String>) = policy
+        .egress_hosts()
+        .into_iter()
+        .partition(|h| h.starts_with("*."));
+    if !exact.is_empty() {
         network = network
-            .allow_domains(hosts)
+            .allow_domains(exact)
+            .map_err(|e| SandboxError::Policy(format!("invalid allowed host: {e}")))?;
+    }
+    if !suffixes.is_empty() {
+        // A secret scoped to `*.example.org` reaches the whole zone.
+        network = network
+            .allow_domain_suffixes(suffixes.iter().map(|s| s.trim_start_matches('*')))
             .map_err(|e| SandboxError::Policy(format!("invalid allowed host: {e}")))?;
     }
     // Locked down: intercept TLS so a denied HTTPS request is answered with
@@ -1647,10 +1780,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_egress_is_the_public_internet() {
+    fn default_egress_is_denied_and_the_prompt_says_how_to_ask() {
         let policy = Policy::default();
-        assert!(policy.open, "the guest can reach the public internet");
-        assert_eq!(policy.egress_summary(), "internet");
+        assert!(!policy.open, "deny by default; the agent asks for more");
+        assert_eq!(policy.egress_summary(), "none");
+        let prompt = policy.internet_prompt();
+        assert!(prompt.contains("denied by default"));
+        assert!(prompt.contains(POLICY_TOOL));
+        let open = Policy {
+            open: true,
+            ..Default::default()
+        };
+        assert_eq!(open.egress_summary(), "internet");
+        assert_eq!(open.internet_prompt(), "You have internet access.");
+    }
+
+    #[test]
+    fn secret_hosts_are_reachable_without_listing_them_twice() {
+        let policy = Policy {
+            allow_hosts: vec!["pypi.org".into()],
+            secrets: vec![Secret {
+                env: "GITHUB_TOKEN".into(),
+                source: "GITHUB_TOKEN".into(),
+                placeholder: None,
+                hosts: Secret::scoped_hosts(["api.github.com", "GitHub.com."]),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            policy.egress_hosts(),
+            vec!["api.github.com", "github.com", "pypi.org"]
+        );
+        assert!(
+            policy
+                .internet_prompt()
+                .contains("api.github.com, github.com, pypi.org")
+        );
     }
 
     #[test]
@@ -1777,6 +1942,11 @@ hosts:
         runtime_changed
             .env
             .insert("RUNTIME_FLAG".into(), "different".into());
+        // A secret whose host is already allowed adds no network shape.
+        let mut base = base;
+        base.allow_hosts.push("x.com".into());
+        let mut runtime_changed = runtime_changed;
+        runtime_changed.allow_hosts.push("x.com".into());
         runtime_changed.secrets.push(Secret {
             env: "TOKEN".into(),
             source: "HOST_TOKEN".into(),
@@ -1793,14 +1963,39 @@ hosts:
     /// The gateway's 403 body is how the model learns which tool to call;
     /// it must name the real tool and leave `{host}` for microsandbox.
     #[test]
-    fn deny_message_names_the_host_permission_tool() {
+    fn deny_message_names_the_policy_tool() {
         let message = Policy::default().http_deny_message();
         assert!(
             message.starts_with("This host is not allowed by the sandbox network policy config.")
         );
         assert!(message.contains("Note to agent:"));
-        assert!(message.contains(ASK_HOST_TOOL));
+        assert!(message.contains(POLICY_TOOL));
         assert!(message.contains("{host}"));
+    }
+
+    #[test]
+    fn a_secret_host_changes_the_fingerprint_but_its_source_does_not() {
+        let ws = std::path::Path::new("/tmp/ws");
+        let secret = |source: &str, host: &str| Secret {
+            env: "TOKEN".into(),
+            source: source.into(),
+            placeholder: None,
+            hosts: Secret::scoped_hosts([host]),
+        };
+        let base = Policy {
+            secrets: vec![secret("A", "api.example.com")],
+            ..Default::default()
+        };
+        let rotated = Policy {
+            secrets: vec![secret("B", "api.example.com")],
+            ..Default::default()
+        };
+        let widened = Policy {
+            secrets: vec![secret("A", "other.example.com")],
+            ..Default::default()
+        };
+        assert_eq!(base.fingerprint(ws), rotated.fingerprint(ws));
+        assert_ne!(base.fingerprint(ws), widened.fingerprint(ws));
     }
 
     #[test]

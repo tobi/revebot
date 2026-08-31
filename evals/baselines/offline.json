@@ -239,7 +239,7 @@
         {
           "grader": "file_contains",
           "passed": true,
-          "detail": "workspace/skills/secrets/SKILL.md has \"AskUserForSecret\"",
+          "detail": "workspace/skills/secrets/SKILL.md has \"AskUserSandboxPolicyChange\"",
           "soft": false
         },
         {

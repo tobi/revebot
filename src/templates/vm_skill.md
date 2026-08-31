@@ -16,7 +16,7 @@ The default guest is `ghcr.io/tobi/wrap:desktop`. Workloads run as unprivileged 
 
 - `/workspace` is the house `workspace/` directory, bind-mounted, working directory. Relative paths mean the same thing on the host and in the VM.
 - Bot identity, `config.yml`, sessions, and host Lua stay **outside** the mount. Do not write under `agents/*/sessions/`.
-- Public internet is the default. `config.yml` / `sandbox.lua` `open: false` plus `allow` locks egress to named hosts. In that mode a request to a host outside the list gets `HTTP 403` from the gateway (plain HTTP and HTTPS alike; TLS is intercepted with a CA the guest trusts) whose body says *"Note to agent: `host` is not in the allowed-host list"* and names `AskForHostPermission`. Call that tool with the host and your reason; the user decides. Do not retry or route around it.
+- Egress is denied by default. Only `config.yml` `sandbox.allow` (plus the hosts of configured secrets) is reachable; `open: true` opens the public internet instead. A request to any other host gets `HTTP 403` from the gateway (plain HTTP and HTTPS alike; TLS is intercepted with a CA the guest trusts) whose body says *"Note to agent: `host` is not in the allowed-host list"* and names `AskUserSandboxPolicyChange`. Call that tool with the host(s) and your reason; the user decides, and allowing restarts the sandbox. Do not retry or route around it.
 - Unix `HOME=/home/user` is not your agent home (`/workspace/agents/<your-id>/`).
 
 ## Desktop
@@ -26,7 +26,7 @@ XFCE on `DISPLAY=:1`. The user sees a live preview in the house Screen panel and
 ## What the guest cannot do
 
 - No host shell. `os.execute` is deleted from Lua. There is no `ctx.host_exec`.
-- **No real secrets.** Guest env for a secret is a placeholder. The host injects the real value only into HTTP(S) to the secret's `hosts` map (e.g. `Authorization: Bearer $GITHUB_TOKEN` toward `github.com`). Listed hosts with `allow: true` also join the sandbox allow list. Never write a credential into `/workspace`. To add one, call `AskUserForSecret`.
+- **No real secrets.** Guest env for a secret is a placeholder. The host injects the real value only into HTTP(S) to the secret's `hosts` map (e.g. `Authorization: Bearer $GITHUB_TOKEN` toward `github.com`). Listed hosts with `allow: true` also join the sandbox allow list. Never write a credential into `/workspace`. To add one, call `AskUserSandboxPolicyChange` with a `secret`.
 
 ## Tools
 

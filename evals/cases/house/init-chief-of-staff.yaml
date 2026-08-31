@@ -45,7 +45,7 @@ graders:
     path: workspace/skills/secrets/SKILL.md
   - kind: file_contains
     path: workspace/skills/secrets/SKILL.md
-    text: AskUserForSecret
+    text: AskUserSandboxPolicyChange
   - kind: file_contains
     path: workspace/agents/chief-of-staff/profile.json
     text: orange:goutte

@@ -272,7 +272,7 @@ to the turn. Follow them.
 - `UpdateAgent` — merge-patch another bot's profile. Cannot delete.
 - `SendAgentMessage` — `id` + `text` (optional `priority`). Async.
 - `SendUserMessage` — `text`. User-visible bubble.
-- `AskUserForSecret` — `title`, `description`, `reason`, `env`. The user fills an inline form; the VM never holds the value.
+- `AskUserSandboxPolicyChange` — `title`, `reason`, then `hosts` (allow egress) and/or `secret` (`env`, `hosts`, `header`, `prefix`). One inline form; allowing a host restarts the sandbox; the VM never holds a secret value.
 You cannot delete a bot. The user does that in the sidebar.
 
 ## Files
@@ -418,7 +418,7 @@ mod tests {
         assert!(text.contains("[SAND_HIDDEN_PROMPT][agent]"));
         assert!(text.contains("When the user writes `@Name`"));
         assert!(text.contains("When the user writes `/skill`"));
-        assert!(text.contains("AskUserForSecret"));
+        assert!(text.contains("AskUserSandboxPolicyChange"));
         assert!(text.contains("durable acceptance and an entry id"));
         assert!(!text.contains("Ack ≠ delivery"));
         assert!(!text.contains("failed to deliver"));

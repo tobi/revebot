@@ -74,6 +74,18 @@ starts in microseconds. Concurrency is tokio tasks over single-owner session sta
   accounting, configurable developer/system roles and token-cap fields, and durable tool
   continuation repair.
 
+### Changed
+
+- Egress is **denied by default**. Only `sandbox.allow` and the hosts of configured secrets
+  are reachable; `open: true` opens the public internet. A blocked host is answered by the
+  gateway with `HTTP 403` and a body that names the tool to call, instead of a connection
+  reset (microsandbox PR #1489; the crate is pinned to the fork rev carrying it until it
+  ships, and `~/.microsandbox/bin/msb` must be built from the same rev).
+- `AskUserForSecret` is replaced by `AskUserSandboxPolicyChange`: one inline card asks the
+  user to allow egress hosts and/or add a host-scoped secret. The answer is written to
+  `config.yml`; a secret applies live, a new host rebuilds the microVM definition (desktop
+  ports kept) and the tool result says so.
+
 ### Fixed
 
 - Serialized microVM stop and restart transitions so concurrent tools and the first effect

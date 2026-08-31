@@ -315,9 +315,45 @@ async fn egress_reaches_an_allowed_host_and_nothing_else() {
     );
     assert!(
         note.stdout.contains("Note to agent: `example.com`")
-            && note.stdout.contains(reve::sandbox::ASK_HOST_TOOL),
+            && note.stdout.contains(reve::sandbox::POLICY_TOOL),
         "the 403 body carries the agent note, got: {}",
         note.stdout
+    );
+
+    // The user allows the host: the VM definition is rebuilt with the wider
+    // policy and the same request now reaches the origin.
+    let outcome = sandbox
+        .allow_hosts(&["Example.COM".to_string()])
+        .await
+        .expect("allowing a host rebuilds the VM");
+    assert_eq!(
+        outcome,
+        reve::sandbox::AllowOutcome::Rebuilt {
+            added: vec!["example.com".into()]
+        }
+    );
+    assert_eq!(
+        sandbox.allowed_hosts(),
+        vec!["deb.debian.org", "example.com", "github.com"]
+    );
+    let now_allowed = sandbox
+        .exec(&probe("https://example.com/"), ExecOptions::default(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        now_allowed.stdout.trim(),
+        "ALLOWED",
+        "after the rebuild the host is reachable: {} {}",
+        now_allowed.stdout,
+        now_allowed.stderr
+    );
+    assert_eq!(
+        sandbox
+            .allow_hosts(&["example.com".to_string()])
+            .await
+            .unwrap(),
+        reve::sandbox::AllowOutcome::AlreadyAllowed,
+        "a repeat is a no-op, not a second rebuild"
     );
 
     sandbox.stop().await.unwrap();

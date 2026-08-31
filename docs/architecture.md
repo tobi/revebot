@@ -63,8 +63,9 @@ src/
                       `$ENV` apiKey is resolved; a non-`$` value is a dummy
                       literal (local servers). One bad provider must not empty
                       the catalog.
-  sandbox.rs          mandatory microsandbox VM; public internet by default,
-                      lock down with `open = false` + `allow`. Secret
+  sandbox.rs          mandatory microsandbox VM; egress denied by default,
+                      `allow` + secret hosts reachable, `open = true` opens
+                      the internet; a runtime allow rebuilds the VM. Secret
                       `source` is a host env var or `$(command)` resolved
                       at apply into `REVEBOT_SECRET_*` for microsandbox —
                       not a Lua host-exec path. Command argv and `file:`
@@ -142,7 +143,9 @@ src/
                       invalid edits show a labelled last-good profile, not silent stale UI.
                       Soul editor reads/writes SOUL.md through /api/bots/<id>/soul.
                       Compose autocomplete: `/` skills, `@` other bots.
-                      AskUserForSecret renders an inline host-secret form.
+                      AskUserSandboxPolicyChange renders one inline form for
+                      egress hosts and/or a host-scoped secret (POST
+                      /api/bots/<id>/policy).
                       Right rail is tabbed (Screen / Files / Routines); Files
                       is hidden until chosen. Hovering chat text that is a
                       `/workspace/…` path or a PWD-resolvable name
@@ -232,12 +235,16 @@ reloaded state instead of writing something it decided under stale assumptions.
   unprivileged `user` (`HOME=/home/user`) with uid/gid realigned to the host workspace
   owner and virtiofs stat virtualization off, XFCE on `:1`, noVNC/VNC published on
   localhost, and a shared Chrome that `agent-browser` attaches to. Provisioning is off
-  by default. Public-internet egress by default (`NetworkProfile::Public`);
-  `open = false` plus `allow` is the lock-down; in that mode TLS is intercepted (the SDK already
-  does this whenever a secret exists; agentd installs the CA in the guest) and the gateway
-  answers a host outside the list with `403` plus `Policy::http_deny_message()`, which names
-  the `AskForHostPermission` tool (`sandbox::ASK_HOST_TOOL`). Scoped source-backed secrets
-  (per-host `allow`/`headers`; allowed hosts join the egress list), fail-closed boot,
+  by default. Egress is denied by default: `NetworkPolicy::none()` + gateway DNS + `allow`
+  + secret hosts with `allow: true` (`Policy::egress_hosts`), which is why secret hosts are
+  part of the VM fingerprint. `open = true` is `NetworkProfile::Public`. In deny mode TLS is
+  intercepted (agentd installs the CA in the guest) and the gateway answers a host outside
+  the list with `403` plus `Policy::http_deny_message()`, which names
+  `AskUserSandboxPolicyChange` (`sandbox::POLICY_TOOL`). That house tool replaces the old
+  secret-only prompt: one card asks for hosts and/or a scoped secret; the answer is written
+  to `config.yml` first, a secret is applied live, and a new host rebuilds the VM definition
+  (`Sandbox::allow_hosts`; microsandbox has no live network-policy change) keeping the desktop
+  ports. Scoped source-backed secrets (per-host `allow`/`headers`), fail-closed boot,
   idle shutdown, workspace bind mount at `/workspace`. Default memory is 8192 MiB.
 - **The scripting surface.** Trusted host `agent { }`, `sandbox { }` and installed
   tools use one Lua state. Bot-editable plugins/routines use a **separate** state
@@ -383,9 +390,10 @@ code or the spec, never the invariant.
 | An unmentioned Lua flag keeps its default | `lua::tests::an_unmentioned_flag_keeps_its_default` |
 | Model discovery contacts only upstreams whose key is set, and never fails the agent | `provider::discovery::tests::{only_upstreams_that_have_a_key_are_probed, an_unreachable_upstream_is_recorded_not_fatal, a_missing_or_corrupt_cache_is_simply_absent}` |
 | A namespaced model id survives discovery intact (`openrouter/x-ai/grok-4.6`) | `provider::discovery::tests::the_openrouter_shape_yields_a_pasteable_reference` |
-| Public-internet egress by default; lock-down is `open = false` | `sandbox::tests::default_egress_is_the_public_internet`, `tests/microvm.rs` (opt-in) |
-| Secret hosts are a per-host map; `allow: true` joins the sandbox allow list | `sandbox::tests::secret_hosts_join_the_egress_allow_list`, `lua::tests::a_secret_host_map_carries_headers_and_joins_allow`, `house::secret::tests::upsert_appends_a_secret_to_the_template` |
-| A host outside the allow list answers `403` naming `AskForHostPermission` | `sandbox::tests::deny_message_names_the_host_permission_tool`, `tests/microvm.rs::egress_reaches_an_allowed_host_and_nothing_else` (opt-in) |
+| Egress denied by default; secret hosts reachable; `open = true` opens the internet | `sandbox::tests::default_egress_is_denied_and_the_prompt_says_how_to_ask`, `secret_hosts_are_reachable_without_listing_them_twice`, `a_secret_host_changes_the_fingerprint_but_its_source_does_not`, `tests/microvm.rs` (opt-in) |
+| A host outside the allow list answers `403` naming `AskUserSandboxPolicyChange` | `sandbox::tests::deny_message_names_the_policy_tool`, `tests/microvm.rs::egress_reaches_an_allowed_host_and_nothing_else` (opt-in) |
+| The policy card validates hosts and writes `config.yml` idempotently | `house::policy::tests::hosts_are_canonicalized_and_junk_is_rejected`, `allow_upsert_extends_the_list_once_and_keeps_the_rest` |
+| Secret hosts are a per-host map; `allow: true` joins the sandbox allow list | `sandbox::tests::secret_hosts_join_the_egress_allow_list`, `lua::tests::a_secret_host_map_carries_headers_and_joins_allow`, `house::policy::tests::upsert_appends_a_secret_to_the_template` |
 | Chat attachments stay under `workspace/tmp/{id}/` and are named in the message | `house::attach::tests::{save_writes_under_workspace_tmp_id_and_tags_the_guest_path, names_are_basenames_without_traversal, read_refuses_traversal_and_bad_ids}` |
 
 **Not covered yet.** Standalone `compact()` and `navigate()` have no end-to-end test — the

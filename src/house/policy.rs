@@ -1,6 +1,8 @@
-//! Persist `AskUserForSecret` into `config.yml` and the host-side store.
+//! `AskUserSandboxPolicyChange`: the user's decision and its persistence
+//! into `config.yml` (and, for pasted secrets, the host-side store).
 //!
-//! The guest never receives the value. Config stores a source reference and
+//! A request may allow egress hosts, add a host-scoped secret, or both. The
+//! guest never receives a secret value: config stores a source reference and
 //! host scope; paste lives under `.reve/secrets/` (gitignored).
 
 use std::collections::BTreeMap;
@@ -8,6 +10,27 @@ use std::path::Path;
 
 use crate::sandbox::{Secret, SecretHost};
 
+/// What the user answered to one `AskUserSandboxPolicyChange` card.
+#[derive(Debug, Clone)]
+pub struct PolicyDecision {
+    pub accept: bool,
+    /// Hosts to allow egress to (validated by [`normalize_hosts`]).
+    pub hosts: Vec<String>,
+    /// A scoped secret to add, when the request asked for one.
+    pub secret: Option<SecretDecision>,
+}
+
+impl PolicyDecision {
+    pub fn declined() -> Self {
+        Self {
+            accept: false,
+            hosts: Vec::new(),
+            secret: None,
+        }
+    }
+}
+
+/// The secret half of a decision.
 #[derive(Debug, Clone)]
 pub struct SecretDecision {
     pub accept: bool,
@@ -40,13 +63,128 @@ impl SecretKind {
     }
 }
 
+/// Validate and canonicalize a hostname the model or user typed: lowercase,
+/// no scheme/path/port/trailing dot, DNS label rules, at least two labels.
+/// Wildcards are rejected: the allow list names hosts, not patterns.
+pub fn normalize_host(raw: &str) -> Result<String, String> {
+    let mut host = raw.trim();
+    if let Some((_, rest)) = host.split_once("://") {
+        host = rest;
+    }
+    host = host.split(['/', '?', '#']).next().unwrap_or("");
+    if let Some(stripped) = host.strip_prefix('[') {
+        return Err(format!(
+            "`{stripped}`: IP literals are not allowed; name the host"
+        ));
+    }
+    if let Some((h, port)) = host.rsplit_once(':')
+        && port.chars().all(|c| c.is_ascii_digit())
+    {
+        host = h;
+    }
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return Err("host name is empty".into());
+    }
+    if host.len() > 253 {
+        return Err(format!("`{host}`: host name too long"));
+    }
+    if host.contains('*') {
+        return Err(format!(
+            "`{host}`: wildcards are not allowed; name each host"
+        ));
+    }
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Err(format!(
+            "`{host}`: IP addresses are not allowed; name the host"
+        ));
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() < 2 {
+        return Err(format!("`{host}`: needs a domain, e.g. api.example.com"));
+    }
+    for label in &labels {
+        let ok = !label.is_empty()
+            && label.len() <= 63
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            && !label.starts_with('-')
+            && !label.ends_with('-');
+        if !ok {
+            return Err(format!("`{host}`: `{label}` is not a valid DNS label"));
+        }
+    }
+    Ok(host)
+}
+
+/// [`normalize_host`] over a list: deduplicated, sorted, first error wins.
+pub fn normalize_hosts<I, S>(hosts: I) -> Result<Vec<String>, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut out = Vec::new();
+    for host in hosts {
+        let host = host.as_ref();
+        if host.trim().is_empty() {
+            continue;
+        }
+        out.push(normalize_host(host)?);
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// Add `hosts` to `sandbox.allow` in `config.yml`, keeping everything else.
+/// Existing entries are kept as written; the result is deduplicated.
+pub fn upsert_allow_config_yml(text: &str, hosts: &[String]) -> Result<String, String> {
+    let mut doc: serde_yaml::Value =
+        serde_yaml::from_str(text).map_err(|e| format!("config.yml: {e}"))?;
+    let sandbox = sandbox_mapping(&mut doc)?;
+    let allow_key = serde_yaml::Value::String("allow".into());
+    if !sandbox.contains_key(&allow_key) {
+        sandbox.insert(allow_key.clone(), serde_yaml::Value::Sequence(Vec::new()));
+    }
+    let list = sandbox
+        .get_mut(&allow_key)
+        .and_then(serde_yaml::Value::as_sequence_mut)
+        .ok_or("sandbox.allow must be a list")?;
+    for host in hosts {
+        let present = list
+            .iter()
+            .any(|item| item.as_str().is_some_and(|s| s.eq_ignore_ascii_case(host)));
+        if !present {
+            list.push(serde_yaml::Value::String(host.clone()));
+        }
+    }
+    serde_yaml::to_string(&doc).map_err(|e| e.to_string())
+}
+
+fn sandbox_mapping(doc: &mut serde_yaml::Value) -> Result<&mut serde_yaml::Mapping, String> {
+    if doc.is_null() {
+        *doc = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    }
+    let root = doc.as_mapping_mut().ok_or("config.yml must be a mapping")?;
+    let sandbox_key = serde_yaml::Value::String("sandbox".into());
+    if !root.contains_key(&sandbox_key) {
+        root.insert(
+            sandbox_key.clone(),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+    }
+    root.get_mut(&sandbox_key)
+        .and_then(serde_yaml::Value::as_mapping_mut)
+        .ok_or_else(|| "sandbox must be a mapping".to_string())
+}
+
 pub fn validate_env(name: &str) -> Result<(), String> {
     let n = name.trim();
     if n.is_empty() || n.len() > 64 {
         return Err("env name must be 1–64 characters".into());
     }
-    let mut chars = n.chars();
-    let first = chars.next().unwrap();
+    let Some(first) = n.chars().next() else {
+        return Err("env name must be 1–64 characters".into());
+    };
     if !first.is_ascii_alphabetic() && first != '_' {
         return Err("env must start with a letter or underscore".into());
     }
@@ -156,21 +294,11 @@ fn write_store(house_root: &Path, env: &str, value: &str) -> Result<(), String> 
     Ok(())
 }
 
-pub fn upsert_config_yml(text: &str, secret: &Secret) -> Result<String, String> {
+/// Upsert `secret` (by `env`) into `sandbox.secrets` in `config.yml`.
+pub fn upsert_secret_config_yml(text: &str, secret: &Secret) -> Result<String, String> {
     let mut doc: serde_yaml::Value =
         serde_yaml::from_str(text).map_err(|e| format!("config.yml: {e}"))?;
-    let root = doc.as_mapping_mut().ok_or("config.yml must be a mapping")?;
-    let sandbox_key = serde_yaml::Value::String("sandbox".into());
-    if !root.contains_key(&sandbox_key) {
-        root.insert(
-            sandbox_key.clone(),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-        );
-    }
-    let sandbox = root
-        .get_mut(&sandbox_key)
-        .and_then(serde_yaml::Value::as_mapping_mut)
-        .ok_or("sandbox must be a mapping")?;
+    let sandbox = sandbox_mapping(&mut doc)?;
     let secrets_key = serde_yaml::Value::String("secrets".into());
     if !sandbox.contains_key(&secrets_key) {
         sandbox.insert(secrets_key.clone(), serde_yaml::Value::Sequence(Vec::new()));
@@ -229,13 +357,13 @@ mod tests {
             placeholder: Some("reve-acme-token".into()),
             hosts,
         };
-        let out = upsert_config_yml(text, &secret).unwrap();
+        let out = upsert_secret_config_yml(text, &secret).unwrap();
         assert!(out.contains("ACME_TOKEN"));
         assert!(out.contains("api.acme.test"));
         assert!(out.contains("file:.reve/secrets/ACME_TOKEN"));
         assert!(out.contains("GITHUB_TOKEN"), "existing secrets stay");
         assert!(out.contains("Bearer $ACME_TOKEN"));
-        let again = upsert_config_yml(&out, &secret).unwrap();
+        let again = upsert_secret_config_yml(&out, &secret).unwrap();
         let parsed: serde_yaml::Value = serde_yaml::from_str(&again).unwrap();
         let secrets = parsed["sandbox"]["secrets"].as_sequence().unwrap();
         let acme: Vec<_> = secrets
@@ -253,6 +381,62 @@ mod tests {
             acme[0]["hosts"]["api.acme.test"]["headers"]["Authorization"].as_str(),
             Some("Bearer $ACME_TOKEN")
         );
+    }
+
+    #[test]
+    fn hosts_are_canonicalized_and_junk_is_rejected() {
+        assert_eq!(
+            normalize_host(" API.Example.com. ").unwrap(),
+            "api.example.com"
+        );
+        assert_eq!(
+            normalize_host("https://pypi.org:443/simple/").unwrap(),
+            "pypi.org"
+        );
+        for bad in [
+            "",
+            "localhost",
+            "*.example.com",
+            "10.0.0.1",
+            "[::1]",
+            "-a.example.com",
+            "a b.com",
+        ] {
+            assert!(normalize_host(bad).is_err(), "{bad:?} must be rejected");
+        }
+        let hosts =
+            normalize_hosts(["b.example.com", "A.example.com", "", "b.example.com"]).unwrap();
+        assert_eq!(hosts, vec!["a.example.com", "b.example.com"]);
+    }
+
+    #[test]
+    fn allow_upsert_extends_the_list_once_and_keeps_the_rest() {
+        let text = "model: x\nsandbox:\n  open: false\n  allow:\n    - github.com\n";
+        let hosts = vec!["pypi.org".to_string(), "GitHub.com".to_string()];
+        let out = upsert_allow_config_yml(text, &hosts).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&out).unwrap();
+        let allow: Vec<&str> = parsed["sandbox"]["allow"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            allow,
+            vec!["github.com", "pypi.org"],
+            "case-insensitive dedupe"
+        );
+        assert_eq!(
+            parsed["sandbox"]["open"].as_bool(),
+            Some(false),
+            "other keys stay"
+        );
+        assert_eq!(parsed["model"].as_str(), Some("x"));
+        let again = upsert_allow_config_yml(&out, &hosts).unwrap();
+        assert_eq!(again, out, "idempotent");
+        // A config without a sandbox section, or an empty file, gets one.
+        let fresh = upsert_allow_config_yml("", &hosts).unwrap();
+        assert!(fresh.contains("pypi.org"));
     }
 
     #[test]
@@ -280,7 +464,7 @@ mod tests {
             host.headers.get("Authorization").map(String::as_str),
             Some("Bearer $DEMO_KEY")
         );
-        let yaml = upsert_config_yml("sandbox: {}\n", &secret).unwrap();
+        let yaml = upsert_secret_config_yml("sandbox: {}\n", &secret).unwrap();
         assert!(!yaml.contains("super-secret"));
         assert!(yaml.contains("file:.reve/secrets/DEMO_KEY"));
         assert!(yaml.contains("Bearer $DEMO_KEY"));

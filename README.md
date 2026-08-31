@@ -25,9 +25,10 @@ Reve combines three ideas:
    `ctx.sh` runs in a full microVM — never in a host-shell fallback. Reve links the
    official [`microsandbox`](https://github.com/superradcompany/microsandbox) Rust crate
    directly (pinned exactly): no FFI shim, no CLI, no daemon, no host shell. The host
-   only orchestrates; the agent works inside its mounted `workspace/` with public
-   internet by default and explicitly scoped secrets. Set `open = false` in
-   `sandbox.lua` to lock down to an allowlist.
+   only orchestrates; the agent works inside its mounted `workspace/` with egress
+   denied by default and explicitly scoped secrets. A blocked host answers `403` with a
+   note, and the agent asks for it with `AskUserSandboxPolicyChange`; you approve in
+   an inline form. `open: true` opens the internet instead.
 3. **State is durable data, not process memory.** Reve's append-only conversation tree and
    intent-before-effect records are based on the durable harness work in
    [Pi](https://github.com/badlogic/pi-mon). A crash can leave an incomplete operation,
@@ -191,7 +192,7 @@ thinking: low
 sandbox:
   image: ghcr.io/tobi/wrap:desktop
   memory: 8192
-  open: true
+  allow: []
   secrets:
     - env: GITHUB_TOKEN
       source: "$(gh auth token)"
@@ -304,11 +305,14 @@ HTTP/HTTPS egress with a `403` the agent can read). There
 is no CLI, no daemon, no FFI shim, and no host-shell path: if the VM cannot boot, the agent
 refuses to run rather than quietly executing model-authored commands on your machine.
 
-Egress is **open to the public internet by default**. The policy uses microsandbox's
-`NetworkProfile::Public` (plus the gateway-DNS rule names need). Set `open = false` in
-`sandbox.lua` and list hosts in `allow` to lock down: that path starts from
-`NetworkPolicy::none()` and only those hosts are reachable. Private/LAN and cloud
-metadata stay off unless you opt into them.
+Egress is **denied by default**. The policy starts from `NetworkPolicy::none()` plus the
+gateway-DNS rule; the hosts in `allow` and the hosts each secret is scoped to are the only
+ones reachable. Anything else is answered by the gateway with `HTTP 403` and a body that
+tells the agent the host is not on the list and to call `AskUserSandboxPolicyChange`. That
+tool shows you one inline card — hosts to allow and/or a secret to add — and writes your
+answer back to `config.yml`; allowing a host restarts the microVM with the new policy. Set
+`open: true` to open the public internet (`NetworkProfile::Public`) instead. Private/LAN and
+cloud metadata stay off unless you opt into them.
 
 Secrets are scoped, never borrowed implicitly. Each secret names a host environment
 `source` and a per-host map (`allow`, optional `headers` such as

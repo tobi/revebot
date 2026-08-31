@@ -77,7 +77,7 @@
         const name = display.name || m.toolName || 'tool';
         const failed = !!m.isError;
         if (name === 'SendUserMessage' && !failed) continue;
-        rows.push({...base, kind:name === 'AskUserForSecret' && record.status === 'streaming' ? 'secret' : 'tool',
+        rows.push({...base, kind:name === 'AskUserSandboxPolicyChange' && record.status === 'streaming' ? 'policy' : 'tool',
           name, args:display.args || {}, text:text(m.content), failed, synthetic:m.synthetic || null,
           uncertain:record.status === 'interrupted', running:record.status === 'streaming'});
       }

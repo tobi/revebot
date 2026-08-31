@@ -48,7 +48,7 @@ const groups = R.group([...tools.slice(0,5), {id:'n', kind:'assistant', text:'Up
 assert.equal(groups.filter(row => row.kind === 'activity').length, 1);
 assert.equal(R.summary(groups[0].tools), 'Read 7 files · Listed 5 directories');
 assert.equal(R.action({name:'bash', args:{description:'Running tests'}}), 'Running tests');
-assert.equal(R.group([{kind:'secret',id:'ask',run:'run'}, ...tools])[0].kind, 'secret');
+assert.equal(R.group([{kind:'policy',id:'ask',run:'run'}, ...tools])[0].kind, 'policy');
 
 function extract(source, name) {
   let start = source.indexOf('async function '+name+'(');

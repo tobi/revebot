@@ -82,7 +82,7 @@ fn router(state: AppState) -> Router {
         .route("/api/fs/file", get(read_fs))
         .route("/api/fs/stat", get(stat_fs))
         .route("/api/bots/{id}/skills", get(list_skills))
-        .route("/api/bots/{id}/secrets", post(complete_secret))
+        .route("/api/bots/{id}/policy", post(complete_policy_change))
         .route("/api/bots/{id}/events", get(events_ws))
         .route("/api/exec", post(exec))
         .route("/api/tool", post(tool))
@@ -468,9 +468,20 @@ async fn list_models(
     Json(json!({ "models": state.house.configured_models() })).into_response()
 }
 
+/// The user's answer to an `AskUserSandboxPolicyChange` card.
+#[derive(Deserialize)]
+struct PolicyBody {
+    accept: bool,
+    /// Hosts to allow egress to.
+    #[serde(default)]
+    hosts: Vec<String>,
+    /// The secret half, when the card asked for one.
+    #[serde(default)]
+    secret: Option<SecretBody>,
+}
+
 #[derive(Deserialize)]
 struct SecretBody {
-    accept: bool,
     #[serde(default)]
     env: String,
     #[serde(default)]
@@ -485,37 +496,48 @@ struct SecretBody {
     prefix: Option<String>,
 }
 
-async fn complete_secret(
+async fn complete_policy_change(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     Query(q): Query<QueryAuth>,
-    Json(body): Json<SecretBody>,
+    Json(body): Json<PolicyBody>,
 ) -> Response {
     if !authorized(&headers, &q, &state.house) {
         return deny();
     }
-    let kind = if body.accept {
-        match super::secret::SecretKind::parse(&body.kind) {
-            Ok(k) => k,
-            Err(e) => {
-                return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response();
+    let decision = if body.accept {
+        let secret = match body.secret {
+            Some(secret) => {
+                let kind = match super::policy::SecretKind::parse(&secret.kind) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        return (StatusCode::BAD_REQUEST, Json(json!({ "error": e })))
+                            .into_response();
+                    }
+                };
+                Some(super::policy::SecretDecision {
+                    accept: true,
+                    env: secret.env,
+                    kind,
+                    source: secret.source,
+                    value: secret.value,
+                    hosts: secret.hosts,
+                    header: secret.header,
+                    prefix: secret.prefix,
+                })
             }
+            None => None,
+        };
+        super::policy::PolicyDecision {
+            accept: true,
+            hosts: body.hosts,
+            secret,
         }
     } else {
-        super::secret::SecretKind::Paste
+        super::policy::PolicyDecision::declined()
     };
-    let decision = super::secret::SecretDecision {
-        accept: body.accept,
-        env: body.env,
-        kind,
-        source: body.source,
-        value: body.value,
-        hosts: body.hosts,
-        header: body.header,
-        prefix: body.prefix,
-    };
-    match state.house.complete_secret(&id, decision).await {
+    match state.house.complete_policy_change(&id, decision).await {
         Ok(status) => Json(json!({ "ok": true, "status": status })).into_response(),
         Err(e) => (
             StatusCode::CONFLICT,

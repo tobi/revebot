@@ -12,7 +12,10 @@ sandbox:
   cpus: 2
   memory: 8192
   root_disk: 16384
-  open: true
+  # Egress is denied by default. Hosts a secret is scoped to are reachable;
+  # add more here, or let the bot ask with AskUserSandboxPolicyChange
+  # (its answer is written back to this list). `open: true` opens the internet.
+  allow: []
   secrets:
     - env: GITHUB_TOKEN
       source: "$(gh auth token)"

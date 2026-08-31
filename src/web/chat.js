@@ -58,13 +58,13 @@ function paintLog(bot, rows) {
     return;
   }
   for (const row of rows) {
-    const signature = JSON.stringify(row) + (row.kind === 'secret' ? '' : JSON.stringify([bot && bot.name, bot && bot.avatar]));
+    const signature = JSON.stringify(row) + (row.kind === 'policy' ? '' : JSON.stringify([bot && bot.name, bot && bot.avatar]));
     const cached = rowCache.get(row.id);
     if (cached && cached.signature === signature) { items.push(...cached.items); continue; }
     const start = items.length;
     let node;
     if (row.kind === 'activity') renderActivity(row);
-    else if (row.kind === 'secret') addSecretAsk(row.args, {bot, running:true, id:row.id});
+    else if (row.kind === 'policy') addPolicyAsk(row.args, {bot, running:true, id:row.id});
     else if (row.kind === 'user') {
       const user = unwrapUser(row.text);
       if (row.from || user.kind === 'agent') {
@@ -95,7 +95,7 @@ function renderStatus(id) {
     return;
   }
   const rows = ReveLog.project(chatLog(id).records());
-  const active = rows.filter(r => (r.kind === 'tool' || r.kind === 'secret') && r.running).at(-1);
+  const active = rows.filter(r => (r.kind === 'tool' || r.kind === 'policy') && r.running).at(-1);
   const working = runningBots.has(id) || !!active || chatLog(id).records().some(r => r.status === 'streaming');
   setBusy(id, working);
   const status = document.getElementById('status');
