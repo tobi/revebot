@@ -244,6 +244,107 @@ const HOST_COMMAND_PATH: &[(&str, &str)] = &[
     ("package", "loadlib"),
 ];
 
+fn json_to_lua(lua: &Lua, value: &Value) -> mlua::Result<LuaValue> {
+    match value {
+        Value::Null => Ok(LuaValue::Nil),
+        Value::Bool(b) => Ok(LuaValue::Boolean(*b)),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(LuaValue::Integer(i))
+            } else if let Some(f) = n.as_f64() {
+                Ok(LuaValue::Number(f))
+            } else {
+                Ok(LuaValue::Nil)
+            }
+        }
+        Value::String(s) => Ok(LuaValue::String(lua.create_string(s)?)),
+        Value::Array(items) => {
+            let table = lua.create_table()?;
+            for (i, item) in items.iter().enumerate() {
+                table.set(i + 1, json_to_lua(lua, item)?)?;
+            }
+            Ok(LuaValue::Table(table))
+        }
+        Value::Object(map) => {
+            let table = lua.create_table()?;
+            for (key, item) in map {
+                table.set(key.as_str(), json_to_lua(lua, item)?)?;
+            }
+            Ok(LuaValue::Table(table))
+        }
+    }
+}
+
+fn lua_to_json(value: LuaValue) -> mlua::Result<Value> {
+    match value {
+        LuaValue::Nil => Ok(Value::Null),
+        LuaValue::Boolean(b) => Ok(Value::Bool(b)),
+        LuaValue::Integer(n) => Ok(Value::Number(n.into())),
+        LuaValue::Number(n) => {
+            Ok(serde_json::Number::from_f64(n).map_or(Value::Null, Value::Number))
+        }
+        LuaValue::String(s) => Ok(Value::String(s.to_string_lossy().clone())),
+        LuaValue::Table(table) => lua_table_to_json(&table),
+        other => Err(mlua::Error::external(format!(
+            "cannot store {} in plugin state",
+            other.type_name()
+        ))),
+    }
+}
+
+fn lua_table_to_json(table: &Table) -> mlua::Result<Value> {
+    let mut max_index = 0usize;
+    let mut arrayish = true;
+    let mut entries: Vec<(String, Value)> = Vec::new();
+    let mut items: Vec<(usize, Value)> = Vec::new();
+    for pair in table.pairs::<LuaValue, LuaValue>() {
+        let (key, value) = pair?;
+        let json = lua_to_json(value)?;
+        match key {
+            LuaValue::Integer(i) if i >= 1 => {
+                let index = usize::try_from(i).map_err(mlua::Error::external)?;
+                max_index = max_index.max(index);
+                items.push((index, json));
+            }
+            LuaValue::String(s) => {
+                arrayish = false;
+                entries.push((s.to_string_lossy().clone(), json));
+            }
+            LuaValue::Integer(i) => {
+                arrayish = false;
+                entries.push((i.to_string(), json));
+            }
+            LuaValue::Number(n) => {
+                arrayish = false;
+                entries.push((n.to_string(), json));
+            }
+            other => {
+                arrayish = false;
+                entries.push((other.type_name().to_string(), json));
+            }
+        }
+    }
+    if arrayish && max_index == items.len() {
+        let mut arr = vec![Value::Null; max_index];
+        for (index, json) in items {
+            let slot = index
+                .checked_sub(1)
+                .and_then(|offset| arr.get_mut(offset))
+                .ok_or_else(|| mlua::Error::external("invalid Lua array index"))?;
+            *slot = json;
+        }
+        return Ok(Value::Array(arr));
+    }
+    let mut map = Map::new();
+    for (index, json) in items {
+        map.insert(index.to_string(), json);
+    }
+    for (key, json) in entries {
+        map.insert(key, json);
+    }
+    Ok(Value::Object(map))
+}
+
 fn lua_result_text(lua: &Lua, result: LuaValue) -> Result<Option<String>> {
     Ok(match result {
         LuaValue::Nil => None,
@@ -279,14 +380,17 @@ fn plugin_ctx(
         "get",
         lua.create_function(move |lua, key: String| {
             let held = get_fx.lock();
-            lua.to_value(held.state.get(&key).unwrap_or(&Value::Null))
+            match held.state.get(&key) {
+                Some(value) => json_to_lua(lua, value),
+                None => Ok(LuaValue::Nil),
+            }
         })?,
     )?;
     let set_fx = effects.clone();
     state.set(
         "set",
-        lua.create_function(move |lua, (key, value): (String, LuaValue)| {
-            let json: Value = lua.from_value(value)?;
+        lua.create_function(move |_, (key, value): (String, LuaValue)| {
+            let json = lua_to_json(value)?;
             let mut held = set_fx.lock();
             if json.is_null() {
                 held.state.remove(&key);

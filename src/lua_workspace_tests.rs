@@ -355,12 +355,21 @@ async fn plugin_command_update_and_gated_tools_use_durable_state() {
           command = function(args, ctx)
             assert(ctx.now > 0 and ctx.lane.busy == false)
             ctx.state.set("prompt", args)
+            ctx.state.set("loops", { { id = "1" } })
             ctx.offer("LoopUpdate")
             ctx.statusline["loop"] = "1 loop"
             ctx.set_timer(5000)
             return "created " .. args
           end,
           update = function(ctx)
+            local list = ctx.state.get("loops") or {}
+            assert(type(list) == "table", type(list))
+            local n = 0
+            for _, item in ipairs(list) do
+              n = n + 1
+              assert(type(item) == "table" and item.id ~= nil)
+            end
+            ctx.state.set("count", n)
             if ctx.state.get("prompt") then
               ctx.offer("LoopUpdate")
               ctx.statusline["loop"] = "running"
@@ -396,6 +405,12 @@ async fn plugin_command_update_and_gated_tools_use_durable_state() {
         lane: "main".into(),
         state: serde_json::Map::new(),
     };
+    let empty = rt.run_plugin_update("loop", snap.clone()).await.unwrap();
+    assert_eq!(
+        empty.state.get("count").and_then(serde_json::Value::as_i64),
+        Some(0)
+    );
+
     let created = rt
         .run_plugin_command("loop", "5m check", snap.clone())
         .await
@@ -408,10 +423,22 @@ async fn plugin_command_update_and_gated_tools_use_durable_state() {
     );
     assert_eq!(created.timer_ms, Some(5000));
     assert_eq!(created.state["prompt"], "5m check");
+    assert!(
+        created.state["loops"].is_array(),
+        "{}",
+        created.state["loops"]
+    );
 
     let mut snap = snap;
     snap.state = created.state;
     let updated = rt.run_plugin_update("loop", snap.clone()).await.unwrap();
+    assert_eq!(
+        updated
+            .state
+            .get("count")
+            .and_then(serde_json::Value::as_i64),
+        Some(1)
+    );
     assert_eq!(updated.offers, vec!["LoopUpdate".to_string()]);
     assert_eq!(
         updated.statusline.get("loop").map(String::as_str),

@@ -883,7 +883,7 @@ pub fn default_lane_name() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{Control, Inbox, ModelRef, RunSettings, RunState};
+    use crate::state::{Control, Inbox, ModelRef, PendingEntry, RunSettings, RunState};
     use serde_json::json;
 
     fn config() -> LaneConfiguration {
@@ -1134,6 +1134,7 @@ mod tests {
             .ensure_lane(MAIN_LANE, None, &config())
             .await
             .unwrap();
+        let queued = EntryId::new();
         source
             .commit(
                 Transaction::new()
@@ -1141,6 +1142,14 @@ mod tests {
                         Namespace::LaneLeaf,
                         MAIN_LANE,
                         Some(sibling.id.clone()),
+                    ))
+                    .with(Write::set(
+                        Namespace::LaneState,
+                        MAIN_LANE,
+                        LaneState {
+                            current_operation_id: None,
+                            pending_next_run: vec![queued.clone()],
+                        },
                     ))
                     .with(Write::set(Namespace::FactName, "", "named"))
                     .with(Write::set(
@@ -1160,13 +1169,8 @@ mod tests {
                     ))
                     .with(Write::set(
                         Namespace::PendingEntry,
-                        "queued",
-                        json!({"message":{}}),
-                    ))
-                    .with(Write::set(
-                        Namespace::OpState,
-                        "operation",
-                        json!({"phase":"open"}),
+                        queued.as_str(),
+                        PendingEntry::message(json!({"role":"user","content":"queued"})),
                     ))
                     .with(Write::set(
                         Namespace::LaneLastResult,
