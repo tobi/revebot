@@ -4,6 +4,7 @@ import { formatText as renderMarkdown } from "./lib/markdown.mjs";
 import { emitServerState, nextRequestId } from "./events.mjs";
 import { parseConversationCommand } from "./conversation-commands.mjs";
 import "./components/reve-feed.mjs";
+import "./components/reve-conversation-tabs.mjs";
 import "./components/reve-autocomplete.mjs";
 import "./components/reve-attachment.mjs";
 import "./components/reve-composer.mjs";
@@ -13,13 +14,13 @@ let current = null;
 let bots = [];
 let ws = null;
 let houseWs = null;
-let frozenConversation = null;
 let busy = {};
 let statuslines = {};
 const PAGE = 80;
 const feed = document.getElementById("feed");
 const composer = document.getElementById("compose");
 const autocomplete = document.getElementById("ac");
+const conversationTabsElement = document.getElementById("conversation-tabs");
 const attachmentPreviewRequests = new WeakMap();
 composer.autocomplete = autocomplete;
 
@@ -492,12 +493,20 @@ async function loadBots() {
   ensureHouseEvents();
   const data = await api("/api/bots");
   bots = data.bots || [];
+  for (const bot of bots) {
+    if (bot.log_id && !logIds.has(bot.id)) {
+      logIds.set(bot.id, bot.log_id);
+      viewedLogIds.set(bot.id, bot.log_id);
+      ensureConversationTab(bot.id, bot.log_id);
+    }
+  }
   if (current && !bots.some(bot => bot.id === current)) {
-    logs.delete(current); logIds.delete(current);
+    dropBotConversations(current);
     if (ws) { ws.onclose = null; ws.close(); }
     current = null; ++connection; rowCache.clear(); resetTranscript();
     composer.botId = "";
     feed.botId = "";
+    conversationTabsElement.state = { tabs: [], selected: "" };
   }
   const q = (document.getElementById("q").value || "").toLowerCase();
   const box = document.getElementById("bots");
@@ -561,6 +570,8 @@ function paintHead(bot) {
 // Browser adapter. Every transcript update is log -> projection -> renderer.
 const logs = new Map();
 const logIds = new Map();
+const viewedLogIds = new Map();
+const conversationTabs = new Map();
 const rowCache = new Map();
 const activityOpen = new Set();
 const outputOpen = new Set();
@@ -569,9 +580,101 @@ const disconnected = new Set();
 const faults = new Map();
 let connection = 0;
 let streamReady = Promise.resolve();
-function chatLog(id) {
-  if (!logs.has(id)) logs.set(id, new ReveLog.Log());
-  return logs.get(id);
+
+function conversationKey(botId, conversationId) {
+  return `${botId}\u0000${conversationId || "pending"}`;
+}
+
+function conversationLog(botId, conversationId) {
+  const key = conversationKey(botId, conversationId);
+  if (!logs.has(key)) logs.set(key, new ReveLog.Log());
+  return logs.get(key);
+}
+
+function viewedLogId(botId) {
+  return viewedLogIds.get(botId) || logIds.get(botId) || "";
+}
+
+function chatLog(botId) {
+  return conversationLog(botId, viewedLogId(botId));
+}
+
+function tabsFor(botId) {
+  if (!conversationTabs.has(botId)) conversationTabs.set(botId, []);
+  return conversationTabs.get(botId);
+}
+
+function ensureConversationTab(botId, conversationId) {
+  const tabs = tabsFor(botId);
+  let tab = tabs.find((candidate) => candidate.id === conversationId);
+  if (!tab) {
+    tab = {
+      id: conversationId,
+      label: `Conversation ${tabs.length + 1}`,
+      history: { hasMore: false, oldestSeq: null },
+    };
+    tabs.push(tab);
+  }
+  return tab;
+}
+
+function paintConversationTabs(botId) {
+  const active = logIds.get(botId);
+  conversationTabsElement.state = {
+    tabs: tabsFor(botId).map((tab) => ({
+      id: tab.id,
+      label: tab.label,
+      readOnly: tab.id !== active,
+    })),
+    selected: viewedLogId(botId),
+  };
+}
+
+function activateConversation(botId, conversationId) {
+  const previous = logIds.get(botId);
+  const selected = viewedLogIds.get(botId);
+  if (current === botId && previous && selected === previous) {
+    ensureConversationTab(botId, previous).history = feed.history;
+  }
+  if (current === botId && previous && previous !== conversationId && selected === previous) {
+    composer.value = "";
+  }
+  ensureConversationTab(botId, conversationId);
+  logIds.set(botId, conversationId);
+  if (!selected || selected === previous) viewedLogIds.set(botId, conversationId);
+  if (current === botId) {
+    const viewed = viewedLogId(botId);
+    composer.readOnly = viewed !== conversationId;
+    rowCache.clear();
+    resetTranscript();
+    feed.setHistory(viewed === conversationId
+      ? ensureConversationTab(botId, viewed).history
+      : { hasMore: false, oldestSeq: null });
+    paintConversationTabs(botId);
+    queueLogRender(botId);
+  }
+}
+
+function viewConversation(botId, conversationId) {
+  if (current !== botId || !tabsFor(botId).some((tab) => tab.id === conversationId)) return;
+  ensureConversationTab(botId, viewedLogId(botId)).history = feed.history;
+  viewedLogIds.set(botId, conversationId);
+  rowCache.clear();
+  resetTranscript();
+  const tab = ensureConversationTab(botId, conversationId);
+  feed.setHistory(conversationId === logIds.get(botId) ? tab.history : { hasMore: false, oldestSeq: null });
+  composer.readOnly = conversationId !== logIds.get(botId);
+  paintConversationTabs(botId);
+  queueLogRender(botId);
+  renderStatus(botId);
+}
+
+function dropBotConversations(botId) {
+  const prefix = `${botId}\u0000`;
+  for (const key of logs.keys()) if (key.startsWith(prefix)) logs.delete(key);
+  logIds.delete(botId);
+  viewedLogIds.delete(botId);
+  conversationTabs.delete(botId);
 }
 
 function renderActivity(group) {
@@ -643,6 +746,10 @@ function paintLog(bot, rows) {
 
 function renderStatus(id) {
   if (current !== id) return;
+  if (viewedLogId(id) !== logIds.get(id)) {
+    feed.showStatus("Read-only conversation history");
+    return;
+  }
   if (faults.has(id)) {
     setBusy(id, false);
     feed.showStatus('Session error: ' + faults.get(id));
@@ -688,12 +795,11 @@ async function refreshLog(id, expectedId, valid) {
   if (!valid()) return;
   if (!Array.isArray(data.records) || typeof data.log_id !== 'string') throw new Error('Invalid log snapshot');
   if (data.log_id !== expectedId) throw new Error('Bot log changed; reconnecting');
-  if (logIds.has(id) && logIds.get(id) !== data.log_id) {
-    logs.delete(id); rowCache.clear();
-    if (current === id) composer.value = "";
+  if (logIds.has(id) && logIds.get(id) !== data.log_id && current === id) {
+    composer.value = "";
   }
-  logIds.set(id, data.log_id);
-  const log = chatLog(id);
+  activateConversation(id, data.log_id);
+  const log = conversationLog(id, data.log_id);
   const received = new Set((data.records || []).map(r => r.entry.id));
   const outstanding = log.records().filter(r => (r.status === 'streaming' || r.status === 'accepted') && !received.has(r.entry.id));
   log.merge(data.records || []);
@@ -712,21 +818,24 @@ async function refreshLog(id, expectedId, valid) {
   }
   if (!valid()) return;
   if (data.operation_id) runningBots.add(id); else runningBots.delete(id);
+  const history = {
+    hasMore: data.has_more,
+    oldestSeq: data.oldest_seq || null,
+  };
+  ensureConversationTab(id, data.log_id).history = history;
   if (current === id) {
-    const committed = chatLog(id).records().filter(r => r.status === 'committed');
-    feed.setHistory({
-      hasMore: data.has_more,
-      oldestSeq: committed.length ? committed[0].order : null,
-    });
+    if (viewedLogId(id) === data.log_id) feed.setHistory(history);
     queueLogRender(id);
   }
 }
 
 async function loadOlder() {
   const history = feed.history;
-  if (!current || !history.hasMore || feed.loadingOlder || !history.oldestSeq) return;
+  const id = current;
+  const expectedId = id ? viewedLogId(id) : "";
+  if (!id || expectedId !== logIds.get(id) || !history.hasMore || feed.loadingOlder || !history.oldestSeq) return;
   feed.loadingOlder = true;
-  const id = current, epoch = connection, expectedId = logIds.get(current);
+  const epoch = connection;
   try {
     const data = await api(
       '/api/bots/' + encodeURIComponent(id) + '/messages?limit=' + PAGE + '&before=' + history.oldestSeq,
@@ -734,9 +843,11 @@ async function loadOlder() {
       { topic: 'conversation-page', owner: { botId: id, conversationId: expectedId } },
     );
     if (current !== id || connection !== epoch || data.log_id !== expectedId) return;
-    chatLog(id).merge(data.records || []);
-    if (current === id && connection === epoch) {
-      feed.setHistory({ hasMore: data.has_more, oldestSeq: data.oldest_seq || history.oldestSeq });
+    conversationLog(id, expectedId).merge(data.records || []);
+    if (viewedLogId(id) === expectedId) {
+      const nextHistory = { hasMore: data.has_more, oldestSeq: data.oldest_seq || history.oldestSeq };
+      ensureConversationTab(id, expectedId).history = nextHistory;
+      feed.setHistory(nextHistory);
       rebuild(bots.find(b => b.id === id), true);
     }
   } finally {
@@ -755,7 +866,7 @@ function connectLog(id, epoch) {
       if (event.type === 'run_start' || event.type === 'run_resume') runningBots.add(id);
       if (event.type === 'run_end') { runningBots.delete(id); loadBots().catch(console.error); }
       if (event.type === 'fault') { runningBots.delete(id); faults.set(id, event.message); }
-      if (chatLog(id).event(event)) queueLogRender(id);
+      if (conversationLog(id, identity).event(event)) queueLogRender(id);
       else renderStatus(id);
     }
     async function sync() {
@@ -782,7 +893,7 @@ function connectLog(id, epoch) {
         channel: "bot", ok: true, data: event, stale: !isCurrent,
       });
       if (!isCurrent) return;
-      if (event.type === 'hello') { identity = event.log_id; sync(); return; }
+      if (event.type === 'hello') { identity = event.log_id; activateConversation(id, identity); sync(); return; }
       if (event.type === 'lagged') { sync(); return; }
       if (!ready) buffered.push(event); else apply(event);
     };
@@ -795,7 +906,7 @@ function connectLog(id, epoch) {
         channel: "bot", ok: false, status: 0, error: "Disconnected — reconnecting…",
       });
       if (!ready) reject(new Error('Bot log connection closed'));
-      chatLog(id).interrupt(); runningBots.delete(id); disconnected.add(id); queueLogRender(id);
+      conversationLog(id, identity).interrupt(); runningBots.delete(id); disconnected.add(id); queueLogRender(id);
       const profile = bots.find(bot => bot.id === id);
       if (!profile || profile.status !== 'ready') return;
       setTimeout(() => {
@@ -808,11 +919,16 @@ function connectLog(id, epoch) {
 async function reconnectConversation(id) {
   if (ws) { ws.onclose = null; ws.close(); ws = null; }
   const epoch = ++connection;
-  logs.delete(id);
-  logIds.delete(id);
   rowCache.clear();
   feed.loadingOlder = false;
   resetTranscript();
+  const viewed = viewedLogId(id);
+  if (viewed) {
+    const tab = ensureConversationTab(id, viewed);
+    feed.setHistory(viewed === logIds.get(id) ? tab.history : { hasMore: false, oldestSeq: null });
+  }
+  paintConversationTabs(id);
+  queueLogRender(id);
   streamReady = connectLog(id, epoch);
   try {
     await streamReady;
@@ -822,29 +938,16 @@ async function reconnectConversation(id) {
   }
 }
 
-function freezeConversation(botId, conversationId) {
-  if (current !== botId) return;
+function suspendConversationSwitch(botId, command) {
+  if (current !== botId) return false;
+  const viewed = viewedLogId(botId);
+  if (viewed) ensureConversationTab(botId, viewed).history = feed.history;
   connection += 1;
   if (ws) { ws.onclose = null; ws.close(); ws = null; }
-  frozenConversation = { botId, conversationId };
   composer.readOnly = true;
-  feed.showStatus("Creating fork · this tab will remain on the source conversation");
+  feed.showStatus(command === "fork" ? "Creating fork…" : "Starting a new conversation…");
+  return true;
 }
-
-function openForkTab() {
-  const tab = window.open("about:blank", "_blank");
-  if (tab) {
-    tab.opener = null;
-    tab.document.title = "Opening fork…";
-    tab.document.body.textContent = "Opening fork…";
-  }
-  return tab;
-}
-
-function activeConversationUrl(botId) {
-  return location.origin + location.pathname + location.search + "#/" + encodeURIComponent(botId);
-}
-
 
 async function runConversationCommand({
   botId,
@@ -853,7 +956,6 @@ async function runConversationCommand({
   entryId = null,
   requestId = null,
   topic = "conversation-command",
-  forkTab = null,
 }) {
   let logId = logIds.get(botId) || bots.find((bot) => bot.id === botId)?.log_id;
   if (!logId) {
@@ -861,8 +963,8 @@ async function runConversationCommand({
     logId = logIds.get(botId);
   }
   if (!logId) throw new Error("Connect to the bot log before running a command");
-  const frozeSource = command === "fork" && Boolean(forkTab) && current === botId;
-  if (frozeSource) freezeConversation(botId, logId);
+  const switching = command === "fork" || command === "new";
+  const suspended = switching && suspendConversationSwitch(botId, command);
   let data;
   try {
     data = await api(
@@ -879,48 +981,26 @@ async function runConversationCommand({
       { requestId, topic, owner: { botId, conversationId: logId } },
     );
   } catch (error) {
-    if (frozeSource && current === botId) {
-      frozenConversation = null;
-      composer.readOnly = false;
+    if (suspended && current === botId) {
+      composer.readOnly = viewedLogId(botId) !== logIds.get(botId);
       await reconnectConversation(botId).catch(() => {});
     }
     throw error;
   }
-  if (command === "compact") return data;
+  if (!switching) return data;
+  activateConversation(botId, data.log_id);
   await loadBots().catch(console.error);
-  if (command === "new") {
-    if (current === botId) {
-      frozenConversation = null;
-      composer.readOnly = false;
-      await reconnectConversation(botId).catch(() => {});
-    }
-    return data;
-  }
-  if (forkTab) {
-    if (frozeSource) feed.showStatus("Fork created · this tab remains on the source conversation");
-    forkTab.location.href = activeConversationUrl(botId);
-  } else if (current === botId) {
-    frozenConversation = null;
-    composer.readOnly = false;
-    await reconnectConversation(botId).catch(() => {});
-  }
+  if (current === botId) await reconnectConversation(botId).catch(() => {});
   return data;
 }
 
 async function select(id, fromRoute) {
   if (!id) return;
   if (current === id) {
-    if (frozenConversation) {
-      frozenConversation = null;
-      composer.readOnly = false;
-      await reconnectConversation(id);
-    }
     if (!fromRoute) setRoute(id);
     closeDrawers();
     return;
   }
-  frozenConversation = null;
-  composer.readOnly = false;
   current = id; const epoch = ++connection;
   composer.botId = id;
   composer.setStatusline(statuslines[id] || "");
@@ -928,8 +1008,15 @@ async function select(id, fromRoute) {
   if (!fromRoute) setRoute(id);
   if (ws) { ws.onclose = null; ws.close(); }
   rowCache.clear(); feed.loadingOlder = false; resetTranscript();
+  const viewed = viewedLogId(id);
+  if (viewed) {
+    const tab = ensureConversationTab(id, viewed);
+    feed.setHistory(viewed === logIds.get(id) ? tab.history : { hasMore: false, oldestSeq: null });
+  }
+  composer.readOnly = Boolean(viewed && viewed !== logIds.get(id));
   const paint = () => {
     paintHead(bots.find(b => b.id === id));
+    paintConversationTabs(id);
     queueLogRender(id);
     closeDrawers();
   };
@@ -1246,14 +1333,9 @@ function treeKey(e) {
 }
 
 async function previewFile(path) {
-  const body = document.querySelector(".screen .body");
-  const title = document.getElementById("screen-title");
   const peek = document.getElementById("file-peek");
   const peekBody = document.getElementById("file-peek-body");
   const peekName = document.getElementById("file-peek-name");
-  const name = path.split("/").pop() || path || "workspace";
-  body.classList.add("file");
-  title.textContent = name;
   peek.hidden = false;
   peekName.textContent = path ? "/workspace/" + path : "/workspace";
   try {
@@ -1261,11 +1343,9 @@ async function previewFile(path) {
     const text = data.binary
       ? path + "\n\nbinary file"
       : (data.text || "") + (data.truncated ? "\n\n… truncated" : "");
-    body.textContent = text;
     peekBody.textContent = text;
   } catch (e) {
     const msg = e.message || "unreadable";
-    body.textContent = msg;
     peekBody.textContent = msg;
   }
 }
@@ -1616,6 +1696,9 @@ feed.addEventListener("contextmenu", (event) => {
     entryId: message.dataset.entryId,
     text: message.dataset.body || "",
   };
+  const fork = document.getElementById("msg-fork");
+  fork.disabled = viewedLogId(current) !== logIds.get(current);
+  fork.title = fork.disabled ? "Historical conversations are read-only" : "Fork from here";
   const menu = document.getElementById("msg-ctx");
   menu.hidden = false;
   menu.classList.add("on");
@@ -1635,19 +1718,13 @@ document.getElementById("msg-copy").onclick = async () => {
 
 document.getElementById("msg-fork").onclick = () => {
   const message = ctxMessage;
-  const forkTab = openForkTab();
   closeMessageCtx();
-  if (!message) {
-    forkTab?.close();
-    return;
-  }
+  if (!message || viewedLogId(message.botId) !== logIds.get(message.botId)) return;
   runConversationCommand({
     botId: message.botId,
     command: "fork",
     entryId: message.entryId,
-    forkTab,
   }).catch((error) => {
-    forkTab?.close();
     feed.showStatus(error.message || String(error));
   });
 };
@@ -1770,7 +1847,6 @@ composer.addEventListener("reve:intent:send", (event) => {
   if (!payload) return;
   const { text, rawText, attachmentCount } = payload;
   const command = parseConversationCommand(rawText, attachmentCount);
-  const forkTab = command?.command === "fork" ? openForkTab() : null;
   void (async () => {
     try {
       if (command) {
@@ -1783,7 +1859,6 @@ composer.addEventListener("reve:intent:send", (event) => {
           instructions: command.instructions,
           requestId,
           topic: "message-response",
-          forkTab,
         });
         emitServerState({
           source: "projection", requestId, topic: "message-send",
@@ -1807,7 +1882,7 @@ composer.addEventListener("reve:intent:send", (event) => {
         throw new Error("Bot was replaced before the message settled");
       }
       if (!ack.record) throw new Error("Message was cancelled before placement");
-      chatLog(botId).upsert(ack.record);
+      conversationLog(botId, logId).upsert(ack.record);
       if (current === botId) {
         feed.pinToBottom();
         queueLogRender(botId);
@@ -1817,7 +1892,6 @@ composer.addEventListener("reve:intent:send", (event) => {
         ok: true, status: 200, data: ack,
       });
     } catch (error) {
-      forkTab?.close();
       emitServerState({
         source: "projection", requestId, topic: "message-send",
         owner: { botId, conversationId: logIds.get(botId) || null },
@@ -1828,6 +1902,9 @@ composer.addEventListener("reve:intent:send", (event) => {
 });
 
 feed.addEventListener("reve:intent:load-older", () => { void loadOlder(); });
+conversationTabsElement.addEventListener("reve:intent:select-conversation", (event) => {
+  if (current) viewConversation(current, event.detail.conversationId);
+});
 
 function closeDrawers() {
   const nav = document.getElementById("nav-toggle");
@@ -1862,26 +1939,34 @@ let desktopTaken = false;
 async function loadDesktop() {
   const body = document.getElementById("desktop-body");
   const hint = document.getElementById("desktop-hint");
+  const trigger = document.getElementById("desktop-open");
+  trigger.disabled = true;
+  if (hint) hint.textContent = "connecting…";
   try {
     const d = await api("/api/desktop");
     desktopUrl = d && d.novnc ? d.novnc : null;
     if (!desktopUrl) {
-      body.innerHTML = '<div class="hint">House computer is the microVM.<br>/workspace is shared by every bot.</div>';
+      body.replaceChildren(el("div", "hint", "House computer is offline."));
       if (hint) hint.textContent = "offline";
       return;
     }
-    if (hint) hint.textContent = "click to take over";
     const frame = document.createElement("iframe");
     frame.id = "desktop-frame";
-    frame.title = "microVM desktop";
+    frame.title = "Live microVM desktop";
     frame.allow = "clipboard-read; clipboard-write";
     frame.src = desktopUrl;
-    body.innerHTML = "";
-    body.appendChild(frame);
-    if (desktopTaken) takeOverDesktop();
+    frame.addEventListener("load", () => {
+      if (desktopFrame() === frame && hint && !desktopTaken) hint.textContent = "live preview";
+    });
+    frame.addEventListener("error", () => {
+      if (desktopFrame() === frame && hint) hint.textContent = "preview unavailable";
+    });
+    body.replaceChildren(frame);
+    trigger.disabled = false;
+    if (hint) hint.textContent = "loading preview…";
   } catch (e) {
     desktopUrl = null;
-    body.innerHTML = '<div class="hint">Desktop unavailable.</div>';
+    body.replaceChildren(el("div", "hint", "Desktop unavailable."));
     if (hint) hint.textContent = "offline";
   }
 }
@@ -1892,28 +1977,30 @@ function desktopFrame() {
 
 function takeOverDesktop() {
   const frame = desktopFrame();
-  const overlay = document.getElementById("desktop-takeover");
-  const slot = document.getElementById("desktop-takeover-slot");
+  const screen = document.getElementById("desktop");
+  const trigger = document.getElementById("desktop-open");
   const hint = document.getElementById("desktop-hint");
-  if (!frame || !overlay || !slot || !desktopUrl) return;
-  slot.appendChild(frame);
-  overlay.classList.add("on");
+  if (!frame || !screen || !desktopUrl || desktopTaken) return;
+  screen.showModal();
   desktopTaken = true;
+  trigger.setAttribute("aria-expanded", "true");
+  document.getElementById("desktop-close").focus();
   if (hint) hint.textContent = "taken over";
 }
 
 function giveBackDesktop() {
-  const frame = desktopFrame();
-  const overlay = document.getElementById("desktop-takeover");
-  const body = document.getElementById("desktop-body");
+  if (!desktopTaken) return;
+  const screen = document.getElementById("desktop");
+  const trigger = document.getElementById("desktop-open");
   const hint = document.getElementById("desktop-hint");
-  if (overlay) overlay.classList.remove("on");
-  if (frame && body) body.appendChild(frame);
+  screen.close();
   desktopTaken = false;
-  if (hint) hint.textContent = "click to take over";
+  trigger.setAttribute("aria-expanded", "false");
+  trigger.focus();
+  if (hint) hint.textContent = "live preview";
 }
 
-document.getElementById("desktop").addEventListener("click", takeOverDesktop);
+document.getElementById("desktop-open").addEventListener("click", takeOverDesktop);
 document.getElementById("desktop-close").addEventListener("click", giveBackDesktop);
 document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape" && desktopTaken && !document.getElementById("sheet").classList.contains("on")) {

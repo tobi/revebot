@@ -1,14 +1,43 @@
 import { emitIntent, SERVER_STATE_EVENT } from "../events.mjs";
 
-const TAIL_ITEMS = 40;
-const PIN_WINDOW = 80;
 const ESTIMATED_ITEM_HEIGHT = 56;
+const OVERSCAN_PX = 1_200;
+const ITEM_GAP = 6;
+const PIN_WINDOW = 80;
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
   if (text) node.textContent = text;
   return node;
+}
+
+function measuredHeight(item) {
+  return (Number.isFinite(item.height) && item.height > 0 ? item.height : ESTIMATED_ITEM_HEIGHT) + ITEM_GAP;
+}
+
+export function virtualWindow(items, scrollTop, clientHeight, pinned, overscan = OVERSCAN_PX) {
+  const heights = items.map(measuredHeight);
+  const totalHeight = heights.reduce((sum, height) => sum + height, 0);
+  const viewportHeight = Math.max(0, clientHeight);
+  const viewportTop = pinned
+    ? Math.max(0, totalHeight - viewportHeight)
+    : Math.max(0, Math.min(scrollTop, Math.max(0, totalHeight - viewportHeight)));
+  const start = Math.max(0, viewportTop - overscan);
+  const end = Math.min(totalHeight, viewportTop + viewportHeight + overscan);
+  let from = 0;
+  let topHeight = 0;
+  while (from < heights.length && topHeight + heights[from] <= start) {
+    topHeight += heights[from];
+    from += 1;
+  }
+  let to = from;
+  let through = topHeight;
+  while (to < heights.length && through < end) {
+    through += heights[to];
+    to += 1;
+  }
+  return { from, to, topHeight, bottomHeight: totalHeight - through, totalHeight };
 }
 
 export class ReveFeed extends HTMLElement {
@@ -135,6 +164,7 @@ export class ReveFeed extends HTMLElement {
   }
 
   track(node, kind) {
+    node.dataset.feedItem = "";
     this.#items.push({ node, kind, height: 0 });
     if (!this.#pinned && !this.#rendering) this.#unread += 1;
     if (!this.#rendering) this.scheduleFlush();
@@ -151,39 +181,55 @@ export class ReveFeed extends HTMLElement {
   }
 
   flush() {
-    const count = this.#items.length;
-    const from = this.#pinned
-      ? Math.max(0, count - PIN_WINDOW)
-      : Math.max(0, Math.min(this.#visibleFrom(), Math.max(0, count - TAIL_ITEMS)));
-    let topHeight = 0;
-    for (let index = 0; index < from; index += 1) {
-      topHeight += this.#items[index].height || ESTIMATED_ITEM_HEIGHT;
+    const window = virtualWindow(
+      this.#items,
+      this.#log.scrollTop,
+      this.#log.clientHeight,
+      this.#pinned,
+    );
+    let top = this.#log.querySelector("[data-spacer='top']");
+    if (!top) {
+      top = element("div");
+      top.dataset.spacer = "top";
+      this.#log.prepend(top);
     }
-    let spacer = this.#log.querySelector("[data-spacer='top']");
-    if (!spacer) {
-      spacer = element("div");
-      spacer.dataset.spacer = "top";
-      this.#log.prepend(spacer);
+    let bottom = this.#log.querySelector("[data-spacer='bottom']");
+    if (!bottom) {
+      bottom = element("div");
+      bottom.dataset.spacer = "bottom";
+      this.#log.append(bottom);
     }
-    spacer.style.height = `${topHeight}px`;
-    const keep = new Set([spacer]);
-    for (let index = from; index < count; index += 1) keep.add(this.#items[index].node);
+    top.style.height = `${window.topHeight}px`;
+    bottom.style.height = `${window.bottomHeight}px`;
+    const keep = new Set([top, bottom]);
+    for (let index = window.from; index < window.to; index += 1) {
+      keep.add(this.#items[index].node);
+    }
     let child = this.#log.firstElementChild;
     while (child) {
       const next = child.nextElementSibling;
       if (!keep.has(child)) child.remove();
       child = next;
     }
-    let anchor = spacer;
-    for (let index = from; index < count; index += 1) {
+    let anchor = top;
+    for (let index = window.from; index < window.to; index += 1) {
       const node = this.#items[index].node;
       if (node.parentNode !== this.#log || node.previousSibling !== anchor) anchor.after(node);
       anchor = node;
     }
-    for (let index = from; index < count; index += 1) {
+    if (bottom.parentNode !== this.#log || bottom.previousSibling !== anchor) anchor.after(bottom);
+    for (let index = window.from; index < window.to; index += 1) {
       const item = this.#items[index];
       item.height = item.node.offsetHeight || item.height || ESTIMATED_ITEM_HEIGHT;
     }
+    const measured = virtualWindow(this.#items, this.#log.scrollTop, this.#log.clientHeight, this.#pinned);
+    let measuredTop = 0;
+    for (let index = 0; index < window.from; index += 1) measuredTop += measuredHeight(this.#items[index]);
+    let measuredBottom = 0;
+    for (let index = window.to; index < this.#items.length; index += 1) measuredBottom += measuredHeight(this.#items[index]);
+    top.style.height = `${measuredTop}px`;
+    bottom.style.height = `${measuredBottom}px`;
+    if (measured.from !== window.from || measured.to !== window.to) this.scheduleFlush();
     this.#stickBottom();
     this.#paintFab();
   }
@@ -204,15 +250,6 @@ export class ReveFeed extends HTMLElement {
     else if (value) this.#status.textContent = String(value);
   }
 
-  #visibleFrom() {
-    let accumulated = 0;
-    const top = this.#log.scrollTop - 1_200;
-    for (const [index, item] of this.#items.entries()) {
-      accumulated += item.height || ESTIMATED_ITEM_HEIGHT;
-      if (accumulated >= top) return index;
-    }
-    return Math.max(0, this.#items.length - PIN_WINDOW);
-  }
 
   #stickBottom() {
     if (!this.#pinned) return;
@@ -238,8 +275,8 @@ export class ReveFeed extends HTMLElement {
     } else {
       this.#pinned = false;
       this.#paintFab();
-      this.scheduleFlush();
     }
+    this.scheduleFlush();
   };
 
   #onServerState = (event) => {

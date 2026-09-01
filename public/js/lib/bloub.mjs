@@ -1,6 +1,8 @@
-// Compact port of bloub (https://github.com/jeremy-prt/bloub) — MIT.
+// Compact port of bloub (https://bloub.vercel.app/, MIT, Jérémy).
 // Radial body + two white capsule eyes. Colour/shape from profile.avatar
 // (`orange:goutte`) or a hash of the bot id.
+// Idle CSS plays blink, wink, gaze, wide-eyes and breathe; `.av.working`
+// switches to bloub's thinking dots.
 const BLOUB = (() => {
   const N = 64;
   const TAU = Math.PI * 2;
@@ -119,22 +121,31 @@ const BLOUB = (() => {
     const mid = "m" + (++seq);
     const d = bodyPath(radii, scale);
     const h = hash(seed || "bot");
-    // Per-bot blink so a row of avatars does not wink in unison.
-    const delay = -((h % 6800) / 1000).toFixed(2);
-    const dur = (4.5 + ((h >>> 7) % 34) / 10).toFixed(2);
+    // Per-bot phase so a row of avatars does not blink, look or wink together.
+    const blinkDelay = -((h % 6800) / 1000).toFixed(2);
+    const blinkDur = (4.5 + ((h >>> 7) % 34) / 10).toFixed(2);
+    const lookDelay = -(((h >>> 3) % 11000) / 1000).toFixed(2);
+    const lookDur = (9.5 + ((h >>> 11) % 40) / 10).toFixed(2);
+    const breatheDur = (3.6 + ((h >>> 5) % 18) / 10).toFixed(2);
+    const breatheDelay = -(((h >>> 9) % 3600) / 1000).toFixed(2);
+    const bobDur = (3.2 + ((h >>> 13) % 16) / 10).toFixed(2);
     // Eyes lean \\ about 26° (bloub measurement), as mask holes on the body.
     // `.think` is bloub's thinking state: the body becomes three pulsing dots.
-    return `<svg class="bloub" width="${size}" height="${size}" viewBox="${-vb/2} ${-vb/2} ${vb} ${vb}" aria-hidden="true" style="--blink-dur:${dur}s;--blink-delay:${delay}s">
+    return `<svg class="bloub" width="${size}" height="${size}" viewBox="${-vb/2} ${-vb/2} ${vb} ${vb}" aria-hidden="true" style="--blink-dur:${blinkDur}s;--blink-delay:${blinkDelay}s;--look-dur:${lookDur}s;--look-delay:${lookDelay}s;--breathe-dur:${breatheDur}s;--breathe-delay:${breatheDelay}s;--bob-dur:${bobDur}s">
       <defs>
         <mask id="${mid}">
           <path d="${d}" fill="#fff"/>
           <g fill="#000" transform="rotate(26)">
-            <rect class="eye" x="-18" y="-14" width="8" height="18" rx="4"/>
-            <rect class="eye" x="6" y="-14" width="8" height="18" rx="4"/>
+            <g class="bloub-gaze">
+              <rect class="eye eye-l" x="-18" y="-14" width="8" height="18" rx="4"/>
+              <rect class="eye eye-r" x="6" y="-14" width="8" height="18" rx="4"/>
+            </g>
           </g>
         </mask>
       </defs>
-      <path class="bloub-body" d="${d}" fill="${hex}" mask="url(#${mid})"/>
+      <g class="bloub-idle">
+        <path class="bloub-body" d="${d}" fill="${hex}" mask="url(#${mid})"/>
+      </g>
       <g class="think" fill="${hex}">
         <circle class="think-dot" cx="-24" cy="0" r="9"/>
         <circle class="think-dot" cx="0" cy="0" r="9"/>

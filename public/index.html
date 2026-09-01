@@ -54,6 +54,7 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M8 9h8M8 13h5"/></svg>
       </label>
     </div>
+    <reve-conversation-tabs id="conversation-tabs"></reve-conversation-tabs>
     <reve-feed id="feed"></reve-feed>
     <reve-composer id="compose"></reve-composer>
     <reve-autocomplete id="ac"></reve-autocomplete>
@@ -67,17 +68,20 @@
     <div class="side-pane on" id="pane-screen" role="tabpanel">
       <div class="side-pad">
         <h2 id="screen-title">Screen</h2>
-        <div class="screen" id="desktop" title="Click to take over the desktop">
+        <dialog class="screen" id="desktop" aria-label="House computer">
           <div class="bar">
             <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+            <strong class="takeover-title">Desktop</strong>
+            <span class="takeover-copy">You have the keyboard and mouse. Give back returns to chat.</span>
             <span class="grow"></span>
             <span class="hint-label" id="desktop-hint">live preview</span>
+            <button type="button" class="desktop-close" id="desktop-close">Give back</button>
           </div>
           <div class="body" id="desktop-body">
             <div class="hint">House computer is the microVM.<br>/workspace is shared by every bot.</div>
           </div>
-          <div class="veil" id="desktop-veil"></div>
-        </div>
+          <button type="button" class="takeover-trigger" id="desktop-open" aria-label="Take over the house computer" aria-expanded="false" disabled><span>Take over</span></button>
+        </dialog>
       </div>
     </div>
     <div class="side-pane" id="pane-files" role="tabpanel">
@@ -111,15 +115,6 @@
       <div id="routines"></div>
     </div>
   </aside>
-</div>
-<div class="takeover" id="desktop-takeover">
-  <div class="takeover-bar">
-    <strong>Desktop</strong>
-    <span>You have the keyboard and mouse. Esc or Give back returns to chat.</span>
-    <span class="grow"></span>
-    <button type="button" id="desktop-close">Give back</button>
-  </div>
-  <div class="takeover-slot" id="desktop-takeover-slot"></div>
 </div>
 <div class="sheet" id="sheet" popover="auto">
   <form class="card" id="bot-form">
@@ -158,7 +153,7 @@
   <button type="button" id="msg-copy">Copy message</button>
   <button type="button" id="msg-fork">Fork from here</button>
 </div>
-<script type="module" src="/js/register-service-worker.mjs"></script>
+<script type="module" src="/js/register-service-worker.mjs?v=6"></script>
 <script type="module" src="/js/app.mjs"></script>
 </body>
 </html>

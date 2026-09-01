@@ -1,4 +1,4 @@
-const CACHE = "revebot-shell-v4";
+const CACHE = "revebot-shell-v6";
 const SHELL = [
   "/",
   "/manifest.webmanifest",
@@ -8,10 +8,12 @@ const SHELL = [
   "/js/events.mjs",
   "/js/lib/bloub.mjs",
   "/js/conversation-commands.mjs",
-  "/js/register-service-worker.mjs",
   "/js/lib/log.mjs",
+  "/js/lib/markdown.mjs",
   "/js/components/reve-feed.mjs",
+  "/js/components/reve-conversation-tabs.mjs",
   "/js/components/reve-autocomplete.mjs",
+  "/js/components/reve-attachment.mjs",
   "/js/components/reve-composer.mjs",
 ];
 self.addEventListener("message", (event) => {

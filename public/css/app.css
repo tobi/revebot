@@ -95,21 +95,66 @@
   .av.lg { width: 56px; height: 56px; }
   .av.sm { width: 28px; height: 28px; }
   .av svg, .bloub { width: 100%; height: 100%; display: block; }
-  .eye {
+  .bloub-idle {
     transform-origin: center;
-    animation: blink var(--blink-dur, 5.4s) infinite;
+    animation: bloub-bob var(--bob-dur, 3.8s) ease-in-out infinite;
+  }
+  .bloub-body {
+    transform-origin: center;
+    transform-box: fill-box;
+    animation: bloub-breathe var(--breathe-dur, 4.2s) ease-in-out infinite;
+    animation-delay: var(--breathe-delay, 0s);
+  }
+  .bloub-gaze {
+    transform-origin: 0 0;
+    animation: bloub-look var(--look-dur, 11s) ease-in-out infinite;
+    animation-delay: var(--look-delay, 0s);
+  }
+  .eye {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: bloub-blink var(--blink-dur, 5.4s) infinite;
     animation-delay: var(--blink-delay, 0s);
   }
-  @keyframes blink { 0%, 92%, 100% { transform: scaleY(1); } 95% { transform: scaleY(.08); } }
+  .eye-r {
+    animation-name: bloub-blink-wink;
+  }
+  @keyframes bloub-bob {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-1.6px); }
+  }
+  @keyframes bloub-breathe {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.045); }
+  }
+  @keyframes bloub-look {
+    0%, 16% { transform: translate(0, 0) scale(1); }
+    24%, 36% { transform: translate(-4px, 1.5px) scale(1); }
+    46%, 56% { transform: translate(5px, -1px) scale(1); }
+    66%, 72% { transform: translate(1px, -2px) scale(1.2); }
+    82%, 100% { transform: translate(0, 0) scale(1); }
+  }
+  @keyframes bloub-blink {
+    0%, 91%, 96%, 100% { transform: scaleY(1); }
+    93.5% { transform: scaleY(.08); }
+  }
+  @keyframes bloub-blink-wink {
+    0%, 70% { transform: scaleY(1); }
+    72% { transform: scaleY(.08); }
+    74%, 91% { transform: scaleY(1); }
+    93.5% { transform: scaleY(.08); }
+    96%, 100% { transform: scaleY(1); }
+  }
   .think { display: none; }
-  .av.working .bloub-body { display: none; }
+  .av.working .bloub-idle { display: none; }
   .av.working .think { display: block; }
   .think-dot {
     transform-box: fill-box;
     transform-origin: center;
     animation: think-pulse 1.15s ease-in-out infinite;
   }
-  .think-dot:nth-child(2) { animation-delay: .2s; }
+  .think-dot:nth-child(1) { animation-delay: .2s; }
+  .think-dot:nth-child(2) { animation-delay: 0s; }
   .think-dot:nth-child(3) { animation-delay: .4s; }
   @keyframes think-pulse {
     0%, 80%, 100% { transform: scale(.68); opacity: .4; }
@@ -126,8 +171,27 @@
   .chat-head:hover { background: #0c0c0e; }
   .chat-head h1 { font-size: 15px; font-weight: 650; margin: 0; }
   .chat-head .sub { font-size: 12px; color: var(--dim); }
+  .conversation-tabs {
+    display: flex; align-items: end; gap: 4px; min-height: 35px; padding: 5px 16px 0;
+    border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: thin; flex: none;
+  }
+  .conversation-tab {
+    display: flex; align-items: center; gap: 8px; max-width: 220px; padding: 7px 10px 8px;
+    border: 0; border-bottom: 2px solid transparent; border-radius: 7px 7px 0 0;
+    background: transparent; color: var(--dim); cursor: pointer; font: 12px/1.1 inherit;
+    white-space: nowrap;
+  }
+  .conversation-tab:hover { color: var(--text); background: var(--muted); }
+  .conversation-tab.on { color: var(--text); border-bottom-color: var(--primary); background: #ffffff08; }
+  .conversation-tab:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+  .conversation-tab-label { overflow: hidden; text-overflow: ellipsis; }
+  .conversation-tab-state { color: var(--accent); font-size: 10px; letter-spacing: .03em; }
+  .conversation-tab-state.read-only { color: var(--quiet); }
+  .ctx button:disabled { opacity: .45; cursor: not-allowed; }
   .log-wrap { flex: 1; min-height: 0; position: relative; display: flex; flex-direction: column; }
-  #log { flex: 1; overflow: auto; padding: 20px 22px 8px; display: flex; flex-direction: column; gap: 6px; }
+  #log { flex: 1; overflow: auto; padding: 20px 22px 8px; display: flex; flex-direction: column; }
+  #log > [data-feed-item] { flex: none; margin-bottom: 6px; }
+  #log > [data-spacer] { flex: none; min-height: 0; }
   #status {
     flex: none; height: 36px; padding: 0 28px; display: flex; align-items: center;
     font-size: 13px; color: var(--dim); overflow: hidden; line-height: 1.3;
@@ -334,8 +398,8 @@
   .side-pad { padding: 16px 16px 8px; flex: none; }
   .side h2 { font-size: 13px; font-weight: 650; margin: 0 0 10px; color: var(--dim); }
   .screen { background: #0a0a0c; border: 1px solid var(--line); border-radius: 14px;
-    overflow: hidden; aspect-ratio: 16/10; display: flex; flex-direction: column;
-    flex: none; cursor: pointer; position: relative; }
+    overflow: hidden; aspect-ratio: 16/9; display: flex; flex-direction: column;
+    flex: none; position: relative; margin: 0; padding: 0; width: 100%; max-width: none; color: inherit; }
   .screen:hover { border-color: #3f3f46; }
   .screen .bar { height: 22px; background: #161618; display: flex; align-items: center; gap: 5px; padding: 0 8px; flex: none; }
   .screen .dot { width: 8px; height: 8px; border-radius: 50%; background: #3a3a40; }
@@ -344,32 +408,42 @@
   .screen .body { flex: 1; color: var(--dim); font-size: 12px; padding: 0; display: flex;
     align-items: stretch; justify-content: stretch; text-align: center; min-height: 0; position: relative; }
   .screen .body .hint { margin: auto; padding: 16px; pointer-events: none; }
-  .screen .body.file { display: block; text-align: left; align-items: stretch; justify-content: start;
-    font: 11.5px/1.45 ui-monospace, SFMono-Regular, monospace; white-space: pre-wrap; color: var(--text);
-    padding: 10px 12px; }
-  .screen iframe { border: 0; width: 100%; height: 100%; background: #000; pointer-events: none; }
-  .screen .veil { position: absolute; inset: 0; z-index: 1; }
-  .takeover {
-    display: none; position: fixed; inset: 0; z-index: 40; background: #000;
-    flex-direction: column;
+  .screen iframe { border: 0; width: 100%; height: 100%; background: #000; pointer-events: none; display: block; }
+  .screen .takeover-trigger {
+    position: absolute; inset: 22px 0 0; z-index: 1; border: 0; background: transparent;
+    color: var(--text); cursor: pointer; font: inherit;
   }
-  .takeover.on { display: flex; }
-  .takeover-bar {
-    flex: none; height: 40px; display: flex; align-items: center; gap: 10px;
-    padding: 0 14px; background: #111; border-bottom: 1px solid var(--line); color: var(--text);
-    font-size: 13px; font-weight: 650;
+  .screen .takeover-trigger span {
+    position: absolute; right: 8px; bottom: 8px; padding: 5px 9px; border-radius: 7px;
+    background: #111d; border: 1px solid #ffffff24; font-size: 11px; font-weight: 650;
+    opacity: .82; transition: opacity .12s ease, background .12s ease;
   }
-  .takeover-bar span { color: var(--dim); font-weight: 500; }
-  .takeover-bar .grow { flex: 1; }
-  .takeover-bar button {
+  .screen .takeover-trigger:hover span, .screen .takeover-trigger:focus-visible span {
+    opacity: 1; background: #1d1d21;
+  }
+  .screen .takeover-trigger:focus-visible { outline: 2px solid var(--primary); outline-offset: -3px; }
+  .screen .takeover-trigger:disabled { cursor: default; }
+  .screen .takeover-trigger:disabled span { display: none; }
+  .screen .takeover-title, .screen .takeover-copy, .screen .desktop-close { display: none; }
+  .screen[open] {
+    position: fixed; inset: 0; width: 100vw; height: 100dvh; max-width: none; max-height: none;
+    margin: 0; padding: 0; border: 0; border-radius: 0; aspect-ratio: auto; z-index: 40;
+  }
+  .screen::backdrop { background: #000; }
+  .screen[open] .bar {
+    height: 40px; gap: 10px; padding: 0 14px; background: #111;
+    border-bottom: 1px solid var(--line); color: var(--text); font-size: 13px; font-weight: 650;
+  }
+  .screen[open] .dot, .screen[open] .hint-label { display: none; }
+  .screen[open] .takeover-title, .screen[open] .takeover-copy, .screen[open] .desktop-close { display: block; }
+  .screen[open] .takeover-copy { color: var(--dim); font-weight: 500; }
+  .screen[open] .desktop-close {
     background: var(--primary); color: var(--primary-fg); border: 0; border-radius: 8px;
     padding: 6px 12px; cursor: pointer; font-weight: 650;
   }
-  .takeover-slot { flex: 1; min-height: 0; }
-  .takeover-slot iframe { pointer-events: auto; }
+  .screen[open] iframe { pointer-events: auto; }
+  .screen[open] .takeover-trigger { display: none; }
   .tree-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-  .tree-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  .tree-head h2 { margin: 0; }
   .tree-acts { display: flex; gap: 2px; }
   .tree-act {
     background: transparent; border: 0; color: var(--dim); width: 24px; height: 24px;
@@ -589,7 +663,8 @@
   }
   body.dropping .drop-veil { display: flex; }
   @media (prefers-reduced-motion: reduce) {
-    .eye, .think-dot, .shimmer, .tool.running .tool-name { animation: none !important; }
+    .eye, .think-dot, .shimmer, .tool.running .tool-name,
+    .bloub-idle, .bloub-body, .bloub-gaze { animation: none !important; }
     ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; }
     .rail, .side, .sheet, .sheet .card, .sheet::backdrop { transition: none !important; }
   }

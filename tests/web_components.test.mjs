@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import fs from "node:fs";
+import path from "node:path";
+import vm from "node:vm";
+import { fileURLToPath } from "node:url";
 
 class TestElement extends EventTarget {
   constructor(tag = "custom-element", text = "") {
@@ -23,6 +27,13 @@ class TestElement extends EventTarget {
         this.className = this.className.split(" ").filter((name) => name && !removed.has(name)).join(" ");
       },
       contains: (name) => this.className.split(" ").includes(name),
+      toggle: (name, force) => {
+        const values = new Set(this.className.split(" ").filter(Boolean));
+        const enabled = force === undefined ? !values.has(name) : Boolean(force);
+        if (enabled) values.add(name); else values.delete(name);
+        this.className = [...values].join(" ");
+        return enabled;
+      },
     };
   }
 
@@ -95,7 +106,8 @@ const events = await import("../public/js/events.mjs");
 const autocomplete = await import("../public/js/components/reve-autocomplete.mjs");
 const conversationCommands = await import("../public/js/conversation-commands.mjs");
 const attachment = await import("../public/js/components/reve-attachment.mjs");
-await import("../public/js/components/reve-feed.mjs");
+const feedModule = await import("../public/js/components/reve-feed.mjs");
+await import("../public/js/components/reve-conversation-tabs.mjs");
 await import("../public/js/components/reve-composer.mjs");
 
 test("public components register once under stable names", () => {
@@ -103,10 +115,60 @@ test("public components register once under stable names", () => {
     "reve-attachment",
     "reve-autocomplete",
     "reve-composer",
+    "reve-conversation-tabs",
     "reve-feed",
   ]);
 });
 
+test("feed virtualization bounds both sides of a long transcript", () => {
+  const items = Array.from({ length: 1_000 }, () => ({ height: 50 }));
+  const middle = feedModule.virtualWindow(items, 25_000, 600, false);
+  assert(middle.from > 0);
+  assert(middle.to < items.length);
+  assert(middle.to - middle.from < 60, "only the viewport and fixed pixel overscan render");
+  assert.equal(
+    middle.topHeight + items.slice(middle.from, middle.to).length * 56 + middle.bottomHeight,
+    middle.totalHeight,
+  );
+
+  const tail = feedModule.virtualWindow(items, 0, 600, true);
+  assert(tail.from > 900);
+  assert.equal(tail.to, items.length);
+});
+
+test("feed distinguishes scrollback from the live tail", () => {
+  const Feed = definitions.get("reve-feed");
+  const feed = new Feed();
+  feed.connectedCallback();
+  Object.assign(feed.logElement, { scrollHeight: 1_000, clientHeight: 400, scrollTop: 500 });
+  assert.equal(feed.nearBottom(), false);
+  feed.logElement.scrollTop = 525;
+  assert.equal(feed.nearBottom(), true);
+  feed.disconnectedCallback();
+});
+
+
+test("conversation tabs expose live and read-only views through one intent", () => {
+  const Tabs = definitions.get("reve-conversation-tabs");
+  const tabs = new Tabs();
+  tabs.connectedCallback();
+  tabs.state = {
+    tabs: [
+      { id: "source", label: "Conversation 1", readOnly: true },
+      { id: "fork", label: "Conversation 2", readOnly: false },
+    ],
+    selected: "fork",
+  };
+  const buttons = tabs.descendants().filter((node) => node.tag === "button");
+  assert.equal(buttons.length, 2);
+  assert.equal(buttons[0].attributes.get("aria-selected"), "false");
+  assert.equal(buttons[1].attributes.get("aria-selected"), "true");
+  let intent;
+  tabs.addEventListener("reve:intent:select-conversation", (event) => { intent = event.detail; });
+  tabs.select("source");
+  assert.deepEqual(intent, { conversationId: "source" });
+  tabs.disconnectedCallback();
+});
 test("server state dispatch preserves response identity", () => {
   const data = { bots: [{ id: "helper" }] };
   const detail = {
@@ -215,7 +277,7 @@ test("attachment preview intent and response stay correlated", () => {
   card.disconnectedCallback();
 });
 
-test("composer exposes raw slash commands and can freeze a fork source tab", () => {
+test("composer exposes raw slash commands and can become read-only for history", () => {
   const Composer = definitions.get("reve-composer");
   const composer = new Composer();
   composer.connectedCallback();
@@ -243,4 +305,84 @@ test("composer exposes raw slash commands and can freeze a fork source tab", () 
   } }));
   assert.equal(composer.submissionPayload(intent.requestId), null);
   composer.disconnectedCallback();
+});
+
+test("service worker caches the complete app graph but not its updater", async () => {
+  const publicRoot = fileURLToPath(new URL("../public/", import.meta.url));
+  const moduleGraph = new Set();
+  const pending = ["/js/app.mjs"];
+  while (pending.length) {
+    const moduleUrl = pending.pop();
+    if (moduleGraph.has(moduleUrl)) continue;
+    moduleGraph.add(moduleUrl);
+    const source = fs.readFileSync(path.join(publicRoot, moduleUrl), "utf8");
+    const imports = source.matchAll(/\bimport\s+(?:[^'\"]+?\s+from\s+)?[\"']([^\"']+)[\"']/g);
+    for (const match of imports) {
+      if (match[1].startsWith(".")) pending.push(new URL(match[1], `https://reve.invalid${moduleUrl}`).pathname);
+    }
+  }
+
+  let cacheName;
+  let cached = [];
+  let install;
+  const listeners = new Map();
+  const worker = {
+    location: { origin: "https://reve.invalid" },
+    addEventListener: (type, listener) => listeners.set(type, listener),
+    skipWaiting: async () => {},
+    clients: { claim: async () => {} },
+  };
+  const caches = {
+    open: async (name) => {
+      cacheName = name;
+      return { addAll: async (urls) => { cached = [...urls]; } };
+    },
+    keys: async () => [],
+    delete: async () => true,
+    match: async () => null,
+  };
+  const source = fs.readFileSync(path.join(publicRoot, "sw.js"), "utf8");
+  vm.runInNewContext(source, { self: worker, caches, URL, Promise });
+  listeners.get("install")({ waitUntil: (promise) => { install = promise; } });
+  await install;
+
+  // A stale shell is served until both the cache name and the registration
+  // query move, so assert they agree instead of pinning one literal version.
+  const shellVersion = /^revebot-shell-v(\d+)$/.exec(cacheName);
+  assert(shellVersion, `cache name ${cacheName} must be revebot-shell-v<N>`);
+  const registration = fs.readFileSync(path.join(publicRoot, "index.html"), "utf8");
+  const registered = /register-service-worker\.mjs\?v=(\d+)/.exec(registration);
+  assert(registered, "index.html must register the service worker with a ?v= query");
+  assert.equal(
+    registered[1],
+    shellVersion[1],
+    "index.html ?v= must match the sw.js cache version",
+  );
+  for (const moduleUrl of moduleGraph) assert(cached.includes(moduleUrl), `${moduleUrl} is cached`);
+  assert.equal(cached.includes("/js/register-service-worker.mjs"), false);
+});
+
+test("service worker registration explicitly checks for updates", async () => {
+  const publicRoot = fileURLToPath(new URL("../public/", import.meta.url));
+  const serviceWorker = new EventTarget();
+  const registration = new EventTarget();
+  let registered;
+  let updates = 0;
+  serviceWorker.controller = {};
+  serviceWorker.register = async (url) => {
+    registered = url;
+    return registration;
+  };
+  registration.waiting = null;
+  registration.installing = null;
+  registration.update = async () => { updates += 1; };
+  const source = fs.readFileSync(path.join(publicRoot, "js/register-service-worker.mjs"), "utf8");
+  vm.runInNewContext(source, {
+    navigator: { serviceWorker },
+    location: { reload: () => {} },
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(registered, "/sw.js");
+  assert.equal(updates, 1);
 });

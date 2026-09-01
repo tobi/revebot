@@ -18,5 +18,6 @@ if ("serviceWorker" in navigator) {
       const worker = registration.installing;
       worker?.addEventListener("statechange", () => activate(worker));
     });
+    registration.update().catch(() => {});
   }).catch(() => {});
 }

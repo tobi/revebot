@@ -74,7 +74,7 @@ mod tests {
         let (service_worker, _) = asset("/sw.js").expect("service worker");
         let service_worker = std::str::from_utf8(service_worker).expect("UTF-8 service worker");
         assert!(service_worker.contains("/js/conversation-commands.mjs"));
-        assert!(service_worker.contains("/js/register-service-worker.mjs"));
+        assert!(!service_worker.contains("/js/register-service-worker.mjs"));
         assert!(!manifest.contains("/index.html"));
     }
 }

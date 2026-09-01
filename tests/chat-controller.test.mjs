@@ -57,7 +57,7 @@ const context = vm.createContext({
   console,
   current: null,
   ws: null,
-  frozenConversation: null,
+  conversationTabsElement: { state: null },
   statuslines: {},
   bots: [
     { id: "a", name: "A", status: "ready" },
@@ -148,3 +148,22 @@ assert.equal(rows("a")[0].entry.id, "new");
 assert.equal(composer.value, "");
 sockets[2].emit({ type: "entry_added", entry: entry("old", "old incarnation", 100) });
 assert.equal(rows("a").length, 1);
+
+const fork = context.runConversationCommand({ botId: "a", command: "fork" });
+const commandRequest = requests.shift();
+assert.equal(commandRequest.url, "/api/bots/a/commands");
+commandRequest.resolve({ log_id: "fork-a", previous_log_id: "replacement-a" });
+await new Promise((resolve) => setImmediate(resolve));
+sockets[4].emit({ type: "hello", log_id: "fork-a" });
+requests.shift().resolve(snapshot("fork-a", [{
+  entry: entry("forked", "forked conversation", 1), status: "committed", order: 1, revision: 0,
+}]));
+await fork;
+assert.equal(context.conversationTabsElement.state.tabs.length, 3);
+assert.equal(context.conversationTabsElement.state.selected, "fork-a");
+assert.equal(composer.readOnly, false);
+
+context.viewConversation("a", "replacement-a");
+assert.equal(context.conversationTabsElement.state.selected, "replacement-a");
+assert.equal(composer.readOnly, true);
+assert.equal(rows("a")[0].entry.id, "new", "the source conversation remains available in-app");
