@@ -78,11 +78,11 @@ Later launches reuse its persisted root disk.
 | Command | Purpose |
 |---|---|
 | `revebot` / `revebot serve` | Boot the house: one microVM, HTTP+WS on `127.0.0.1:7420`. A running Tailscale is detected and served too (token required). |
-| `revebot tui` | Terminal UI for the first bot (`chief-of-staff`). |
+| `revebot tui` | Terminal UI for the first bot (`chief-of-staff`). Attaches to a running house. |
 | `revebot init [dir]` | Scaffold a house (idempotent). |
 | `revebot info` | Show model, sandbox policy, egress hosts, and tools. |
-| `revebot exec <cmd...>` | Run a command inside the house microVM. |
-| `revebot tool [name] [--args JSON]` | Run one of this house's Lua tools. |
+| `revebot exec <cmd...>` | Run a command inside the house microVM. Attaches to a running house. |
+| `revebot tool [name] [--args JSON]` | Run one of this house's Lua tools. Attaches to a running house. |
 | `revebot eval` | Run `evals/` (offline by default; `--live` for real models). |
 | `revebot curator …` | Maintain the skill library (status, prune, pin, adopt, archive). |
 | `revebot --version` | Print the version. |

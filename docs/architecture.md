@@ -113,8 +113,12 @@ src/
   project.rs          house directory and `revebot init`; identity is
                       workspace/agents/<id>/; SOUL.md is the sole prose identity,
                       profile.json is authoritative metadata; HOME/workspace is cwd
-  tui/                inline ratatui renderer and the terminal session
+  tui/                inline ratatui renderer and the terminal session.
+                      `revebot tui` attaches over HTTP/WS when a house is already
+                      serving; otherwise it boots a one-shot guest as before.
   house/              multi-bot house: roster, supervisors, HTTP/WS, routine ticker;
+                      `house/client.rs` attaches `revebot exec` / `tool` / `tui` to a
+                      ready `.reve/house.json` instead of starting a second microVM.
                       usage.jsonl in `.reve/` logs skill `/name` and Lua plugin
                       invocations (one JSON object per line) for later stats.
                       The same `/name` bump also feeds `.reve/curator/usage.json`.
@@ -225,7 +229,9 @@ src/
                       which chat is open. GET /api/bots includes `busy`.
   eval/               catalog runner for evals/cases (offline / live / microvm);
                       live defaults to openrouter/x-ai/grok-4.6 (OPENROUTER_API_KEY)
-  main.rs             init / info / exec / tool / serve / tui / eval; bare `revebot` serves
+  main.rs             init / info / exec / tool / serve / tui / eval; bare `revebot` serves.
+                      exec/tool/tui attach to a ready house; an orphan Running VM
+                      without the lock exits 2.
 tests/{harness,crash,microvm,provider_http,eval}.rs
 evals/cases/<suite>/*.yaml   scored cases; offline is `make eval`, live is `--live`
 ```
@@ -456,6 +462,7 @@ code or the spec, never the invariant.
 | Public-internet egress by default; lock-down is `open = false` | `sandbox::tests::default_egress_is_the_public_internet`, `tests/microvm.rs` (opt-in) |
 | Secret hosts are a per-host map; `allow: true` joins the sandbox allow list | `sandbox::tests::secret_hosts_join_the_egress_allow_list`, `lua::tests::a_secret_host_map_carries_headers_and_joins_allow`, `house::secret::tests::upsert_appends_a_secret_to_the_template` |
 | Chat attachments stay under `workspace/tmp/{id}/` and are named in the message | `house::attach::tests::{save_writes_under_workspace_tmp_id_and_tags_the_guest_path, names_are_basenames_without_traversal, read_refuses_traversal_and_bad_ids}` |
+| CLI exec/tool/tui attach to a ready house and refuse an orphan Running VM | `house::client::tests::{a_ready_house_attaches_and_runs_exec_and_tool, a_running_namesake_without_a_house_is_an_orphan, live_pid_without_health_does_not_one_shot, a_held_lock_without_ready_times_out_without_one_shot}` |
 
 **Not covered yet.** Standalone `navigate()` has no end-to-end test. Lane concurrency is
 implemented (a lane claim per operation, drivers as independent tasks) but there is no

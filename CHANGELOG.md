@@ -25,6 +25,10 @@ starts in microseconds. Concurrency is tokio tasks over single-owner session sta
 
 ### Added
 
+- `revebot exec`, `revebot tool`, and `revebot tui` attach to a running house over
+  HTTP/WS (`POST /api/exec`, `POST /api/tool`, bot messages + events) instead of
+  trying to boot a second microVM. An orphan Running namesake without `house.lock`
+  exits 2 so only the lock holder may take it over.
 - **Tailscale** — `revebot serve` detects a running host `tailscaled` via the
   LocalAPI socket and binds the same HTTP/WS surface on the node's Tailscale
   IPv4 (same port as `--bind`). The bearer token is still required; the tailnet

@@ -699,6 +699,19 @@ impl Sandbox {
         Ok(())
     }
 
+    /// True when a namesake is `Running` or `Draining`. CLI clients use this to
+    /// refuse a one-shot against an orphan guest they do not own.
+    pub async fn namesake_is_running(name: &str) -> bool {
+        use microsandbox::sandbox::SandboxStatus;
+        let Ok(handle) = MsbSandbox::get(name).await else {
+            return false;
+        };
+        matches!(
+            handle.status_snapshot(),
+            SandboxStatus::Running | SandboxStatus::Draining
+        )
+    }
+
     pub fn sandbox_name_for(policy: &Policy, host_workspace: impl AsRef<Path>) -> String {
         policy.sandbox_name(host_workspace.as_ref())
     }

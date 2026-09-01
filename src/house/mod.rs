@@ -1,6 +1,7 @@
 //! A house: one microVM, many bots, one shared `/workspace`.
 
 pub(crate) mod attach;
+pub mod client;
 pub(crate) mod files;
 pub mod fs;
 pub mod home;
