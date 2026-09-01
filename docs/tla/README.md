@@ -207,7 +207,7 @@ Configurations and measured sizes (tla-checker 0.6.11, single thread):
 | `VmLifecycle.cfg` | 2 bots, 2 policies, 12 steps | 3,476 | 0.5 s | `spec` |
 | `DurableHarness.small.cfg` (MaxSeq 6 variant) | 2 / 4 / 2 / 6 | 253,775 | 7.7 min | `spec-full` |
 | `DurableHarness.small.cfg` | 2 / 4 / 2 / 7 | 652,386 | 21 min | `spec-full` |
-| `DurableHarness.cfg` | 2 / 5 / 2 / 8 | > 5 M, unfinished | hours | `spec-full` |
+| `DurableHarness.cfg` | 2 / 5 / 2 / 8 | 10,960,530 | 7.6 h (gb300) | `spec-full` |
 
 Every `Cov*` probe is non-zero on `ci.cfg` (tool batch) and `lanes.cfg` reaches a
 completed batch with both lanes open. Entry ids, op ids and lanes are interchangeable
