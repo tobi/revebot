@@ -23,6 +23,7 @@ use crate::entry::MAIN_LANE;
 use crate::events::Kind;
 use crate::harness::{Harness, HarnessConfig, HarnessError};
 use crate::hooks::Hooks;
+use crate::house::client::HouseClient;
 use crate::model::{Assistant, BoxFuture, Deltas, Model, ModelError, Request};
 use crate::project::Project;
 use crate::provider::HttpModel;
@@ -342,7 +343,7 @@ pub async fn run(project: Project, sandbox: Arc<Sandbox>) -> anyhow::Result<()> 
                         } else if let Some(argument) = rest.strip_prefix("queue") {
                             Some(queue(&harness, argument.trim()).await)
                         } else {
-                            dispatch(&project, &sandbox, &directory, &rest, rx).await
+                            dispatch(&project, Some(&sandbox), &directory, &rest, rx).await
                         };
                         side_cancel.lock().take();
                         if let Some(item) = item {
@@ -427,6 +428,297 @@ pub async fn run(project: Project, sandbox: Arc<Sandbox>) -> anyhow::Result<()> 
     result.map_err(Into::into)
 }
 
+/// Terminal UI as a client of a house that already owns the microVM.
+///
+/// Prompts, `!` exec, Lua `/tool`, abort and compact go over HTTP/WS. This
+/// process does not start or stop the guest.
+pub async fn run_attached(project: Project, client: HouseClient) -> anyhow::Result<()> {
+    let bot = crate::house::profile::FIRST_BOT;
+    let (updates, updates_rx) = mpsc::channel(256);
+    let (actions, mut actions_rx) = mpsc::channel(64);
+
+    let location = project.root.file_name().map_or_else(
+        || project.root.display().to_string(),
+        |n| format!("…/{}", n.to_string_lossy()),
+    );
+    let mut app = App::new(
+        project
+            .runtime
+            .agent
+            .model
+            .clone()
+            .unwrap_or_else(|| "no model".into()),
+        project
+            .runtime
+            .agent
+            .thinking
+            .clone()
+            .unwrap_or_else(|| "default".into()),
+        location,
+    );
+    app.set_commands(commands_for(&project));
+    app.set_files(file_candidates(&project.workspace()));
+
+    let tools: Vec<String> = project
+        .runtime
+        .tools
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+    let mut banner = format!(
+        "Attached to the house at {}. What you type goes to the model. Prefix `!` to run a command \
+         in the house microVM",
+        client.base()
+    );
+    if tools.is_empty() {
+        banner.push('.');
+    } else {
+        banner.push_str(", or `/");
+        banner.push_str(&tools.join("`, `/"));
+        banner.push_str("` to run a tool.");
+    }
+    let _ = updates.send(Update::Item(Item::Assistant(banner))).await;
+
+    let project = Arc::new(project);
+    {
+        let updates = updates.clone();
+        let root = project.root.clone();
+        let project_for_commands = project.clone();
+        tokio::spawn(async move {
+            let Ok(models) = Models::load(&root.join("models.yml")) else {
+                return;
+            };
+            let catalogue = discovery::catalogue(&root, &models).await;
+            if catalogue.models.is_empty() {
+                return;
+            }
+            let _ = updates
+                .send(Update::Commands(commands_with(
+                    &project_for_commands,
+                    &catalogue.models,
+                )))
+                .await;
+        });
+    }
+
+    let worker = {
+        let updates = updates.clone();
+        let client = client.clone();
+        tokio::spawn(async move {
+            let Ok(directory) = crate::working_directory::Context::new(bot) else {
+                let _ = updates
+                    .send(Update::Item(Item::Notice("cwd: invalid bot home".into())))
+                    .await;
+                return;
+            };
+            let mut events = match client.subscribe(bot).await {
+                Ok(rx) => rx,
+                Err(error) => {
+                    let _ = updates
+                        .send(Update::Item(Item::Notice(format!("events: {error}"))))
+                        .await;
+                    return;
+                }
+            };
+            let log_id = Arc::new(Mutex::new(
+                client.log_id(bot).await.unwrap_or_else(|_| String::new()),
+            ));
+            let inflight: Arc<Mutex<Option<tokio::task::AbortHandle>>> = Arc::new(Mutex::new(None));
+            let events_task = {
+                let updates = updates.clone();
+                tokio::spawn(async move {
+                    while let Some(event) = events.recv().await {
+                        if !emit_event(event, &updates).await {
+                            break;
+                        }
+                    }
+                })
+            };
+
+            loop {
+                let Some(action) = actions_rx.recv().await else {
+                    break;
+                };
+                match action {
+                    Action::Prompt(text)
+                    | Action::Steer(text)
+                    | Action::FollowUp(text)
+                    | Action::ChannelMessage(crate::channels::Message { text, .. })
+                        if text.trim().starts_with('!') =>
+                    {
+                        let command = text.trim().get(1..).unwrap_or_default().trim().to_string();
+                        let _ = updates.send(Update::Item(Item::User(text.clone()))).await;
+                        let started = Instant::now();
+                        let client = client.clone();
+                        let exec_command = command.clone();
+                        let task =
+                            tokio::spawn(
+                                async move { client.exec(&exec_command, None, None).await },
+                            );
+                        *inflight.lock() = Some(task.abort_handle());
+                        let item = match task.await {
+                            Ok(Ok(output)) => exec_item(&command, &output, started.elapsed()),
+                            Ok(Err(error)) => Item::Notice(format!("sandbox error: {error}")),
+                            Err(_) => Item::Notice("interrupted".into()),
+                        };
+                        inflight.lock().take();
+                        let _ = updates.send(Update::Item(item)).await;
+                    }
+                    Action::Prompt(text)
+                    | Action::Steer(text)
+                    | Action::FollowUp(text)
+                    | Action::ChannelMessage(crate::channels::Message { text, .. })
+                        if text.trim().starts_with('/') =>
+                    {
+                        let _ = updates.send(Update::Item(Item::User(text.clone()))).await;
+                        let rest = text.trim().get(1..).unwrap_or_default().to_string();
+                        let item = if rest.strip_prefix("cd ").is_some() {
+                            Some(Item::Notice(
+                                "cd stays with the house process; this TUI is attached".into(),
+                            ))
+                        } else if let Some(argument) = rest.strip_prefix("compact") {
+                            let id = log_id.lock().clone();
+                            if id.is_empty() {
+                                Some(Item::Notice("compact: no conversation yet".into()))
+                            } else {
+                                Some(
+                                    match client.compact(bot, &id, Some(argument.trim())).await {
+                                        Ok(()) => Item::Assistant("Compacted.".into()),
+                                        Err(error) => Item::Notice(format!("compact: {error}")),
+                                    },
+                                )
+                            }
+                        } else if rest.strip_prefix("queue").is_some() {
+                            Some(Item::Notice(
+                                "queue stays with the house process; this TUI is attached".into(),
+                            ))
+                        } else if let Some(item) = dispatch(&project, None, &directory, &rest, {
+                            let (tx, rx) = channel();
+                            drop(tx);
+                            rx
+                        })
+                        .await
+                        {
+                            Some(item)
+                        } else {
+                            let name = rest.split_once(' ').map_or(rest.as_str(), |(name, _)| name);
+                            if project.runtime.tool(name).is_some() {
+                                let started = Instant::now();
+                                let client = client.clone();
+                                let tool = name.to_string();
+                                let task = tokio::spawn(async move {
+                                    client.tool(&tool, serde_json::Map::new()).await
+                                });
+                                *inflight.lock() = Some(task.abort_handle());
+                                let item = match task.await {
+                                    Ok(Ok(text)) => Item::Tool {
+                                        verb: "Ran tool".into(),
+                                        description: name.to_string(),
+                                        status: Status::Ok,
+                                        duration: Some(started.elapsed()),
+                                        detail: (!text.trim().is_empty())
+                                            .then(|| text.trim().to_string()),
+                                        outcome: None,
+                                    },
+                                    Ok(Err(error)) => Item::Tool {
+                                        verb: "Ran tool".into(),
+                                        description: name.to_string(),
+                                        status: Status::Failed,
+                                        duration: Some(started.elapsed()),
+                                        detail: None,
+                                        outcome: Some(error.to_string()),
+                                    },
+                                    Err(_) => Item::Notice("interrupted".into()),
+                                };
+                                inflight.lock().take();
+                                Some(item)
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some(item) = item {
+                            let _ = updates.send(Update::Item(item)).await;
+                        }
+                    }
+                    action @ (Action::Prompt(_)
+                    | Action::Steer(_)
+                    | Action::FollowUp(_)
+                    | Action::ChannelMessage(_)) => {
+                        let (text, echo) = match action {
+                            Action::Prompt(text) | Action::Steer(text) | Action::FollowUp(text) => {
+                                (text, true)
+                            }
+                            Action::ChannelMessage(message) => (channel_prompt(&message), false),
+                            _ => unreachable!(),
+                        };
+                        if echo {
+                            let _ = updates.send(Update::Item(Item::User(text.clone()))).await;
+                        }
+                        let id = log_id.lock().clone();
+                        match client
+                            .prompt(bot, &text, (!id.is_empty()).then_some(id.as_str()))
+                            .await
+                        {
+                            Ok(new_id) if !new_id.is_empty() => {
+                                *log_id.lock() = new_id;
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                let _ = updates
+                                    .send(Update::Item(Item::Notice(format!("run: {error}"))))
+                                    .await;
+                            }
+                        }
+                    }
+                    Action::Interrupt => {
+                        if let Some(handle) = inflight.lock().take() {
+                            handle.abort();
+                        }
+                        if let Err(error) = client.abort(bot).await {
+                            let _ = updates
+                                .send(Update::Item(Item::Notice(format!("interrupt: {error}"))))
+                                .await;
+                        }
+                    }
+                    Action::Quit => break,
+                }
+            }
+            events_task.abort();
+        })
+    };
+
+    let result = crate::tui::run::run(app, updates_rx, actions).await;
+    worker.abort();
+    result.map_err(Into::into)
+}
+
+fn exec_item(
+    command: &str,
+    output: &crate::sandbox::Output,
+    duration: std::time::Duration,
+) -> Item {
+    let text = if output.stdout.trim().is_empty() {
+        output.stderr.trim().to_string()
+    } else {
+        output.stdout.trim().to_string()
+    };
+    Item::Tool {
+        verb: "Ran".into(),
+        description: command.lines().next().unwrap_or("").to_string(),
+        status: if output.cancelled || !output.success {
+            Status::Failed
+        } else {
+            Status::Ok
+        },
+        duration: Some(duration),
+        detail: (!text.is_empty()).then_some(text),
+        outcome: output
+            .cancelled
+            .then(|| "interrupted".to_string())
+            .or_else(|| (!output.success).then(|| format!("exit {}", output.exit_code))),
+    }
+}
+
 /// Turn the harness's passive event stream into terminal updates.
 ///
 /// One-way by construction: an observer cannot change what the run does, so a
@@ -441,99 +733,104 @@ async fn forward_events(
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
             Err(_) => break,
         };
-        // The event stream is the only authority on whether an operation is
-        // running, so it is the only thing allowed to raise or clear the
-        // working indicator. The action loop used to do its own bookkeeping,
-        // which meant a run it did not start -- a resume at launch, a queued
-        // next run -- left the spinner on forever, and a stuck spinner turns
-        // ctrl-c into an interrupt that never becomes a quit.
-        let update = match event.kind {
-            Kind::RunStart | Kind::RunResume { .. } => {
-                Some(Update::Working(Some("Working".into())))
-            }
-            Kind::MessageUpdate { delta } => Some(Update::Delta(delta)),
-            Kind::MessageEnd { .. } => Some(Update::EndMessage),
-            Kind::ToolStart { tool_name, .. } => {
-                if tool_name == "SendUserMessage" || tool_name == "SendMessage" {
-                    Some(Update::Working(Some("Working".into())))
-                } else {
-                    Some(Update::Working(Some(format!("Running {tool_name}"))))
-                }
-            }
-            Kind::EntryAccepted { entry, .. }
-                if entry.custom_type.as_deref() == Some("user_notice") =>
-            {
-                entry
-                    .payload
-                    .get("data")
-                    .and_then(|v| v.get("text"))
-                    .and_then(|v| v.as_str())
-                    .map(|text| Update::Item(Item::Assistant(text.into())))
-            }
-            Kind::ToolEnd {
-                tool_name,
-                content,
-                is_error,
-                ..
-            } => {
-                if tool_name == "SendUserMessage" || tool_name == "SendMessage" {
-                    None
-                } else {
-                    Some(Update::Item(Item::Tool {
-                        verb: "Ran".into(),
-                        description: tool_name,
-                        status: if is_error { Status::Failed } else { Status::Ok },
-                        duration: None,
-                        detail: (!content.trim().is_empty()).then(|| content.trim().to_string()),
-                        outcome: is_error.then(|| "failed".to_string()),
-                    }))
-                }
-            }
-            Kind::RetryScheduled {
-                attempt,
-                max_attempts,
-                ..
-            } => Some(Update::Working(Some(format!(
-                "Retrying ({attempt}/{max_attempts})"
-            )))),
-            Kind::RunEnd { outcome, error, .. } => {
-                // The run is over however it ended, so the indicator goes down
-                // before the notice explaining why.
-                let _ = updates.send(Update::Working(None)).await;
-                match outcome {
-                    Outcome::Failed => Some(Update::Item(Item::Notice(match error {
-                        Some(error) => format!("run failed: {}", error.message),
-                        None => "run failed".into(),
-                    }))),
-                    Outcome::Aborted => Some(Update::Item(Item::Notice("Interrupted".into()))),
-                    _ => None,
-                }
-            }
-            Kind::CompactionStart { .. } => Some(Update::Working(Some("Compacting".into()))),
-            Kind::CompactionEnd { outcome, .. } => {
-                let _ = updates.send(Update::Working(None)).await;
-                match outcome {
-                    Outcome::Completed => Some(Update::Item(Item::Notice(
-                        "compacted the conversation".into(),
-                    ))),
-                    Outcome::Failed => Some(Update::Item(Item::Notice("compaction failed".into()))),
-                    _ => None,
-                }
-            }
-            Kind::HandlerError { hook, error } => {
-                Some(Update::Item(Item::Notice(format!("{hook}: {error}"))))
-            }
-            Kind::Fault { message } => Some(Update::Item(Item::Notice(format!(
-                "session fault: {message}"
-            )))),
-            _ => None,
-        };
-        if let Some(update) = update
-            && updates.send(update).await.is_err()
-        {
+        if !emit_event(event, &updates).await {
             break;
         }
     }
+}
+
+async fn emit_event(event: crate::events::Event, updates: &mpsc::Sender<Update>) -> bool {
+    // The event stream is the only authority on whether an operation is
+    // running, so it is the only thing allowed to raise or clear the
+    // working indicator. The action loop used to do its own bookkeeping,
+    // which meant a run it did not start -- a resume at launch, a queued
+    // next run -- left the spinner on forever, and a stuck spinner turns
+    // ctrl-c into an interrupt that never becomes a quit.
+    let update = match event.kind {
+        Kind::RunStart | Kind::RunResume { .. } => Some(Update::Working(Some("Working".into()))),
+        Kind::MessageUpdate { delta } => Some(Update::Delta(delta)),
+        Kind::MessageEnd { .. } => Some(Update::EndMessage),
+        Kind::ToolStart { tool_name, .. } => {
+            if tool_name == "SendUserMessage" || tool_name == "SendMessage" {
+                Some(Update::Working(Some("Working".into())))
+            } else {
+                Some(Update::Working(Some(format!("Running {tool_name}"))))
+            }
+        }
+        Kind::EntryAccepted { entry, .. }
+            if entry.custom_type.as_deref() == Some("user_notice") =>
+        {
+            entry
+                .payload
+                .get("data")
+                .and_then(|v| v.get("text"))
+                .and_then(|v| v.as_str())
+                .map(|text| Update::Item(Item::Assistant(text.into())))
+        }
+        Kind::ToolEnd {
+            tool_name,
+            content,
+            is_error,
+            ..
+        } => {
+            if tool_name == "SendUserMessage" || tool_name == "SendMessage" {
+                None
+            } else {
+                Some(Update::Item(Item::Tool {
+                    verb: "Ran".into(),
+                    description: tool_name,
+                    status: if is_error { Status::Failed } else { Status::Ok },
+                    duration: None,
+                    detail: (!content.trim().is_empty()).then(|| content.trim().to_string()),
+                    outcome: is_error.then(|| "failed".to_string()),
+                }))
+            }
+        }
+        Kind::RetryScheduled {
+            attempt,
+            max_attempts,
+            ..
+        } => Some(Update::Working(Some(format!(
+            "Retrying ({attempt}/{max_attempts})"
+        )))),
+        Kind::RunEnd { outcome, error, .. } => {
+            // The run is over however it ended, so the indicator goes down
+            // before the notice explaining why.
+            let _ = updates.send(Update::Working(None)).await;
+            match outcome {
+                Outcome::Failed => Some(Update::Item(Item::Notice(match error {
+                    Some(error) => format!("run failed: {}", error.message),
+                    None => "run failed".into(),
+                }))),
+                Outcome::Aborted => Some(Update::Item(Item::Notice("Interrupted".into()))),
+                _ => None,
+            }
+        }
+        Kind::CompactionStart { .. } => Some(Update::Working(Some("Compacting".into()))),
+        Kind::CompactionEnd { outcome, .. } => {
+            let _ = updates.send(Update::Working(None)).await;
+            match outcome {
+                Outcome::Completed => Some(Update::Item(Item::Notice(
+                    "compacted the conversation".into(),
+                ))),
+                Outcome::Failed => Some(Update::Item(Item::Notice("compaction failed".into()))),
+                _ => None,
+            }
+        }
+        Kind::HandlerError { hook, error } => {
+            Some(Update::Item(Item::Notice(format!("{hook}: {error}"))))
+        }
+        Kind::Fault { message } => Some(Update::Item(Item::Notice(format!(
+            "session fault: {message}"
+        )))),
+        _ => None,
+    };
+    if let Some(update) = update
+        && updates.send(update).await.is_err()
+    {
+        return false;
+    }
+    true
 }
 
 /// `/compact` as its own durable operation.
@@ -601,7 +898,7 @@ async fn run_command(
 /// really is `/deploy`, with no registration step.
 async fn dispatch(
     project: &Arc<Project>,
-    sandbox: &Arc<Sandbox>,
+    sandbox: Option<&Arc<Sandbox>>,
     directory: &crate::working_directory::Context,
     rest: &str,
     cancel: crate::sandbox::tokio_util_lite::CancelRx,
@@ -693,7 +990,10 @@ async fn dispatch(
                 }
             }
         }
-        "sandbox" => sandbox.describe(),
+        "sandbox" => match sandbox {
+            Some(sandbox) => sandbox.describe(),
+            None => "Attached to a running house. This process does not own the microVM.".into(),
+        },
         "skills" => match crate::skills::discover(&project.workspace()) {
             Ok(skills) if skills.is_empty() => "No skills discovered.".to_string(),
             Ok(skills) => skills
@@ -737,6 +1037,7 @@ async fn dispatch(
         "quit" => return None,
         // Anything else is a tool, or nothing.
         other if project.runtime.tool(other).is_some() => {
+            let sandbox = sandbox?;
             return Some(run_tool(project, sandbox, directory, other, cancel).await);
         }
         other => {

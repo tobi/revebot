@@ -239,12 +239,24 @@ async fn run() -> anyhow::Result<ExitCode> {
         Command::Serve => Box::pin(serve_house(cli.bind)).await,
         Command::Tui => {
             let project = Project::load(std::env::current_dir()?)?;
-            let sandbox = Box::pin(start_sandbox(&project)).await?;
-            let result = reve::tui::session::run(project, sandbox.clone()).await;
-            let stopped = sandbox.stop().await;
-            result?;
-            stopped?;
-            Ok(ExitCode::SUCCESS)
+            match Box::pin(reve::house::client::connect(&project)).await? {
+                reve::house::client::Target::House(client) => {
+                    reve::tui::session::run_attached(project, client).await?;
+                    Ok(ExitCode::SUCCESS)
+                }
+                reve::house::client::Target::OneShot => {
+                    let sandbox = Box::pin(start_sandbox(&project)).await?;
+                    let result = reve::tui::session::run(project, sandbox.clone()).await;
+                    let stopped = sandbox.stop().await;
+                    result?;
+                    stopped?;
+                    Ok(ExitCode::SUCCESS)
+                }
+                reve::house::client::Target::Orphan { name } => {
+                    eprintln!("revebot: orphaned microVM {name}; run `revebot` to take it over");
+                    Ok(ExitCode::from(2))
+                }
+            }
         }
 
         Command::Curator { command } => run_curator(command),
@@ -272,19 +284,37 @@ async fn run() -> anyhow::Result<ExitCode> {
             if command.is_empty() {
                 anyhow::bail!("nothing to run");
             }
-            let (project, sandbox) = Box::pin(boot()).await?;
-            let _ = &project;
-            let output = sandbox
-                .exec(&command.join(" "), ExecOptions::default(), None)
-                .await?;
-            print!("{}", output.stdout);
-            eprint!("{}", output.stderr);
-            sandbox.stop().await?;
-            Ok(if output.success {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            })
+            let project = Project::load(std::env::current_dir()?)?;
+            match Box::pin(reve::house::client::connect(&project)).await? {
+                reve::house::client::Target::House(client) => {
+                    let output = client.exec(&command.join(" "), None, None).await?;
+                    print!("{}", output.stdout);
+                    eprint!("{}", output.stderr);
+                    Ok(if output.success {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
+                    })
+                }
+                reve::house::client::Target::OneShot => {
+                    let sandbox = Box::pin(start_sandbox(&project)).await?;
+                    let output = sandbox
+                        .exec(&command.join(" "), ExecOptions::default(), None)
+                        .await?;
+                    print!("{}", output.stdout);
+                    eprint!("{}", output.stderr);
+                    sandbox.stop().await?;
+                    Ok(if output.success {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
+                    })
+                }
+                reve::house::client::Target::Orphan { name } => {
+                    eprintln!("revebot: orphaned microVM {name}; run `revebot` to take it over");
+                    Ok(ExitCode::from(2))
+                }
+            }
         }
 
         Command::Tool { name, args } => {
@@ -301,14 +331,26 @@ async fn run() -> anyhow::Result<ExitCode> {
                 .ok_or_else(|| anyhow::anyhow!("--args must be a JSON object"))?
                 .clone();
 
-            let sandbox = Box::pin(start_sandbox(&project)).await?;
-            let result = project
-                .runtime
-                .call_tool(&name, object, sandbox.clone())
-                .await;
-            sandbox.stop().await?;
-            println!("{}", result?);
-            Ok(ExitCode::SUCCESS)
+            match Box::pin(reve::house::client::connect(&project)).await? {
+                reve::house::client::Target::House(client) => {
+                    println!("{}", client.tool(&name, object).await?);
+                    Ok(ExitCode::SUCCESS)
+                }
+                reve::house::client::Target::OneShot => {
+                    let sandbox = Box::pin(start_sandbox(&project)).await?;
+                    let result = project
+                        .runtime
+                        .call_tool(&name, object, sandbox.clone())
+                        .await;
+                    sandbox.stop().await?;
+                    println!("{}", result?);
+                    Ok(ExitCode::SUCCESS)
+                }
+                reve::house::client::Target::Orphan { name: vm } => {
+                    eprintln!("revebot: orphaned microVM {vm}; run `revebot` to take it over");
+                    Ok(ExitCode::from(2))
+                }
+            }
         }
     }
 }
@@ -439,12 +481,6 @@ fn tool_names(project: &Project) -> Vec<String> {
         names.push("(none)".into());
     }
     names
-}
-
-async fn boot() -> anyhow::Result<(Project, Arc<Sandbox>)> {
-    let project = Project::load(std::env::current_dir()?)?;
-    let sandbox = Box::pin(start_sandbox(&project)).await?;
-    Ok((project, sandbox))
 }
 
 async fn serve_house(bind: String) -> anyhow::Result<ExitCode> {
