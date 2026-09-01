@@ -1,7 +1,6 @@
 //! HTTP + WebSocket surface for the house.
 
 use std::fmt::Write as _;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -15,6 +14,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::net::{TcpListener, UnixListener};
 
+use super::tailnet::{self, Endpoint};
 use super::{CreateSpec, House};
 use crate::sandbox::ExecOptions;
 
@@ -23,18 +23,32 @@ struct AppState {
     house: Arc<House>,
 }
 
-pub async fn serve(house: House) -> anyhow::Result<()> {
+pub async fn serve(house: House, tailnet: Option<Endpoint>) -> anyhow::Result<()> {
     let house = Arc::new(house);
     let state = AppState {
         house: house.clone(),
     };
     let app = router(state);
 
-    let addr: SocketAddr = house
-        .bind()
-        .parse()
-        .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 7420)));
+    let addr = tailnet::parse_bind(house.bind());
     let tcp = TcpListener::bind(addr).await?;
+
+    let tailnet_listener = match tailnet
+        .as_ref()
+        .filter(|endpoint| endpoint.needs_extra_listener(addr))
+    {
+        Some(endpoint) => match TcpListener::bind(endpoint.addr()).await {
+            Ok(listener) => Some(listener),
+            Err(error) => {
+                eprintln!(
+                    "\x1b[31mrevebot:\x1b[0m tailnet {}: {error}",
+                    endpoint.addr()
+                );
+                None
+            }
+        },
+        None => None,
+    };
 
     let sock = house.sock().clone();
     let _ = std::fs::remove_file(&sock);
@@ -42,13 +56,25 @@ pub async fn serve(house: House) -> anyhow::Result<()> {
         let _ = std::fs::create_dir_all(parent);
     }
     let unix = UnixListener::bind(&sock)?;
-    house.write_house_json()?;
+    house.write_house_json(
+        tailnet
+            .as_ref()
+            .map(|endpoint| endpoint.addr().to_string())
+            .as_deref(),
+    )?;
 
     let tcp_app = app.clone();
-    let unix_app = app;
+    let unix_app = app.clone();
+    let over_tailnet = async {
+        match tailnet_listener {
+            Some(listener) => axum::serve(listener, app.into_make_service()).await,
+            None => std::future::pending().await,
+        }
+    };
     tokio::select! {
         result = axum::serve(tcp, tcp_app.into_make_service()) => result?,
         result = axum::serve(unix, unix_app.into_make_service()) => result?,
+        result = over_tailnet => result?,
     }
     Ok(())
 }

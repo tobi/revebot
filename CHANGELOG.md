@@ -25,6 +25,10 @@ starts in microseconds. Concurrency is tokio tasks over single-owner session sta
 
 ### Added
 
+- **Tailscale** — `revebot serve` detects a running host `tailscaled` via the
+  LocalAPI socket and binds the same HTTP/WS surface on the node's Tailscale
+  IPv4 (same port as `--bind`). The bearer token is still required; the tailnet
+  URL is printed at start. No userspace node, no TUN, no `--tailnet` flag.
 - **Skill improvement** — Hermes `skill_manage` / `skill_view` / `skills_list` as
   house tools. Class-level create/patch, archive-on-delete, `/learn`, and a
   hidden nudge every 15 user turns. Creates are curator-managed. Bundled skills

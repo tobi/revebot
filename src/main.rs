@@ -451,13 +451,18 @@ async fn serve_house(bind: String) -> anyhow::Result<ExitCode> {
     let project = Project::load(std::env::current_dir()?)?;
     let spinner = Spinner::new();
     let house = Box::pin(House::boot(project, bind, &spinner)).await?;
+    let local = reve::house::tailnet::parse_bind(house.bind());
+    let tailnet = reve::house::tailnet::detect(local.port()).await;
     let url = format!("http://{}/", house.bind());
     println!("\x1b[1mrevebot\x1b[0m house on {url}");
     println!("  token  {}", house.token());
     println!("  open   {url}?token={}", house.token());
+    if let Some(ref tailnet) = tailnet {
+        println!("  tailnet {}  (token required)", tailnet.origin());
+    }
     let serving = house.clone();
     let result = tokio::select! {
-        result = reve::house::serve::serve(serving) => result,
+        result = reve::house::serve::serve(serving, tailnet) => result,
         _ = tokio::signal::ctrl_c() => Ok(()),
     };
     let _ = house.shutdown().await;
