@@ -41,6 +41,8 @@ interruption never happened.
 There is no machine-wide Reve profile, home-directory prompt, global model file, or session
 store outside the agent directory.
 
+<img width="2458" height="1956" alt="image" src="https://github.com/user-attachments/assets/5662badf-9fef-4850-a5e6-f4a668a9863a" />
+
 ## Install and create an agent
 
 Requirements:
