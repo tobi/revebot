@@ -14,7 +14,7 @@ use reve::sandbox::{ExecOptions, Sandbox};
 #[command(
     name = "revebot",
     version,
-    about = "A local house of durable bots: Rust core, Lua scripting, mandatory microVM"
+    about = "A house of agents in your directory"
 )]
 struct Cli {
     /// Bind address for the house server (default 127.0.0.1:7420).

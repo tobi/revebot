@@ -47,7 +47,8 @@ SYM_VM := -s Bots -s Policies
 COV_HARNESS := --count-satisfying CovBatchCompleted --count-satisfying CovTwoToolsLive \
 	--count-satisfying CovLaterCallSettledFirst --count-satisfying CovInterruptedNeverSynthesized \
 	--count-satisfying CovBothLanesOpen
-COV_VM := --count-satisfying CovRebuildAfterPolicyEdit --count-satisfying CovIdleStopped \
+COV_VM := --count-satisfying CovRebuildAfterPolicyEdit \
+	--count-satisfying CovLegacyIncompatibleDefinition --count-satisfying CovIdleStopped \
 	--count-satisfying CovTwoBotsExecuting --count-satisfying CovUpsertWhileRunning \
 	--count-satisfying CovRestartForSecrets --count-satisfying CovStaleUnderConcurrency
 REMOTE_HOST ?=

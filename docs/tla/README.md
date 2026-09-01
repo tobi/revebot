@@ -135,10 +135,11 @@ guest: `vmEffective`) — plus the process (`house`, `held`, `active` effects, t
 
 Actions are the updates that can arrive while bots are mid-effect: `EditPolicy`,
 `RotateHostSecret` (env var changed behind Reve's back), `UpsertSecret`
-(AskUserForSecret saved), `HouseBoot` (reclaim → reuse-by-fingerprint or
-`build().replace()` with provisioning that may fail → optional hold), `HouseStop`,
-`HouseCrash` (VM left running, reclaimed next boot), `HouseCrashMidBuild`, and
-`Acquire`/`Release`/`IdleStop` for effects.
+(AskUserForSecret saved), `LegacyIncompatibleDefinition` (an older persisted desktop
+definition whose matching fingerprint predates the inbound-policy requirement),
+`HouseBoot` (reclaim → validated reuse-by-fingerprint or `build().replace()` with
+provisioning that may fail → optional hold), `HouseStop`, `HouseCrash` (VM left running,
+reclaimed next boot), `HouseCrashMidBuild`, and `Acquire`/`Release`/`IdleStop` for effects.
 
 | Invariant | Rule |
 |---|---|
@@ -147,6 +148,7 @@ Actions are the updates that can arrive while bots are mid-effect: `EditPolicy`,
 | `InvNoAdoptedVm` | A dead process's VM is reclaimed, never adopted with live effects. |
 | `InvFingerprintHonest` | If the fingerprint names a policy, the disk was built from it *and* provisioned. |
 | `InvRunningDiskMatchesBootPolicy` | The house runs the disk for the `config.yml` it booted with (edits wait for the next boot). |
+| `InvRunningDefinitionUsable` | A fingerprint match cannot reuse a desktop definition whose network policy denies its published localhost ports. |
 | `InvDigestsDescribeGuest` | `secret_digests` describes the running guest, never merely the definition. |
 | `InvIdleAcquireIsFresh` | An effect that starts while no other effect is live sees the host's current secret set. |
 
@@ -167,6 +169,11 @@ Actions are the updates that can arrive while bots are mid-effect: `EditPolicy`,
    `upsert_secret` leaves `secret_digests` describing the guest
    (`sandbox::tests::a_hold_blocks_idle_stop_but_not_a_secret_restart`).
 3. Same root cause for a host environment rotation while the house holds the VM.
+4. **Published desktop ports that could never receive a connection.** An older persisted
+   definition had both localhost port mappings but retained microsandbox's fail-closed
+   default ingress policy. A matching Reve fingerprint reused it forever. Fix: validate
+   the persisted definition before reuse and rebuild definitions that cannot admit their
+   desktop ports (`sandbox::tests::a_desktop_definition_must_admit_its_published_ports`).
 
 Known, deliberate gap (`CovStaleUnderConcurrency` is non-zero): an effect that starts
 while *another* effect is live shares that guest and may see the previous secret set;
@@ -183,6 +190,7 @@ status, `revebot exec` outside a house.
 | Crash mid-build keeps the fingerprint (pre-fix) | `InvFingerprintHonest` |
 | `upsert_secret` claims the new digest on a running guest (pre-fix) | `InvDigestsDescribeGuest` |
 | Hold counts as an effect (pre-fix) | `InvIdleAcquireIsFresh` |
+| Reuse trusts only the fingerprint and ignores an incompatible desktop network policy | `InvRunningDefinitionUsable` |
 | Stale idle timer stops a guest with a live effect | `InvEffectNeedsRunningVm` |
 | Idle timer ignores the hold | `InvHeldVmStaysUp` |
 

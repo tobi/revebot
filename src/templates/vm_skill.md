@@ -8,7 +8,7 @@ description: >
 
 # The microVM
 
-Reve does not run model-authored commands on the host. Every shell tool (`bash`, `ctx.sh`, `reve exec`) runs inside a microsandbox microVM. If the VM cannot boot, Reve refuses to start. There is no host/local fallback.
+Reve does not run model-authored commands on the host. Every shell tool (`bash`, `ctx.sh`, `revebot exec`) runs inside a microsandbox microVM. If the VM cannot boot, Reve refuses to start. There is no host/local fallback.
 
 The default guest is `ghcr.io/tobi/wrap:desktop`. Workloads run as unprivileged `user` (`HOME=/home/user`), with uid/gid realigned to the host owner of `/workspace` so the bind mount is writable without chowning host files.
 

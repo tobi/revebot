@@ -4838,6 +4838,7 @@ dependencies = [
  "glob",
  "microsandbox",
  "microsandbox-network",
+ "microsandbox-types",
  "mlua",
  "parking_lot",
  "rand 0.10.2",

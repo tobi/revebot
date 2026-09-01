@@ -18,7 +18,8 @@ use std::time::Duration;
 use microsandbox::sandbox::StatVirtualization;
 use microsandbox::size::SizeExt;
 use microsandbox::{Sandbox as MsbSandbox, SandboxModificationBuilder, SecretSource};
-use microsandbox_network::policy::{NetworkPolicy, NetworkProfile, Rule};
+use microsandbox_network::policy::{Action as PolicyAction, NetworkPolicy, NetworkProfile, Rule};
+use microsandbox_types::Action as NetworkAction;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -532,35 +533,46 @@ impl Sandbox {
         if reusable {
             // Refresh source references while stopped. Microsandbox resolves
             // their values only when the VM starts; no credential is persisted.
+            let mut definition_usable = true;
             if let Ok(handle) = MsbSandbox::get(&name).await {
                 let config = handle.config().map_err(|e| secret_config_error(&e))?;
-                let existing = persisted_secret_names(&config);
-                remove_secret_definitions(handle.modify(), &existing, true).await?;
-                install_secret_definitions(handle.modify(), &policy.secrets, true, &secret_root)
+                definition_usable = desktop_definition_is_usable(&policy, &config);
+                if definition_usable {
+                    let existing = persisted_secret_names(&config);
+                    remove_secret_definitions(handle.modify(), &existing, true).await?;
+                    install_secret_definitions(
+                        handle.modify(),
+                        &policy.secrets,
+                        true,
+                        &secret_root,
+                    )
                     .await?;
+                }
             }
-            progress.stage(&format!("restarting microVM {name}"));
-            if let Ok(vm) = MsbSandbox::start(&name).await {
-                let desktop = desktop_from_config(vm.config());
-                let secret_digests = runtime_secret_digests(&policy.secrets, &secret_root);
-                let sandbox = Self {
-                    secrets: parking_lot::Mutex::new(policy.secrets.clone()),
-                    secret_root,
-                    policy,
-                    host_workspace,
-                    name,
-                    desktop,
-                    vm: Arc::new(Mutex::new(VmState {
-                        vm: Some(vm),
-                        active: 0,
-                        holds: 0,
-                        generation: 0,
-                        secret_digests,
-                    })),
-                };
-                sandbox.prepare_guest().await?;
-                progress.finish("sandbox ready");
-                return Ok(sandbox);
+            if definition_usable {
+                progress.stage(&format!("restarting microVM {name}"));
+                if let Ok(vm) = MsbSandbox::start(&name).await {
+                    let desktop = desktop_from_config(vm.config());
+                    let secret_digests = runtime_secret_digests(&policy.secrets, &secret_root);
+                    let sandbox = Self {
+                        secrets: parking_lot::Mutex::new(policy.secrets.clone()),
+                        secret_root,
+                        policy,
+                        host_workspace,
+                        name,
+                        desktop,
+                        vm: Arc::new(Mutex::new(VmState {
+                            vm: Some(vm),
+                            active: 0,
+                            holds: 0,
+                            generation: 0,
+                            secret_digests,
+                        })),
+                    };
+                    sandbox.prepare_guest().await?;
+                    progress.finish("sandbox ready");
+                    return Ok(sandbox);
+                }
             }
         }
 
@@ -1462,6 +1474,19 @@ fn reserve_localhost_ports(count: usize) -> Result<Vec<u16>> {
     Ok(ports)
 }
 
+fn desktop_definition_is_usable(policy: &Policy, config: &microsandbox::SandboxConfig) -> bool {
+    if !is_desktop_image(&policy.image) {
+        return true;
+    }
+    config
+        .spec
+        .network
+        .policy
+        .as_ref()
+        .is_none_or(|network| network.default_ingress == NetworkAction::Allow)
+        && desktop_from_config(config).is_some()
+}
+
 fn desktop_from_config(config: &microsandbox::SandboxConfig) -> Option<Desktop> {
     let mut novnc = None;
     let mut vnc = None;
@@ -1489,6 +1514,26 @@ async fn forget_fingerprint(path: &Path) -> Result<()> {
             path.display()
         ))),
     }
+}
+
+fn guest_network_policy(policy: &Policy, desktop: bool) -> Result<NetworkPolicy> {
+    let mut network = if policy.open {
+        NetworkPolicy::from_profiles([NetworkProfile::Public])
+    } else {
+        let mut network = NetworkPolicy::none();
+        network.rules.push(Rule::allow_dns());
+        network
+    };
+    if desktop {
+        network.default_ingress = PolicyAction::Allow;
+    }
+    let hosts = policy.egress_hosts();
+    if !hosts.is_empty() {
+        network = network
+            .allow_domains(hosts)
+            .map_err(|e| SandboxError::Policy(format!("invalid allowed host: {e}")))?;
+    }
+    Ok(network)
 }
 
 /// Turn a [`Policy`] into a booted VM.
@@ -1540,21 +1585,9 @@ async fn build(
         None
     };
 
-    // Open (the default): public internet + gateway DNS.
-    // Locked down: deny both directions, gateway DNS, then named hosts.
-    let mut network = if policy.open {
-        NetworkPolicy::from_profiles([NetworkProfile::Public])
-    } else {
-        let mut network = NetworkPolicy::none();
-        network.rules.push(Rule::allow_dns());
-        network
-    };
-    let hosts = policy.egress_hosts();
-    if !hosts.is_empty() {
-        network = network
-            .allow_domains(hosts)
-            .map_err(|e| SandboxError::Policy(format!("invalid allowed host: {e}")))?;
-    }
+    // Desktop forwarding needs inbound traffic from the localhost port proxies;
+    // this does not relax the independently configured guest egress policy.
+    let network = guest_network_policy(policy, desktop_ports.is_some())?;
     builder = builder.network(move |n| n.enabled(true).policy(network));
     if let Some(desktop) = desktop_ports {
         // After network(): `.network()` replaces the local config, so ports
@@ -2093,6 +2126,58 @@ hosts:
             "http://127.0.0.1:7608/vnc.html?autoconnect=1&resize=scale&reconnect=1"
         );
         assert_eq!(desktop.vnc_addr(), "127.0.0.1:7590");
+    }
+
+    #[test]
+    fn locked_down_desktop_keeps_published_ports_reachable() {
+        let policy = Policy {
+            open: false,
+            ..Policy::default()
+        };
+        let desktop = guest_network_policy(&policy, true).expect("desktop network policy");
+        assert_eq!(desktop.default_egress, PolicyAction::Deny);
+        assert_eq!(desktop.default_ingress, PolicyAction::Allow);
+
+        let headless = guest_network_policy(&policy, false).expect("headless network policy");
+        assert_eq!(headless.default_egress, PolicyAction::Deny);
+        assert_eq!(headless.default_ingress, PolicyAction::Deny);
+    }
+
+    #[test]
+    fn a_desktop_definition_must_admit_its_published_ports() {
+        let mut config = microsandbox::SandboxConfig::default();
+        config.spec.network.ports = vec![
+            microsandbox::sandbox::PublishedPortSpec {
+                host_port: 7608,
+                guest_port: DESKTOP_NOVNC_GUEST_PORT,
+                protocol: microsandbox::sandbox::PortProtocol::Tcp,
+                host_bind: "127.0.0.1".into(),
+            },
+            microsandbox::sandbox::PublishedPortSpec {
+                host_port: 7590,
+                guest_port: DESKTOP_VNC_GUEST_PORT,
+                protocol: microsandbox::sandbox::PortProtocol::Tcp,
+                host_bind: "127.0.0.1".into(),
+            },
+        ];
+        let mut network = microsandbox_types::NetworkPolicy {
+            default_egress: NetworkAction::Deny,
+            default_ingress: NetworkAction::Allow,
+            rules: Vec::new(),
+        };
+        config.spec.network.policy = Some(network.clone());
+        assert!(desktop_definition_is_usable(&Policy::default(), &config));
+
+        network.default_ingress = NetworkAction::Deny;
+        config.spec.network.policy = Some(network);
+        assert!(!desktop_definition_is_usable(&Policy::default(), &config));
+        assert!(desktop_definition_is_usable(
+            &Policy {
+                image: "alpine".into(),
+                ..Policy::default()
+            },
+            &config,
+        ));
     }
 
     #[tokio::test]

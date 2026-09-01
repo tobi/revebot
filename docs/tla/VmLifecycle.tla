@@ -39,6 +39,7 @@ VARIABLES
     vmProvisioned,  \* BOOLEAN: build's provisioning/bootstrap finished ok
     vmDefined,      \* {None} \cup Versions: secrets in the persisted definition
     vmEffective,    \* {None} \cup Versions: secrets live in the running guest
+    vmDefinitionUsable, \* BOOLEAN: persisted ports/policy can provide the configured desktop
     \* .reve/sandbox-fingerprint
     fingerprint,    \* {None} \cup Policies
     \* the Reve process
@@ -54,8 +55,8 @@ VARIABLES
                     \* set was not the host's at that moment
 
 vars == <<t, policy, desired, vmStatus, vmDisk, vmProvisioned, vmDefined,
-          vmEffective, fingerprint, house, bootedPolicy, held, active, digests,
-          idleArmed, bots, staleAcquire>>
+          vmEffective, vmDefinitionUsable, fingerprint, house, bootedPolicy, held,
+          active, digests, idleArmed, bots, staleAcquire>>
 
 Running == vmStatus = "running"
 Up == house = "up"
@@ -73,6 +74,7 @@ Init ==
     /\ vmProvisioned = FALSE
     /\ vmDefined = None
     /\ vmEffective = None
+    /\ vmDefinitionUsable = FALSE
     /\ fingerprint = None
     /\ house = "down"
     /\ bootedPolicy = None
@@ -91,7 +93,8 @@ EditPolicy(p) ==
     /\ p # policy
     /\ policy' = p
     /\ UNCHANGED <<desired, vmStatus, vmDisk, vmProvisioned, vmDefined, vmEffective,
-                   fingerprint, house, bootedPolicy, held, active, digests, idleArmed, bots, staleAcquire>>
+                   vmDefinitionUsable, fingerprint, house, bootedPolicy, held, active,
+                   digests, idleArmed, bots, staleAcquire>>
 
 \* A `$` host-environment source or another dynamic source such as `$(command)`
 \* changed. Reve notices only through runtime_secret_digests at acquire.
@@ -100,7 +103,8 @@ RotateHostSecret ==
     /\ desired < MaxSecretV
     /\ desired' = desired + 1
     /\ UNCHANGED <<policy, vmStatus, vmDisk, vmProvisioned, vmDefined, vmEffective,
-                   fingerprint, house, bootedPolicy, held, active, digests, idleArmed, bots, staleAcquire>>
+                   vmDefinitionUsable, fingerprint, house, bootedPolicy, held, active,
+                   digests, idleArmed, bots, staleAcquire>>
 
 -----------------------------------------------------------------------------
 \* microsandbox stop of the running instance. Start reads the definition's
@@ -109,6 +113,22 @@ RotateHostSecret ==
 StopVm ==
     /\ vmStatus' = "stopped"
     /\ vmEffective' = None
+
+\* A persisted definition from an older Reve may have the right policy
+\* fingerprint but a network policy that denies its published desktop ports.
+LegacyIncompatibleDefinition ==
+    /\ Bounded /\ Tick
+    /\ house = "down"
+    /\ vmStatus = "absent"
+    /\ vmStatus' = "stopped"
+    /\ vmDisk' = policy
+    /\ vmProvisioned' = TRUE
+    /\ vmDefined' = desired
+    /\ vmEffective' = None
+    /\ vmDefinitionUsable' = FALSE
+    /\ fingerprint' = policy
+    /\ UNCHANGED <<policy, desired, house, bootedPolicy, held, active, digests,
+                   idleArmed, bots, staleAcquire>>
 
 \* Process boot: reclaim a namesake left running by a dead process, start
 \* (reuse or build). The house then hold()s for its lifetime; `revebot exec`
@@ -125,12 +145,15 @@ HouseBoot(ok, hold) ==
     /\ LET afterReclaim == IF vmStatus = "running" THEN "stopped" ELSE vmStatus
        IN \/ /\ afterReclaim = "stopped"
              /\ fingerprint = policy
+             /\ vmDefinitionUsable
+             /\ vmDefinitionUsable' = vmDefinitionUsable
              /\ vmDefined' = desired
              /\ vmStatus' = "running"
              /\ vmEffective' = desired
              /\ digests' = desired
              /\ UNCHANGED <<vmDisk, vmProvisioned, fingerprint>>
-          \/ /\ ~(afterReclaim = "stopped" /\ fingerprint = policy)
+          \/ /\ ~(afterReclaim = "stopped" /\ fingerprint = policy /\ vmDefinitionUsable)
+             /\ vmDefinitionUsable' = TRUE
              /\ vmStatus' = "running"
              /\ vmDisk' = policy
              /\ vmProvisioned' = ok
@@ -154,6 +177,7 @@ HouseCrashMidBuild ==
     /\ vmDefined' = desired
     /\ vmEffective' = None
     /\ fingerprint' = None
+    /\ vmDefinitionUsable' = TRUE
     /\ UNCHANGED <<policy, desired, house, bootedPolicy, held, active,
                    digests, idleArmed, bots, staleAcquire>>
 
@@ -168,8 +192,8 @@ HouseStop ==
     /\ idleArmed' = FALSE
     /\ bots' = [b \in Bots |-> "idle"]
     /\ IF Running THEN StopVm ELSE UNCHANGED <<vmStatus, vmEffective>>
-    /\ UNCHANGED <<policy, desired, vmDisk, vmProvisioned, vmDefined, fingerprint,
-                   bootedPolicy, staleAcquire>>
+    /\ UNCHANGED <<policy, desired, vmDisk, vmProvisioned, vmDefined,
+                   vmDefinitionUsable, fingerprint, bootedPolicy, staleAcquire>>
 
 \* The process dies. The VM keeps running in microsandbox (reclaimed at the
 \* next boot). Every live effect dies with the process.
@@ -183,7 +207,8 @@ HouseCrash ==
     /\ idleArmed' = FALSE
     /\ bots' = [b \in Bots |-> "idle"]
     /\ UNCHANGED <<policy, desired, vmStatus, vmDisk, vmProvisioned, vmDefined,
-                   vmEffective, fingerprint, bootedPolicy, staleAcquire>>
+                   vmEffective, vmDefinitionUsable, fingerprint, bootedPolicy,
+                   staleAcquire>>
 
 -----------------------------------------------------------------------------
 \* Effects. Sandbox::acquire / release, one per ctx.sh / exec / file op.
@@ -218,7 +243,8 @@ Acquire(b) ==
           /\ ~(active = 0 /\ digests # desired)
           /\ UNCHANGED <<vmStatus, vmDefined, vmEffective, digests>>
           /\ staleAcquire' = (staleAcquire \/ (active = 0 /\ vmEffective # desired))
-    /\ UNCHANGED <<policy, desired, vmDisk, vmProvisioned, fingerprint, house, bootedPolicy, held>>
+    /\ UNCHANGED <<policy, desired, vmDisk, vmProvisioned, vmDefinitionUsable,
+                   fingerprint, house, bootedPolicy, held>>
 
 \* release(): active -= 1; the last one arms the idle timer.
 Release(b) ==
@@ -229,7 +255,8 @@ Release(b) ==
     /\ active' = active - 1
     /\ idleArmed' = (active - 1 = 0 /\ ~held)
     /\ UNCHANGED <<policy, desired, vmStatus, vmDisk, vmProvisioned, vmDefined,
-                   vmEffective, fingerprint, house, bootedPolicy, held, digests, staleAcquire>>
+                   vmEffective, vmDefinitionUsable, fingerprint, house, bootedPolicy,
+                   held, digests, staleAcquire>>
 
 \* The idle timer fires: stop only if still idle (may_stop). Any acquire in
 \* between disarmed it (generation moved).
@@ -242,8 +269,9 @@ IdleStop ==
     /\ idleArmed' = FALSE
     /\ digests' = None
     /\ IF Running THEN StopVm ELSE UNCHANGED <<vmStatus, vmEffective>>
-    /\ UNCHANGED <<policy, desired, vmDisk, vmProvisioned, vmDefined, fingerprint,
-                   house, bootedPolicy, held, active, bots, staleAcquire>>
+    /\ UNCHANGED <<policy, desired, vmDisk, vmProvisioned, vmDefined,
+                   vmDefinitionUsable, fingerprint, house, bootedPolicy, held,
+                   active, bots, staleAcquire>>
 
 \* AskUserForSecret accepted: config.yml updated (desired moves), then
 \* Sandbox::upsert_secret reinstalls the definition with next_start and
@@ -256,12 +284,14 @@ UpsertSecret ==
     /\ vmDefined' = IF vmStatus = "absent" THEN vmDefined ELSE desired + 1
     \* secret_digests keeps describing the running guest; the next effect-idle
     \* acquire sees the difference and restarts
-    /\ UNCHANGED <<policy, vmStatus, vmDisk, vmProvisioned, vmEffective, fingerprint,
-                   house, bootedPolicy, held, active, digests, idleArmed, bots, staleAcquire>>
+    /\ UNCHANGED <<policy, vmStatus, vmDisk, vmProvisioned, vmEffective,
+                   vmDefinitionUsable, fingerprint, house, bootedPolicy, held,
+                   active, digests, idleArmed, bots, staleAcquire>>
 
 Next ==
     \/ \E p \in Policies: EditPolicy(p)
     \/ RotateHostSecret
+    \/ LegacyIncompatibleDefinition
     \/ \E ok, hold \in BOOLEAN: HouseBoot(ok, hold)
     \/ HouseCrashMidBuild
     \/ HouseStop
@@ -282,6 +312,7 @@ TypeOK ==
     /\ vmProvisioned \in BOOLEAN
     /\ vmDefined \in {None} \cup Versions
     /\ vmEffective \in {None} \cup Versions
+    /\ vmDefinitionUsable \in BOOLEAN
     /\ fingerprint \in {None} \cup Policies
     /\ house \in HouseStates
     /\ bootedPolicy \in {None} \cup Policies
@@ -315,6 +346,10 @@ InvFingerprintHonest ==
 InvRunningDiskMatchesBootPolicy ==
     Up /\ Running => vmDisk = bootedPolicy
 
+\* A running desktop definition must admit its published localhost ports.
+InvRunningDefinitionUsable ==
+    Up /\ Running => vmDefinitionUsable
+
 \* The digest bookkeeping describes the running guest, not the definition.
 InvDigestsDescribeGuest ==
     Running /\ digests # None => digests = vmEffective
@@ -328,6 +363,8 @@ InvIdleAcquireIsFresh ==
 
 \* Coverage probes.
 CovRebuildAfterPolicyEdit == Up /\ Running /\ vmDisk = policy /\ fingerprint # None
+CovLegacyIncompatibleDefinition ==
+    house = "down" /\ vmStatus = "stopped" /\ ~vmDefinitionUsable
 CovIdleStopped == Up /\ ~Running /\ ~held
 CovTwoBotsExecuting == \A b \in Bots: bots[b] = "executing"
 CovUpsertWhileRunning == Running /\ vmDefined # vmEffective

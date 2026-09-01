@@ -16,6 +16,7 @@ use std::sync::Arc;
 use reve::lua::Runtime;
 use reve::sandbox::{ExecOptions, Sandbox, Secret, Silent, tokio_util_lite};
 use reve::tools::Toolbox;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[expect(
     clippy::unwrap_used,
@@ -116,6 +117,69 @@ async fn a_lua_tool_runs_its_commands_inside_the_microvm() {
 
     sandbox.stop().await.unwrap();
     let _ = microsandbox::Sandbox::remove("reve-it-lua").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "boots a real desktop microVM"]
+async fn desktop_ports_accept_local_connections() {
+    const NAME: &str = "reve-it-desktop-ports";
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    let policy = reve::sandbox::Policy {
+        name: Some(NAME.into()),
+        provision: false,
+        ..Default::default()
+    };
+    let sandbox = Box::pin(Sandbox::start(
+        policy,
+        &workspace,
+        dir.path().join(".reve"),
+        &Silent,
+    ))
+    .await
+    .expect("the desktop microVM must boot");
+    let desktop = sandbox.desktop().expect("the desktop publishes VNC ports");
+
+    let mut novnc = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::TcpStream::connect(("127.0.0.1", desktop.novnc_port)),
+    )
+    .await
+    .expect("the noVNC port accepts promptly")
+    .expect("the published noVNC port reaches the desktop guest");
+    novnc
+        .write_all(b"GET /vnc.html HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .expect("send the noVNC request");
+    let mut response = [0_u8; 12];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        novnc.read_exact(&mut response),
+    )
+    .await
+    .expect("the noVNC server responds promptly")
+    .expect("read the noVNC status line");
+    assert_eq!(&response, b"HTTP/1.1 200");
+
+    let mut vnc = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::TcpStream::connect(("127.0.0.1", desktop.vnc_port)),
+    )
+    .await
+    .expect("the VNC port accepts promptly")
+    .expect("the published VNC port reaches the desktop guest");
+    let mut handshake = [0_u8; 12];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        vnc.read_exact(&mut handshake),
+    )
+    .await
+    .expect("the VNC server responds promptly")
+    .expect("read the VNC handshake");
+    assert!(handshake.starts_with(b"RFB "));
+
+    sandbox.stop().await.unwrap();
+    let _ = microsandbox::Sandbox::remove(NAME).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
