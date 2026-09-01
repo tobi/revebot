@@ -87,6 +87,10 @@ starts in microseconds. Concurrency is tokio tasks over single-owner session sta
 
 - Serialized microVM stop and restart transitions so concurrent tools and the first effect
   after idle shutdown reuse one sandbox without racing its persisted runtime.
+- Kept every house-tool parameter schema rooted at a plain JSON object so strict
+  OpenRouter providers accept turns that expose `SendUserMessage`.
+- Added `/compact`, `/new`, and `/fork` to browser slash autocomplete alongside
+  the current skills and plugin commands.
 
 ### Pending
 

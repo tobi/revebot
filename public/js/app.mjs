@@ -2,6 +2,7 @@ import { BLOUB } from "./lib/bloub.mjs";
 import * as ReveLog from "./lib/log.mjs";
 import { formatText as renderMarkdown } from "./lib/markdown.mjs";
 import { emitServerState, nextRequestId } from "./events.mjs";
+import { parseConversationCommand } from "./conversation-commands.mjs";
 import "./components/reve-feed.mjs";
 import "./components/reve-autocomplete.mjs";
 import "./components/reve-attachment.mjs";
@@ -844,16 +845,6 @@ function activeConversationUrl(botId) {
   return location.origin + location.pathname + location.search + "#/" + encodeURIComponent(botId);
 }
 
-function parseConversationCommand(text, attachmentCount) {
-  if (attachmentCount) return null;
-  const match = /^\/(compact|new|fork)(?:\s+([\s\S]*))?$/.exec((text || "").trim());
-  if (!match) return null;
-  return {
-    command: match[1],
-    instructions: match[1] === "compact" ? (match[2] || "").trim() || null : null,
-    invalidArguments: match[1] !== "compact" && Boolean((match[2] || "").trim()),
-  };
-}
 
 async function runConversationCommand({
   botId,
@@ -1848,9 +1839,6 @@ function closeDrawers() {
 window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeDrawers();
 });
-if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("/sw.js").catch(() => {});
-}
 let installEvent = null;
 window.addEventListener("beforeinstallprompt", (e) => {
   e.preventDefault();

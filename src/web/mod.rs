@@ -50,6 +50,7 @@ mod tests {
         assert!(html.contains("<reve-feed"));
         assert!(html.contains("<reve-composer"));
         assert!(html.contains("<reve-autocomplete"));
+        assert!(html.contains("/js/register-service-worker.mjs"));
     }
 
     #[test]
@@ -70,6 +71,10 @@ mod tests {
         let manifest = std::str::from_utf8(manifest).expect("UTF-8 manifest");
         assert!(manifest.contains("/js/app.mjs"));
         assert!(!manifest.contains("AGENTS.md"));
+        let (service_worker, _) = asset("/sw.js").expect("service worker");
+        let service_worker = std::str::from_utf8(service_worker).expect("UTF-8 service worker");
+        assert!(service_worker.contains("/js/conversation-commands.mjs"));
+        assert!(service_worker.contains("/js/register-service-worker.mjs"));
         assert!(!manifest.contains("/index.html"));
     }
 }

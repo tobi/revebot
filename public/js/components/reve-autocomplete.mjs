@@ -1,5 +1,6 @@
 import { emitIntent, nextRequestId, SERVER_STATE_EVENT } from "../events.mjs";
 import { BLOUB } from "../lib/bloub.mjs";
+import { CONVERSATION_COMMANDS } from "../conversation-commands.mjs";
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -29,6 +30,15 @@ function score(query, fields) {
     else if (value.includes(query)) best = Math.max(best, 40);
   }
   return best;
+}
+
+const CONVERSATION_COMMAND_NAMES = new Set(CONVERSATION_COMMANDS.map((command) => command.name));
+
+function slashCatalog(skills) {
+  return [
+    ...CONVERSATION_COMMANDS,
+    ...(skills || []).filter((skill) => !CONVERSATION_COMMAND_NAMES.has(skill.name)),
+  ];
 }
 
 function matchesResponse(detail, requestId, sourceKey, currentKey) {
@@ -216,7 +226,7 @@ export class ReveAutocomplete extends HTMLElement {
       this.#render();
       return;
     }
-    this.#catalog = token.trigger === "@" ? detail.data.bots || [] : detail.data.skills || [];
+    this.#catalog = token.trigger === "@" ? detail.data.bots || [] : slashCatalog(detail.data.skills);
     this.#loading = false;
     this.#error = "";
     this.#token = token;
@@ -237,9 +247,18 @@ export class ReveAutocomplete extends HTMLElement {
         if (rank) items.push({ kind: "bot", rank, name: bot.name, insert: `@${bot.name} `, bot });
       }
     } else {
-      for (const skill of this.#catalog) {
-        const rank = score(query, [skill.name, skill.description]);
-        if (rank) items.push({ kind: "skill", rank, name: skill.name, insert: `/${skill.name} `, skill });
+      for (const entry of this.#catalog) {
+        const rank = score(query, [entry.name, entry.description]);
+        if (!rank) continue;
+        const command = entry.source === "command";
+        const suffix = command && !entry.acceptsArguments ? "" : " ";
+        items.push({
+          kind: command ? "command" : "skill",
+          rank,
+          name: entry.name,
+          insert: `/${entry.name}${suffix}`,
+          description: entry.description,
+        });
       }
     }
     items.sort((left, right) => right.rank - left.rank || left.name.localeCompare(right.name));
@@ -252,13 +271,13 @@ export class ReveAutocomplete extends HTMLElement {
     const token = this.#token;
     if (!token) return;
     const fragment = document.createDocumentFragment();
-    fragment.append(element("div", "ac-cap", token.trigger === "@" ? "Bots" : "Skills"));
+    fragment.append(element("div", "ac-cap", token.trigger === "@" ? "Bots" : "Commands"));
     if (this.#loading) {
       fragment.append(element("div", "ac-empty", "Refreshing…"));
     } else if (this.#error) {
       fragment.append(element("div", "ac-empty", this.#error));
     } else if (!this.#items.length) {
-      fragment.append(element("div", "ac-empty", token.trigger === "@" ? "No matching bots" : "No matching skills"));
+      fragment.append(element("div", "ac-empty", token.trigger === "@" ? "No matching bots" : "No matching commands"));
     } else {
       for (const [index, item] of this.#items.entries()) {
         const row = element("div", `ac-item${index === this.#selected ? " on" : ""}`);
@@ -272,7 +291,7 @@ export class ReveAutocomplete extends HTMLElement {
         meta.append(name);
         const description = item.kind === "bot"
           ? item.bot.title || item.bot.description || item.bot.id
-          : item.skill.description;
+          : item.description;
         if (description) meta.append(element("div", "d", description));
         row.append(meta);
         fragment.append(row);
@@ -280,7 +299,7 @@ export class ReveAutocomplete extends HTMLElement {
     }
     const hint = element("div", "ac-hint");
     hint.append(
-      element("span", "", token.trigger === "@" ? "@ mention a teammate" : "/ invoke a skill"),
+      element("span", "", token.trigger === "@" ? "@ mention a teammate" : "/ command or skill"),
       element("span", "", "↑↓  Tab"),
     );
     fragment.append(hint);
@@ -391,4 +410,4 @@ export class ReveAutocomplete extends HTMLElement {
 
 customElements.define("reve-autocomplete", ReveAutocomplete);
 
-export { matchesResponse, score, tokenAt };
+export { matchesResponse, score, slashCatalog, tokenAt };

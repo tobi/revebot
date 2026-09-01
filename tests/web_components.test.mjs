@@ -93,6 +93,7 @@ globalThis.window = new EventTarget();
 
 const events = await import("../public/js/events.mjs");
 const autocomplete = await import("../public/js/components/reve-autocomplete.mjs");
+const conversationCommands = await import("../public/js/conversation-commands.mjs");
 const attachment = await import("../public/js/components/reve-attachment.mjs");
 await import("../public/js/components/reve-feed.mjs");
 await import("../public/js/components/reve-composer.mjs");
@@ -140,6 +141,27 @@ test("autocomplete tokenization and ranking are deterministic", () => {
   assert.equal(autocomplete.tokenAt("/not valid", 10), null);
   assert.equal(autocomplete.score("mi", ["Miku", "helper"]), 80);
   assert.equal(autocomplete.score("missing", ["Miku", "helper"]), 0);
+});
+
+test("slash autocomplete includes every executable conversation command", () => {
+  assert.deepEqual(
+    conversationCommands.CONVERSATION_COMMANDS.map((command) => command.name),
+    ["compact", "new", "fork"],
+  );
+  assert.deepEqual(
+    autocomplete.slashCatalog([
+      { name: "build", description: "Build the project", source: "workspace" },
+      { name: "compact", description: "Shadowed skill", source: "workspace" },
+    ]).map((entry) => entry.name),
+    ["compact", "new", "fork", "build"],
+  );
+  assert.deepEqual(conversationCommands.parseConversationCommand("/compact keep paths", 0), {
+    command: "compact",
+    instructions: "keep paths",
+    invalidArguments: false,
+  });
+  assert.equal(conversationCommands.parseConversationCommand("/build", 0), null);
+  assert.equal(conversationCommands.parseConversationCommand("/new unexpected", 0).invalidArguments, true);
 });
 
 test("autocomplete rejects stale and cross-request responses", () => {
@@ -198,6 +220,7 @@ test("composer exposes raw slash commands and can freeze a fork source tab", () 
   const composer = new Composer();
   composer.connectedCallback();
   composer.botId = "bot";
+  assert.equal(composer.input.placeholder.includes("/ commands"), true);
   composer.value = "  /compact keep exact paths  ";
   let intent;
   composer.addEventListener("reve:intent:send", (event) => { intent = event.detail; });

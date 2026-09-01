@@ -161,9 +161,11 @@ src/
                       replies. `display.audience` is ignored so post-tool assistant
                       text stays a bubble. Tools collapse to one Activity row with
                       an updating Working… line. GET / is Cache-Control: no-store;
-                      immutable source assets revalidate. The PWA service worker
-                      caches the complete authored module graph while HTML remains
-                      network-first because it carries the session token.
+                      immutable source assets revalidate. A network-loaded registration
+                      module activates changed service-worker cache versions and reloads
+                      the controlled page; the PWA worker caches the complete authored
+                      module graph while HTML remains network-first because it carries
+                      the session token.
                       HTTP responses and both WebSocket feeds publish
                       `reve:server-state` on `document` with source, topic,
                       request id, owner, status and response data. UI intents use
@@ -174,14 +176,16 @@ src/
                       `<reve-feed>` owns transcript reconciliation, virtualization,
                       status and pagination intent; `<reve-composer>` owns per-bot
                       drafts, attachment queues and send settlement;
-                      `/compact [instructions]`, `/new`, and `/fork` are intercepted
-                      before normal message placement. Per-message context actions copy
-                      the original plain body or fork at that entry. A fork pre-opens its
-                      destination tab; the source tab closes its old WebSocket and remains
-                      a read-only rendering of the parent while the new tab connects to
-                      the replacement session.
-                      `<reve-autocomplete>` owns one fresh catalog request per open
-                      invocation, local filtering and stale-response rejection.
+                      `/compact [instructions]`, `/new`, and `/fork` come from one
+                      conversation-command catalog and are intercepted before normal
+                      message placement. The same catalog feeds slash autocomplete so
+                      every executable built-in is discoverable. Per-message context
+                      actions copy the original plain body or fork at that entry. A fork
+                      pre-opens its destination tab; the source tab closes its old
+                      WebSocket and remains a read-only rendering of the parent while the
+                      new tab connects to the replacement session. `<reve-autocomplete>`
+                      owns one fresh catalog request per open invocation, local filtering
+                      and stale-response rejection.
                       Phone layout is 100dvh + safe-area; drawers are CSS
                       radios/:has(); the bot sheet is a popover with ::backdrop and
                       @starting-style; bot switches use the View Transition API;
@@ -198,8 +202,9 @@ src/
                       House events refresh sidebar/header metadata from profile.json;
                       invalid edits show a labelled last-good profile, not silent stale UI.
                       Soul editor reads/writes SOUL.md through /api/bots/<id>/soul.
-                      Autocomplete skills are rescanned from shared and bot-local
-                      directories; mentions come from the current bot roster.
+                      Slash autocomplete merges those built-ins with rescanned shared
+                      and bot-local skills plus eligible plugin commands; mentions come
+                      from the current bot roster.
                       AskUserForSecret renders an inline host-secret form.
                       Right rail is tabbed (Screen / Files / Routines); Files
                       is hidden until chosen. Hovering chat text that is a

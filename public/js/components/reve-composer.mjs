@@ -1,6 +1,7 @@
 import { emitIntent, nextRequestId, SERVER_STATE_EVENT } from "../events.mjs";
 
 const LARGE_PASTE_BYTES = 8_000;
+const READY_PLACEHOLDER = "Message  ·  @ bots, / commands";
 
 function node(tag, className, text) {
   const element = document.createElement(tag);
@@ -79,7 +80,7 @@ export class ReveComposer extends HTMLElement {
     cameraLabel.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 8h3l2-3h6l2 3h3v12H4z"/><circle cx="12" cy="13" r="4"/></svg>';
     const input = document.createElement("textarea");
     input.id = "text";
-    input.placeholder = "Message  ·  @ bots, / skills";
+    input.placeholder = READY_PLACEHOLDER;
     input.rows = 1;
     input.autocomplete = "off";
     input.autocapitalize = "sentences";
@@ -146,7 +147,7 @@ export class ReveComposer extends HTMLElement {
     this.#submit.disabled = readOnly;
     this.#input.placeholder = readOnly
       ? "Fork opened in another tab · this conversation is read-only"
-      : "Message  ·  @ bots, / skills";
+      : READY_PLACEHOLDER;
   }
 
   get readOnly() {

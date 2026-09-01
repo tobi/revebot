@@ -163,10 +163,6 @@ const HOUSE_TOOLS: &[HouseTool] = &[
                         }
                     }
                 },
-                "anyOf": [
-                    {"required": ["text"]},
-                    {"required": ["attachments"]}
-                ],
                 "additionalProperties": false
             })
         },
@@ -566,5 +562,15 @@ mod tests {
             .map(|index| json!({"file": format!("{index}.txt"), "mimetype": "text/plain"}))
             .collect();
         assert!(parse_user_message(args(json!({"attachments": attachments}))).is_err());
+    }
+
+    #[test]
+    fn house_tools_use_provider_compatible_object_roots() {
+        for (name, _, schema) in HOUSE_TOOLS {
+            let schema = schema();
+            assert_eq!(schema.get("type"), Some(&json!("object")), "{name}");
+            assert!(schema.get("anyOf").is_none(), "{name}");
+            assert!(schema.get("oneOf").is_none(), "{name}");
+        }
     }
 }
