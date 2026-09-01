@@ -738,7 +738,7 @@ Bots **cannot** delete bots. No tool for it.
 
 ## HTTP contract
 
-Default bind: **`127.0.0.1:7420`**. `--port` / `--bind`. Token: 32-byte hex, printed at start. Loopback only in v1.
+Default bind: **`127.0.0.1:7420`**. `--port` / `--bind`. Token: 32-byte hex, printed at start. Loopback only, plus the host Tailscale IPv4 when `tailscaled` is running (same token; being on the tailnet is not authorisation).
 
 ### Auth matrix
 

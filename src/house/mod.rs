@@ -12,6 +12,7 @@ mod roster;
 pub mod secret;
 pub mod serve;
 pub(crate) mod skill_improve;
+pub mod tailnet;
 pub mod tools;
 pub mod usage;
 pub mod wrap;
@@ -720,17 +721,25 @@ impl House {
         Ok(())
     }
 
-    pub fn write_house_json(&self) -> anyhow::Result<()> {
+    pub fn write_house_json(&self, tailnet: Option<&str>) -> anyhow::Result<()> {
         let path = self.inner.project.state_dir().join("house.json");
-        let body = serde_json::json!({
-            "pid": std::process::id(),
-            "bind": self.inner.bind,
-            "sock": self.inner.sock,
-            "token": self.inner.token,
-            "status": "ready",
-            "started_at": chrono::Utc::now().to_rfc3339(),
-        });
-        std::fs::write(&path, serde_json::to_vec_pretty(&body)?)?;
+        let mut body = serde_json::Map::new();
+        body.insert("pid".into(), serde_json::json!(std::process::id()));
+        body.insert("bind".into(), serde_json::json!(self.inner.bind));
+        body.insert("sock".into(), serde_json::json!(self.inner.sock));
+        body.insert("token".into(), serde_json::json!(self.inner.token));
+        body.insert("status".into(), serde_json::json!("ready"));
+        body.insert(
+            "started_at".into(),
+            serde_json::json!(chrono::Utc::now().to_rfc3339()),
+        );
+        if let Some(tailnet) = tailnet {
+            body.insert("tailnet".into(), serde_json::json!(tailnet));
+        }
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&serde_json::Value::Object(body))?,
+        )?;
         Ok(())
     }
 }

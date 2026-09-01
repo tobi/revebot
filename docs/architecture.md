@@ -140,6 +140,9 @@ src/
                       `resume_all` /
                       drive; each supervisor resumes then kicks in the
                       background so the HTTP server binds even if a bot is mid-tool.
+                      A running host Tailscale (`tailscaled` LocalAPI) is detected at
+                      serve time: the same HTTP/WS surface binds the node's IPv4 on
+                      the same port; the bearer token is still required.
                       Delete stops the supervisor, drains owned effects, closes the
                       session, then removes the guest home. `/new` and `/fork` use the
                       same roster replacement boundary: reserve the replacement, require
@@ -442,6 +445,7 @@ code or the spec, never the invariant.
 | Public assets stay routable; DOM state is correlated; stale component responses are rejected | `web::tests`, `tests/web_components.test.mjs` |
 | Tool settlement keeps completed output across a steer CAS miss | `tests/log.rs::notices_are_durable_once_and_known_tool_results_survive_state_changes` |
 | Roster tokens, last-bot floor, and capacity include creating/deleting slots | `house::roster::tests` |
+| Host Tailscale is detected and bound without replacing the token | `house::tailnet::tests` |
 | Supervisor stop seals persistence and waits for owned effects | `house::lifecycle_tests::supervisor_stop_seals_the_session_and_waits_for_owned_effects` |
 | Concurrent create/delete/recreate isolation holds in the guest | `house::microvm_tests::homes_cwd_memory_and_profile_notifications_work_in_the_guest` (opt-in) |
 | The default guest is wrap desktop, unprivileged, and git reads its token from the environment | `sandbox::tests::{the_default_policy_boots_a_preprovisioned_guest, wrap_images_get_a_unix_user_and_desktop_display, git_reads_its_token_from_the_environment_not_a_credential_store}` |

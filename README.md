@@ -75,7 +75,7 @@ Later launches reuse its persisted root disk.
 
 | Command | Purpose |
 |---|---|
-| `revebot` / `revebot serve` | Boot the house: one microVM, HTTP+WS on `127.0.0.1:7420`. |
+| `revebot` / `revebot serve` | Boot the house: one microVM, HTTP+WS on `127.0.0.1:7420`. A running Tailscale is detected and served too (token required). |
 | `revebot tui` | Terminal UI for the first bot (`chief-of-staff`). |
 | `revebot init [dir]` | Scaffold a house (idempotent). |
 | `revebot info` | Show model, sandbox policy, egress hosts, and tools. |
