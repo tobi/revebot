@@ -21,7 +21,7 @@ touches — configuration, project tools, sandbox policy — is Lua.
   `feat/http-deny-message` branch (`superradcompany/microsandbox#1489`). There is exactly
   one transport, no FFI shim, no CLI, no
   daemon, and no host-shell fallback — ever, not for tests, diagnostics, degraded
-  operation, or convenience. Every shell command a tool issues — `ctx.sh`, `reve exec` —
+  operation, or convenience. Every shell command a tool issues — `ctx.sh`, `revebot exec` —
   executes inside that VM. Reve must refuse to start if the microVM cannot boot. Never
   retain, add, or silently select a host/local shell fallback.
 - **No host command path exposed to Lua.** A tool's Lua body runs on the host, but
@@ -79,7 +79,7 @@ touches — configuration, project tools, sandbox policy — is Lua.
 - **Host config is `config.yml`** (model, sandbox, secrets). `models.yml` stays the
   provider catalog. Existing `agent.lua` / `sandbox.lua` still load if `config.yml` is
   missing.
-- **Never silently overwrite files a user has edited.** `reve init` is idempotent: a
+- **Never silently overwrite files a user has edited.** `revebot init` is idempotent: a
   matching file is left `unchanged`, an edited file is reported `changed` and kept, a
   missing file is created.
 - **Strict lint policy is a merge gate.** `Cargo.toml` defines Rust/Clippy lints;

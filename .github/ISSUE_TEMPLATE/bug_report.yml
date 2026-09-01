@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible Reve problem
+description: Report a reproducible revebot problem
 title: ""
 labels: [bug]
 body:
@@ -9,14 +9,14 @@ body:
   - type: input
     id: version
     attributes:
-      label: Reve version
-      placeholder: reve 0.1.0
+      label: revebot version
+      placeholder: revebot 0.1.0
     validations:
       required: true
   - type: input
     id: platform
     attributes:
-      label: Ruby, OS, and architecture
+      label: OS and architecture
     validations:
       required: true
   - type: textarea

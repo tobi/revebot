@@ -99,6 +99,10 @@ starts in microseconds. Concurrency is tokio tasks over single-owner session sta
   OpenRouter providers accept turns that expose `SendUserMessage`.
 - Added `/compact`, `/new`, and `/fork` to browser slash autocomplete alongside
   the current skills and plugin commands.
+- Kept the browser transcript DOM bounded while scrolling through long histories, retained
+  localhost desktop ingress under locked-down egress, promoted the live noVNC iframe into
+  takeover mode without reconnecting it, and made service-worker cache revisions activate
+  immediately with the complete authored module graph.
 
 ### Pending
 
@@ -111,4 +115,4 @@ CLI tool command; normal TUI turns run the durable lane.
   Credentials require explicit host-scoped configuration; the guest sees only a placeholder
   and the real value is injected at the network boundary.
 
-[0.1.0]: https://github.com/tobi/reve/releases/tag/v0.1.0
+[0.1.0]: https://github.com/tobi/revebot/releases/tag/v0.1.0

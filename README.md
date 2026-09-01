@@ -19,7 +19,7 @@ and create more bots. It runs on your machine — not in someone else's cloud.
 - Fast web and mobile UI
 - Iron-proxy-style token masking — no secret enters the VM
 
-![The Revebot house](docs/images/house.png)
+![The Revebot house](https://github.com/user-attachments/assets/5662badf-9fef-4850-a5e6-f4a668a9863a)
 
 <p align="center"><img src="docs/images/mobile.png" alt="Revebot on a phone" width="320"></p>
 

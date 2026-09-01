@@ -13,10 +13,10 @@ users should update to the newest 0.x release rather than expecting fixes on old
 Please do not open a public issue for a suspected vulnerability. Use GitHub's private
 security advisory form:
 
-<https://github.com/tobi/reve/security/advisories/new>
+<https://github.com/tobi/revebot/security/advisories/new>
 
-Include the Reve version (`reve --version`), operating system, the pinned `microsandbox`
-crate version (`=0.6.8`, the only sandbox dependency, declared in `Cargo.toml`), reproduction
+Include the revebot version (`revebot --version`), operating system, the pinned `microsandbox`
+crate version (declared in `Cargo.toml`), reproduction
 steps, and potential impact. Remove API keys, model transcripts, session contents, and
 other private workspace data from reports.
 
@@ -29,7 +29,7 @@ status update after the report has been reproduced.
 
 Reve deliberately fails closed:
 
-- Every command a tool issues — `ctx.sh` — and every `reve exec` runs in the same mandatory
+- Every command a tool issues — `ctx.sh` — and every `revebot exec` runs in the same mandatory
   microsandbox microVM. There is no host-shell, local, CLI, or FFI fallback.
 - The sandbox is provided exclusively by the `microsandbox` Rust crate, pinned `=0.6.8` in
   `Cargo.toml`. It is Reve's only sandbox dependency, linked and called directly — no FFI

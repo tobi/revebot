@@ -180,19 +180,25 @@ src/
                       request bodies and pasted secret values are not included in
                       server-state details. Request ids plus bot ownership reject
                       stale autocomplete and replaced-session responses.
-                      `<reve-feed>` owns transcript reconciliation, virtualization,
-                      status and pagination intent; `<reve-composer>` owns per-bot
-                      drafts, attachment queues and send settlement;
+                      `<reve-feed>` owns transcript reconciliation, status,
+                      pagination intent and a viewport window with fixed 1,200 px
+                      overscan above and below; estimated top and bottom spacers keep
+                      scroll geometry while the DOM remains bounded. `<reve-composer>`
+                      owns per-bot drafts, attachment queues and send settlement;
                       `/compact [instructions]`, `/new`, and `/fork` come from one
                       conversation-command catalog and are intercepted before normal
                       message placement. The same catalog feeds slash autocomplete so
                       every executable built-in is discoverable. Per-message context
-                      actions copy the original plain body or fork at that entry. A fork
-                      pre-opens its destination tab; the source tab closes its old
-                      WebSocket and remains a read-only rendering of the parent while the
-                      new tab connects to the replacement session. `<reve-autocomplete>`
-                      owns one fresh catalog request per open invocation, local filtering
-                      and stale-response rejection.
+                      actions copy the original plain body or fork at that entry.
+                      `<reve-conversation-tabs>` exposes every conversation observed in
+                      this page: the replacement session is live and older source tabs
+                      remain readable from their keyed in-memory logs without a second
+                      browser window or stale WebSocket. `<reve-autocomplete>` owns one
+                      fresh catalog request per open invocation, local filtering and
+                      stale-response rejection. The Screen preview keeps one live noVNC
+                      iframe; native dialog promotion makes it modal-sized without
+                      reparenting or reconnecting, with a persistent Give back control.
+                      File previews stay in the Files pane and cannot replace the iframe.
                       Phone layout is 100dvh + safe-area; drawers are CSS
                       radios/:has(); the bot sheet is a popover with ::backdrop and
                       @starting-style; bot switches use the View Transition API;
@@ -299,17 +305,21 @@ reloaded state instead of writing something it decided under stale assumptions.
   is re-executed only when the recorded *and* current replay declarations both say `safe`,
   and otherwise gets a synthetic result that admits the effect may or may not have
   happened. A prompt that was still a reservation is placed exactly once.
-- **The sandbox.** Links `microsandbox` and `microsandbox-network` directly from the
-  sibling `../../microsandboxvm` checkout of `tobi/microsandbox:feat/http-deny-message`
-  (`superradcompany/microsandbox#1489`). The default guest is wrap's desktop image
+- **The sandbox.** Links `microsandbox`, `microsandbox-network` and
+  `microsandbox-types` directly from the sibling `../../microsandboxvm` checkout of
+  `tobi/microsandbox:feat/http-deny-message` (`superradcompany/microsandbox#1489`). The
+  default guest is wrap's desktop image
   (`ghcr.io/tobi/wrap:desktop`): toolchain at absolute paths under `/opt`,
   unprivileged `user` (`HOME=/home/user`) with uid/gid realigned to the host workspace
   owner and virtiofs stat virtualization off, XFCE on `:1`, noVNC/VNC published on
-  localhost, and a shared Chrome that `agent-browser` attaches to. Provisioning is off
-  by default. Public-internet egress by default (`NetworkProfile::Public`);
-  `open = false` plus `allow` is the lock-down. Scoped source-backed secrets
-  (per-host `allow`/`headers`; allowed hosts join the egress list), fail-closed boot,
-  idle shutdown, workspace bind mount at `/workspace`. Default memory is 8192 MiB.
+  localhost, and a shared Chrome that `agent-browser` attaches to. Desktop builds use
+  public ingress so microsandbox may forward those localhost ports; fingerprint reuse
+  additionally validates both mappings and that inbound policy, rebuilding definitions
+  created before this invariant. Provisioning is off by default. Public-internet egress
+  by default (`NetworkProfile::Public`); `open = false` plus `allow` is the lock-down.
+  Scoped source-backed secrets (per-host `allow`/`headers`; allowed hosts join the egress
+  list), fail-closed boot, idle shutdown, workspace bind mount at `/workspace`. Default
+  memory is 8192 MiB.
 - **The scripting surface.** Trusted host `agent { }`, `sandbox { }` and installed
   tools use one Lua state. Bot-editable plugins/routines use a **separate** state
   with an allowlist of pure libraries/base functions: no `io`, `os`, `package`,
@@ -392,8 +402,9 @@ lane, lane-owned `nextRun`, abort-drain payload survival, `aborted` only under c
 intent-before-effect, source-ordered parallel tool batches with `op.tool_args` lifecycle, no
 re-dispatch of an interrupted `never` tool, every tool call has a result, terminal cleanup) and
 `docs/tla/VmLifecycle.tla` (one microVM shared by every bot: fingerprint honesty across failed
-rebuilds, hold vs idle stop, secret updates landing at the next effect-idle acquire) are
-explored exhaustively on bounded constants by `make spec`, with a mutation table in
+rebuilds, rejection of persisted desktop definitions whose inbound policy denies their
+published ports, hold vs idle stop, secret updates landing at the next effect-idle acquire)
+are explored exhaustively on bounded constants by `make spec`, with a mutation table in
 `docs/tla/README.md` proving each invariant can fail. The **implementation** is held by the
 Rust tests below. When a row here and an `Inv*` there disagree, one of them is wrong; fix the
 code or the spec, never the invariant.
@@ -447,8 +458,8 @@ code or the spec, never the invariant.
 | Cwd rules are full/root-to-leaf, HOME stays fixed, contexts and headers are isolated | `working_directory::tests`, `house::wrap::tests::cwd_is_an_escaped_message_header_not_part_of_the_user_query` |
 | Change observers are filtered/scoped and failures do not veto another observer | `lua::workspace_tests::change_observers_are_filtered_scoped_and_errors_do_not_veto_other_observers` |
 | Home/cwd/memory/profile effects work against the real VM | `house::microvm_tests::homes_cwd_memory_and_profile_notifications_work_in_the_guest` (opt-in) |
-| Chat is one keyed log; drafts settle by reserved id; notices are accepted once | `tests/log.rs`, `tests/chat-log.test.mjs`, `tests/chat-controller.test.mjs` |
-| Public assets stay routable; DOM state is correlated; stale component responses are rejected | `web::tests`, `tests/web_components.test.mjs` |
+| Chat is one keyed log; drafts settle by reserved id; notices are accepted once; bounded virtualization and in-app source/live conversation tabs preserve the selected view | `tests/log.rs`, `tests/chat-log.test.mjs`, `tests/chat-controller.test.mjs`, `tests/web_components.test.mjs` |
+| Public assets stay routable; DOM state is correlated; stale component responses are rejected; desktop preview/takeover keeps one live frame | `web::tests`, `tests/web_components.test.mjs`, `tests/desktop-controller.test.mjs` |
 | Tool settlement keeps completed output across a steer CAS miss | `tests/log.rs::notices_are_durable_once_and_known_tool_results_survive_state_changes` |
 | Roster tokens, last-bot floor, and capacity include creating/deleting slots | `house::roster::tests` |
 | Host Tailscale is detected and bound without replacing the token | `house::tailnet::tests` |
@@ -459,7 +470,7 @@ code or the spec, never the invariant.
 | An unmentioned Lua flag keeps its default | `lua::tests::an_unmentioned_flag_keeps_its_default` |
 | Model discovery contacts only upstreams whose key is set, and never fails the agent | `provider::discovery::tests::{only_upstreams_that_have_a_key_are_probed, an_unreachable_upstream_is_recorded_not_fatal, a_missing_or_corrupt_cache_is_simply_absent}` |
 | A namespaced model id survives discovery intact (`openrouter/x-ai/grok-4.6`) | `provider::discovery::tests::the_openrouter_shape_yields_a_pasteable_reference` |
-| Public-internet egress by default; lock-down is `open = false` | `sandbox::tests::default_egress_is_the_public_internet`, `tests/microvm.rs` (opt-in) |
+| Public-internet egress and usable localhost desktop ingress by default; `open = false` locks down egress without blocking published desktop ports; incompatible persisted desktop definitions are rebuilt | `sandbox::tests::{default_egress_is_the_public_internet, locked_down_desktop_keeps_published_ports_reachable, a_desktop_definition_must_admit_its_published_ports}`, `tests/microvm.rs` (opt-in) |
 | Secret hosts are a per-host map; `allow: true` joins the sandbox allow list | `sandbox::tests::secret_hosts_join_the_egress_allow_list`, `lua::tests::a_secret_host_map_carries_headers_and_joins_allow`, `house::secret::tests::upsert_appends_a_secret_to_the_template` |
 | Chat attachments stay under `workspace/tmp/{id}/` and are named in the message | `house::attach::tests::{save_writes_under_workspace_tmp_id_and_tags_the_guest_path, names_are_basenames_without_traversal, read_refuses_traversal_and_bad_ids}` |
 | CLI exec/tool/tui attach to a ready house and refuse an orphan Running VM | `house::client::tests::{a_ready_house_attaches_and_runs_exec_and_tool, a_running_namesake_without_a_house_is_an_orphan, live_pid_without_health_does_not_one_shot, a_held_lock_without_ready_times_out_without_one_shot}` |

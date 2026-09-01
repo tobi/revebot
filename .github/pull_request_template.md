@@ -6,7 +6,6 @@
 
 ## Verification
 
-- [ ] `bin/test`
-- [ ] `rake lint`
-- [ ] `rake rbs`
+- [ ] `make ci`
+- [ ] `cargo test --locked --test microvm -- --ignored` if the sandbox changed
 - [ ] `git diff --check`
