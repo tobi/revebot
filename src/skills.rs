@@ -1,4 +1,7 @@
 //! Workspace skill discovery and frontmatter validation.
+//!
+//! Hidden directories (names starting with `.`, including `skills/.archive/`)
+//! are skipped so curator archives do not re-enter the catalog.
 
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -144,6 +147,13 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), SkillError> {
     }
     for e in std::fs::read_dir(dir)? {
         let p = e?.path();
+        let hidden = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with('.'));
+        if hidden {
+            continue;
+        }
         if p.is_dir() {
             collect(&p, out)?;
         } else if p.file_name().is_some_and(|n| n == "SKILL.md") {
@@ -340,5 +350,47 @@ mod tests {
                 .source,
             "workspace"
         );
+    }
+
+    #[test]
+    fn repeated_listings_see_new_workspace_and_bot_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path();
+        let bot = workspace.join("agents/rune");
+        assert!(listings_for(workspace, &bot).is_empty());
+
+        write_skill(workspace, "house-live", "new shared skill", "HOUSE");
+        write_skill(&bot, "bot-live", "new local skill", "BOT");
+
+        let listed = listings_for(workspace, &bot);
+        assert_eq!(listed.len(), 2);
+        assert_eq!(
+            listed
+                .iter()
+                .find(|s| s.name == "house-live")
+                .unwrap()
+                .source,
+            "workspace"
+        );
+        assert_eq!(
+            listed.iter().find(|s| s.name == "bot-live").unwrap().source,
+            "bot"
+        );
+    }
+
+    #[test]
+    fn catalog_skips_dot_directories_including_archive() {
+        let d = tempfile::tempdir().unwrap();
+        write_skill(d.path(), "live", "kept", "LIVE");
+        let archived = d.path().join("skills/.archive/gone/SKILL.md");
+        std::fs::create_dir_all(archived.parent().unwrap()).unwrap();
+        std::fs::write(
+            &archived,
+            "---\nname: gone\ndescription: archived\n---\nOLD\n",
+        )
+        .unwrap();
+        let found = discover(d.path()).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "live");
     }
 }

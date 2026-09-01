@@ -7,7 +7,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State, WebSocketUpgrade};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -56,9 +56,7 @@ pub async fn serve(house: House) -> anyhow::Result<()> {
 fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
-        .route("/manifest.webmanifest", get(manifest))
-        .route("/sw.js", get(service_worker))
-        .route("/icon.svg", get(icon))
+        .route("/index.html", get(index))
         .route("/api/health", get(health))
         .route("/api/events", get(house_events_ws))
         .route("/api/bots", get(list_bots).post(create_bot))
@@ -70,6 +68,7 @@ fn router(state: AppState) -> Router {
             "/api/bots/{id}/messages",
             get(list_messages).post(post_message),
         )
+        .route("/api/bots/{id}/commands", post(post_command))
         .route("/api/bots/{id}/messages/{entry}", get(get_log_record))
         .route("/api/bots/{id}/attachments", post(post_attachment))
         .route(
@@ -90,6 +89,7 @@ fn router(state: AppState) -> Router {
         .route("/api/desktop", get(desktop))
         .route("/api/routines", get(list_routines))
         .route("/api/routines/{id}/run", post(run_routine))
+        .fallback(public_asset)
         .layer(DefaultBodyLimit::max(
             usize::try_from(super::attach::MAX_BYTES)
                 .unwrap_or(usize::MAX)
@@ -125,50 +125,30 @@ async fn index(State(state): State<AppState>) -> impl IntoResponse {
     )
 }
 
-async fn manifest() -> impl IntoResponse {
-    (
-        [
-            (
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/manifest+json"),
-            ),
-            (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
-        ],
-        include_str!("../web/manifest.webmanifest"),
-    )
-}
-
-async fn service_worker() -> impl IntoResponse {
-    (
-        [
-            (
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("text/javascript; charset=utf-8"),
-            ),
-            (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
-            (
-                HeaderName::from_static("service-worker-allowed"),
-                HeaderValue::from_static("/"),
-            ),
-        ],
-        include_str!("../web/sw.js"),
-    )
-}
-
-async fn icon() -> impl IntoResponse {
-    (
-        [
-            (
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("image/svg+xml"),
-            ),
-            (
-                header::CACHE_CONTROL,
-                HeaderValue::from_static("public, max-age=86400"),
-            ),
-        ],
-        include_str!("../web/icon.svg"),
-    )
+async fn public_asset(uri: Uri) -> Response {
+    let path = uri.path();
+    let Some((content, content_type)) = crate::web::asset(path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut response = Body::from(content).into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    let cache = if path == "/sw.js" || path.ends_with(".webmanifest") {
+        "no-cache"
+    } else {
+        "public, max-age=0, must-revalidate"
+    };
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    if path == "/sw.js" {
+        response.headers_mut().insert(
+            HeaderName::from_static("service-worker-allowed"),
+            HeaderValue::from_static("/"),
+        );
+    }
+    response
 }
 
 async fn health(State(_state): State<AppState>) -> Json<Value> {
@@ -578,6 +558,78 @@ async fn post_message(
         Err(e) => (
             StatusCode::CONFLICT,
             Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PostCommand {
+    command: String,
+    log_id: String,
+    instructions: Option<String>,
+    entry_id: Option<String>,
+}
+
+async fn post_command(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<QueryAuth>,
+    Json(body): Json<PostCommand>,
+) -> Response {
+    if !authorized(&headers, &q, &state.house) {
+        return deny();
+    }
+    let result = match body.command.as_str() {
+        "compact" => state
+            .house
+            .compact(&id, body.instructions, &body.log_id)
+            .await
+            .map(|ack| {
+                json!({
+                    "command": "compact",
+                    "log_id": ack.log_id,
+                    "operation_id": ack.operation_id,
+                    "outcome": ack.outcome,
+                })
+            }),
+        "new" => Box::pin(state.house.new_chat(&id, &body.log_id))
+            .await
+            .map(|ack| {
+                json!({
+                    "command": "new",
+                    "log_id": ack.log_id,
+                    "previous_log_id": ack.previous_log_id,
+                })
+            }),
+        "fork" => Box::pin(state.house.fork_chat(
+            &id,
+            &body.log_id,
+            body.entry_id.map(crate::ids::EntryId::from),
+        ))
+        .await
+        .map(|ack| {
+            json!({
+                "command": "fork",
+                "log_id": ack.log_id,
+                "previous_log_id": ack.previous_log_id,
+            })
+        }),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "unknown conversation command" })),
+            )
+                .into_response();
+        }
+    };
+    match result {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": error.to_string() })),
         )
             .into_response(),
     }

@@ -48,6 +48,11 @@ enum Command {
     },
     /// Show what this house is configured to do.
     Info,
+    /// Skill-library maintenance: usage, stale, archive, pin, adopt.
+    Curator {
+        #[command(subcommand)]
+        command: CuratorCommand,
+    },
     /// Boot the house HTTP server (also the default with no subcommand).
     Serve,
     /// Open the terminal UI for the first bot.
@@ -101,6 +106,61 @@ enum Command {
         /// Copy this run to evals/baselines/offline.json.
         #[arg(long)]
         save_baseline: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum CuratorCommand {
+    /// Last run, counts, pinned list, least-recently used.
+    Status,
+    /// Run the deterministic prune now (blocks).
+    Run {
+        /// Preview transitions without moving files or bumping `last_run_at`.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Stop background runs until resumed.
+    Pause,
+    /// Allow background runs again.
+    Resume,
+    /// Never auto-transition this managed skill.
+    Pin {
+        skill: String,
+    },
+    Unpin {
+        skill: String,
+    },
+    /// Hand unmanaged skills to the curator.
+    Adopt {
+        skills: Vec<String>,
+        /// Every live non-bundled skill that is not yet managed.
+        #[arg(long)]
+        all_unmanaged: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Itemize skills with no provenance marker.
+    ListUnmanaged,
+    /// Move a managed skill to skills/.archive/.
+    Archive {
+        skill: String,
+    },
+    /// Move an archived skill back to active.
+    Restore {
+        skill: String,
+    },
+    ListArchived,
+    /// Snapshot workspace and bot skill trees.
+    Backup {
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Restore a skills snapshot.
+    Rollback {
+        #[arg(long)]
+        list: bool,
+        #[arg(long)]
+        id: Option<String>,
     },
 }
 
@@ -187,6 +247,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
 
+        Command::Curator { command } => run_curator(command),
         Command::Info => {
             let project = Project::load(std::env::current_dir()?)?;
             let agent = &project.runtime.agent;
@@ -247,6 +308,121 @@ async fn run() -> anyhow::Result<ExitCode> {
                 .await;
             sandbox.stop().await?;
             println!("{}", result?);
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+fn run_curator(command: CuratorCommand) -> anyhow::Result<ExitCode> {
+    let project = Project::load(std::env::current_dir()?)?;
+    let curator = reve::curator::Curator::open(&project.root);
+    match command {
+        CuratorCommand::Status => {
+            println!("{}", curator.status_text());
+            Ok(ExitCode::SUCCESS)
+        }
+        CuratorCommand::Run { dry_run } => {
+            let report = curator.run(dry_run)?;
+            println!("{}", report.summary);
+            Ok(ExitCode::SUCCESS)
+        }
+        CuratorCommand::Pause => {
+            curator.set_paused(true)?;
+            println!("curator: PAUSED");
+            Ok(ExitCode::SUCCESS)
+        }
+        CuratorCommand::Resume => {
+            curator.set_paused(false)?;
+            println!("curator: ENABLED");
+            Ok(ExitCode::SUCCESS)
+        }
+        CuratorCommand::Pin { skill } => {
+            println!("{}", curator.pin(&skill)?);
+            Ok(ExitCode::SUCCESS)
+        }
+        CuratorCommand::Unpin { skill } => {
+            println!("{}", curator.unpin(&skill)?);
+            Ok(ExitCode::SUCCESS)
+        }
+        CuratorCommand::Adopt {
+            skills,
+            all_unmanaged,
+            dry_run,
+        } => {
+            if all_unmanaged {
+                let names = curator.adopt_all(dry_run)?;
+                if names.is_empty() {
+                    println!("no unmanaged skills");
+                } else if dry_run {
+                    println!("would adopt {}:", names.len());
+                    for name in names {
+                        println!("  {name}");
+                    }
+                } else {
+                    println!("adopted {}:", names.len());
+                    for name in names {
+                        println!("  {name}");
+                    }
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+            if skills.is_empty() {
+                anyhow::bail!("adopt needs a skill name or --all-unmanaged");
+            }
+            for skill in skills {
+                println!("{}", curator.adopt(&skill)?);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        CuratorCommand::ListUnmanaged => {
+            let rows = curator.unmanaged();
+            if rows.is_empty() {
+                println!("no unmanaged skills");
+            } else {
+                for row in rows {
+                    println!("{}  ({})", row.name, row.source);
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        CuratorCommand::Archive { skill } => {
+            println!("{}", curator.archive(&skill)?);
+            Ok(ExitCode::SUCCESS)
+        }
+        CuratorCommand::Restore { skill } => {
+            println!("{}", curator.restore(&skill)?);
+            Ok(ExitCode::SUCCESS)
+        }
+        CuratorCommand::ListArchived => {
+            let names = curator.list_archived();
+            if names.is_empty() {
+                println!("no archived skills");
+            } else {
+                for name in names {
+                    println!("{name}");
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        CuratorCommand::Backup { reason } => {
+            let reason = reason.unwrap_or_else(|| "manual".into());
+            let info = curator.backup(&reason)?;
+            println!("snapshot {} ({})", info.id, info.reason);
+            Ok(ExitCode::SUCCESS)
+        }
+        CuratorCommand::Rollback { list, id } => {
+            if list {
+                let backups = curator.list_backups();
+                if backups.is_empty() {
+                    println!("no curator backups");
+                } else {
+                    for b in backups {
+                        println!("{}  {}  {}", b.id, b.created_at, b.reason);
+                    }
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+            println!("{}", curator.rollback(id.as_deref())?);
             Ok(ExitCode::SUCCESS)
         }
     }

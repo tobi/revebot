@@ -1,9 +1,9 @@
 // Exercise the real metadata renderer without a browser or network.
-// Run: node tests/profile-ui.cjs
+// Run: node --test tests/profile-ui.test.cjs
 const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
-const html = fs.readFileSync(require('node:path').join(__dirname, '../src/web/index.html'), 'utf8');
+const html = fs.readFileSync(require('node:path').join(__dirname, '../public/js/app.mjs'), 'utf8');
 function extract(name) {
   let start = html.indexOf('async function ' + name + '(');
   if (start < 0) start = html.indexOf('function ' + name + '(');

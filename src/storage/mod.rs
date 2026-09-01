@@ -131,6 +131,21 @@ impl Storage {
     /// earlier. Nothing is applied to the live maps until the whole
     /// transaction is valid and — when there is a file — flushed.
     pub fn commit(&mut self, tx: Transaction) -> Result<CommitResult> {
+        self.commit_inner(tx, true)
+    }
+
+    /// Commit entries copied from another session without changing their
+    /// original timestamps. Destination sequence numbers are still assigned
+    /// here, through the normal single-writer validation and flush path.
+    pub(crate) fn commit_copied(&mut self, tx: Transaction) -> Result<CommitResult> {
+        self.commit_inner(tx, false)
+    }
+
+    fn commit_inner(
+        &mut self,
+        tx: Transaction,
+        stamp_entry_timestamps: bool,
+    ) -> Result<CommitResult> {
         if tx.writes.is_empty() {
             return Err(StorageError::Invalid("empty transaction".into()));
         }
@@ -147,7 +162,9 @@ impl Storage {
             write.set_seq(seq);
             match write {
                 Write::Entry(entry) => {
-                    entry.timestamp = timestamp;
+                    if stamp_entry_timestamps {
+                        entry.timestamp = timestamp;
+                    }
                     let id = entry.id.as_str();
                     if self.entries.contains_key(&entry.id)
                         || self.usage_ids.contains(id)

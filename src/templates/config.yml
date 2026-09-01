@@ -13,6 +13,8 @@ sandbox:
   memory: 8192
   root_disk: 16384
   open: true
+  # `$NAME` reads a host environment variable. An unprefixed source is a
+  # literal string; `$(command)`, `file:…`, and HTTP(S) are also supported.
   secrets:
     - env: GITHUB_TOKEN
       source: "$(gh auth token)"
@@ -23,7 +25,7 @@ sandbox:
         api.github.com:
           allow: true
     - env: OPENROUTER_API_KEY
-      source: OPENROUTER_API_KEY
+      source: $OPENROUTER_API_KEY
       placeholder: reve-openrouter-key
       hosts:
         openrouter.ai:

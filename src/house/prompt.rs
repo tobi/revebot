@@ -74,6 +74,9 @@ pub fn system_prompt(project: &Project, bot: &Profile, teammates: &[Profile]) ->
         }
         parts.push(format!("# Available skills\n\n{}", lines.join("\n")));
     }
+    parts.push(
+        "# Skill improvement\n\nWhen you work out a non-trivial workflow, record it with `skill_manage` for future reuse. Prefer patching an existing class-level umbrella (`skills_list` then `skill_view` then `skill_manage` action=patch). Create only at class level — never a one-off task narrative. Bundled skills are off-limits. `delete` archives (never unlinks). Memory stores who the user is; skills store how to do this class of task. `/learn` turns a source into a skill.".into(),
+    );
 
     parts.push(environment_prompt(project, bot));
     parts.join("\n\n")
@@ -202,5 +205,7 @@ mod tests {
             "folded YAML descriptions must list as real text, not `>`"
         );
         assert!(prompt.contains("AskUserForSecret"));
+        assert!(prompt.contains("`skill_manage`"));
+        assert!(prompt.contains("# Skill improvement"));
     }
 }

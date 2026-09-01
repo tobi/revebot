@@ -91,16 +91,16 @@ git config --global credential.https://github.com.helper \
 '!f() { test \"$1\" = get && printf \"username=x-access-token\\npassword=%s\\n\" \
 \"$GITHUB_TOKEN\"; }; f'; fi";
 
-/// A host environment reference whose value is resolved only while the VM runs.
+/// A host-side secret source resolved only while the VM runs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Secret {
     /// Environment variable exposed in the guest. Its value is a placeholder.
     pub env: String,
-    /// How the host obtains the value: a host env var name, `$(command)`,
-    /// `http(s)://…` (GET on the host), or `file:` relative to the house
-    /// root (paste store under `.reve/secrets/`). Never a literal secret.
-    /// Command/HTTP/file output is copied into a process env var so
-    /// microsandbox still only sees [`SecretSource::Env`].
+    /// How the host obtains the value: `$ENV_VAR`, a literal string,
+    /// `$(command)`, `http(s)://…` (GET on the host), or `file:` relative to
+    /// the house root (paste store under `.reve/secrets/`). Non-environment
+    /// values are copied into a process env var so microsandbox still only
+    /// sees [`SecretSource::Env`].
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
@@ -1136,6 +1136,15 @@ pub(crate) fn command_secret_source(source: &str) -> Option<&str> {
     Some(inner.trim())
 }
 
+/// `$FOO` reads the host environment. `$(command)` is classified separately.
+fn env_secret_source(source: &str) -> Option<&str> {
+    let trimmed = source.trim();
+    if trimmed.starts_with("$(") {
+        return None;
+    }
+    trimmed.strip_prefix('$').filter(|name| !name.is_empty())
+}
+
 fn host_var_for_command(secret_env: &str) -> String {
     let cleaned: String = secret_env
         .chars()
@@ -1260,33 +1269,32 @@ fn secret_value(secret: &Secret, root: &Path) -> Option<String> {
         read_file_secret(&path)
     } else if let Some(url) = http_secret_url(&secret.source) {
         fetch_http_secret(url).ok().filter(|s| !s.is_empty())
+    } else if let Some(var) = env_secret_source(&secret.source) {
+        std::env::var(var).ok()
     } else {
-        std::env::var(&secret.source).ok()
+        (!secret.source.is_empty()).then(|| secret.source.clone())
     }
 }
 
-/// Resolve a secret to a host env var microsandbox can read. Command, file, and
-/// HTTP sources are copied into `REVEBOT_SECRET_<env>` for this process.
+/// Resolve a secret to a host env var microsandbox can read. Every source
+/// except an explicit `$ENV_VAR` is copied into `REVEBOT_SECRET_<env>` for
+/// this process.
 #[expect(
     unsafe_code,
     reason = "Rust 2024 requires an explicit boundary for process environment mutation; this writes only Reve-owned secret variables"
 )]
 fn bind_secret(secret: &Secret, root: &Path) -> Option<String> {
-    let needs_copy = command_secret_source(&secret.source).is_some()
-        || file_secret_path(&secret.source, root).is_some()
-        || http_secret_url(&secret.source).is_some();
-    if needs_copy {
-        let value = secret_value(secret, root)?;
-        let var = host_var_for_command(&secret.env);
-        // SAFETY: we only write Reve-owned `REVEBOT_SECRET_*` keys. Secret
-        // install is serialized by the VM mutex; other threads may read env
-        // concurrently, which is the documented hazard of `set_var`.
-        unsafe { std::env::set_var(&var, &value) };
-        Some(var)
-    } else {
-        std::env::var_os(&secret.source)?;
-        Some(secret.source.clone())
+    if let Some(var) = env_secret_source(&secret.source) {
+        std::env::var_os(var)?;
+        return Some(var.to_string());
     }
+    let value = secret_value(secret, root)?;
+    let var = host_var_for_command(&secret.env);
+    // SAFETY: we only write Reve-owned `REVEBOT_SECRET_*` keys. Secret
+    // install is serialized by the VM mutex; other threads may read env
+    // concurrently, which is the documented hazard of `set_var`.
+    unsafe { std::env::set_var(&var, &value) };
+    Some(var)
 }
 fn secret_config_error(error: &microsandbox::MicrosandboxError) -> SandboxError {
     SandboxError::Failed(format!("cannot inspect runtime secrets: {error}"))
@@ -1384,13 +1392,11 @@ fn format_missing_secret_warning(secret: &Secret) -> String {
             secret.source
         );
     }
-    let mut warning = format!(
-        "{} is unset; authenticated access for {hosts} is disabled",
-        secret.source
-    );
-    if secret.source == "GITHUB_TOKEN" {
+    let source = env_secret_source(&secret.source).unwrap_or(&secret.source);
+    let mut warning = format!("{source} is unset; authenticated access for {hosts} is disabled");
+    if source == "GITHUB_TOKEN" {
         warning.push_str("\nexport GITHUB_TOKEN=\"$(gh auth token)\"");
-    } else if secret.source == "OPENROUTER_API_KEY" {
+    } else if source == "OPENROUTER_API_KEY" {
         warning.push_str("\nexport OPENROUTER_API_KEY=...");
     }
     warning
@@ -1545,8 +1551,8 @@ async fn build(
             .port(desktop.vnc_port, DESKTOP_VNC_GUEST_PORT);
     }
 
-    // Only host environment references enter the durable definition. Values
-    // are resolved by microsandbox when the VM starts and remain host-side.
+    // Durable microsandbox definitions always reference host environment
+    // variables. Reve copies literal and dynamic sources into owned variables.
     for secret in policy.secrets.clone() {
         let Some(host_var) = bind_secret(&secret, secret_root) else {
             continue;
@@ -1681,7 +1687,7 @@ mod tests {
             open: false,
             secrets: vec![Secret {
                 env: "TOOL_GATEWAY".into(),
-                source: "TOOL_GATEWAY".into(),
+                source: "$TOOL_GATEWAY".into(),
                 placeholder: None,
                 hosts: Secret::scoped_hosts(["tool-gateway.shopify.io"]),
             }],
@@ -1708,7 +1714,7 @@ mod tests {
             open: false,
             secrets: vec![Secret {
                 env: "TOKEN".into(),
-                source: "TOKEN".into(),
+                source: "$TOKEN".into(),
                 placeholder: None,
                 hosts,
             }],
@@ -1723,7 +1729,7 @@ mod tests {
         let secret: Secret = serde_yaml::from_str(
             r#"
 env: TOOL_GATEWAY
-source: TOOL_GATEWAY
+source: $TOOL_GATEWAY
 placeholder: reve-tool-gateway
 hosts:
   tool-gateway.shopify.io:
@@ -1775,7 +1781,7 @@ hosts:
             .insert("RUNTIME_FLAG".into(), "different".into());
         runtime_changed.secrets.push(Secret {
             env: "TOKEN".into(),
-            source: "HOST_TOKEN".into(),
+            source: "$HOST_TOKEN".into(),
             placeholder: Some("reve-token".into()),
             hosts: Secret::scoped_hosts(["x.com"]),
         });
@@ -1810,7 +1816,7 @@ hosts:
     fn an_unset_scoped_secret_is_reported_before_boot() {
         let secret = Secret {
             env: "GITHUB_TOKEN".into(),
-            source: "REVE_TEST_MISSING_GITHUB_TOKEN_9D2B".into(),
+            source: "$REVE_TEST_MISSING_GITHUB_TOKEN_9D2B".into(),
             placeholder: Some("reve-github-token".into()),
             hosts: Secret::scoped_hosts(["github.com", "api.github.com"]),
         };
@@ -1826,7 +1832,7 @@ hosts:
     fn an_unset_github_token_warning_explains_how_to_export_it() {
         let secret = Secret {
             env: "GITHUB_TOKEN".into(),
-            source: "GITHUB_TOKEN".into(),
+            source: "$GITHUB_TOKEN".into(),
             placeholder: Some("reve-github-token".into()),
             hosts: Secret::scoped_hosts(["github.com", "api.github.com"]),
         };
@@ -1840,7 +1846,7 @@ hosts:
     fn an_unset_openrouter_key_warning_explains_how_to_export_it() {
         let secret = Secret {
             env: "OPENROUTER_API_KEY".into(),
-            source: "OPENROUTER_API_KEY".into(),
+            source: "$OPENROUTER_API_KEY".into(),
             placeholder: Some("reve-openrouter-key".into()),
             hosts: Secret::scoped_hosts(["openrouter.ai"]),
         };
@@ -1864,6 +1870,9 @@ hosts:
         assert_eq!(command_secret_source("$(gh auth token"), None);
         assert_eq!(command_secret_source("$()"), None);
         assert_eq!(command_secret_source("$(echo $(gh auth token))"), None);
+        assert_eq!(env_secret_source("$GITHUB_TOKEN"), Some("GITHUB_TOKEN"));
+        assert_eq!(env_secret_source("GITHUB_TOKEN"), None);
+        assert_eq!(env_secret_source("$(gh auth token)"), None);
     }
 
     #[test]
@@ -1885,6 +1894,25 @@ hosts:
         assert_eq!(std::env::var(&var).as_deref(), Ok("command-secret-ok"));
     }
 
+    #[test]
+    fn an_unprefixed_source_is_bound_as_a_literal() {
+        let secret = Secret {
+            env: "LITERAL_TOKEN_TEST_9D2B".into(),
+            source: "literal-secret-ok".into(),
+            placeholder: None,
+            hosts: Secret::scoped_hosts(["example.com"]),
+        };
+        let root = Path::new("/tmp");
+        assert_eq!(
+            secret_value(&secret, root).as_deref(),
+            Some("literal-secret-ok")
+        );
+        assert!(missing_secret_warning(&secret, root).is_none());
+        let var = bind_secret(&secret, root).expect("bind");
+        assert_eq!(var, "REVEBOT_SECRET_LITERAL_TOKEN_TEST_9D2B");
+        assert_eq!(std::env::var(&var).as_deref(), Ok("literal-secret-ok"));
+    }
+
     static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn with_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
@@ -1901,6 +1929,24 @@ hosts:
             None => unsafe { std::env::remove_var("HOME") },
         }
         out
+    }
+
+    #[test]
+    fn a_dollar_source_reads_the_host_environment() {
+        let secret = Secret {
+            env: "HOME_COPY".into(),
+            source: "$HOME".into(),
+            placeholder: None,
+            hosts: Secret::scoped_hosts(["example.com"]),
+        };
+        let got = with_home(Path::new("/home/reve"), || {
+            (
+                secret_value(&secret, Path::new("/tmp")),
+                bind_secret(&secret, Path::new("/tmp")),
+            )
+        });
+        assert_eq!(got.0.as_deref(), Some("/home/reve"));
+        assert_eq!(got.1.as_deref(), Some("HOME"));
     }
 
     #[test]

@@ -82,6 +82,7 @@ Later launches reuse its persisted root disk.
 | `revebot exec <cmd...>` | Run a command inside the house microVM. |
 | `revebot tool [name] [--args JSON]` | Run one of this house's Lua tools. |
 | `revebot eval` | Run `evals/` (offline by default; `--live` for real models). |
+| `revebot curator …` | Maintain the skill library (status, prune, pin, adopt, archive). |
 | `revebot --version` | Print the version. |
 
 A worked session:
@@ -450,7 +451,13 @@ The durable harness and the user-facing runtime are implemented:
 - **Heartbeats** — `HEARTBEAT.yml` reload and strict `SILENCE`/`Message:`/`Steer:`
   response validation are implemented as the scheduler seam.
 - **Skills** — `workspace/skills/**/SKILL.md` discovery, frontmatter validation,
-  and live catalog injection into the system prompt.
+  and live catalog injection into the system prompt. Hidden dirs (`skills/.archive/`)
+  are skipped. The **curator** (`revebot curator`, `/curator`) tracks usage,
+  marks long-unused *adopted* skills stale, and archives them after 90 days —
+  never deletes. Bundled scaffold skills are off-limits unless
+  `curator.prune_builtins: true`. **Skill improvement** is `skill_manage` /
+  `skill_view` / `skills_list` plus `/learn`: the bot records class-level
+  workflows as it goes; a hidden nudge every 15 turns asks it to.
 - **Channels** — ordered in-process inbox events and namespaced durable KV state.
 - **TUI** — ratatui inline rendering, subagent/inbox/steer/follow-up states,
   slash-command and workspace `@file` completion, checkpointed streaming Markdown, and

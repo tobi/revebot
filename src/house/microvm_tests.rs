@@ -78,6 +78,33 @@ async fn homes_cwd_memory_and_profile_notifications_work_in_the_guest() -> anyho
         name_patch?; role_patch?;
         let profile = Profile::load_for(dir.path(), &second.id)?;
         anyhow::ensure!(profile.title == "Composer" && profile.description == "Music only");
+        let source = house.inner.ready_harness(&second.id)?;
+        let root = crate::entry::Entry::message(serde_json::json!({"role":"user","content":"root"}));
+        let selected = crate::entry::Entry::message(serde_json::json!({"role":"user","content":"fork here"}))
+            .with_parent(Some(root.id.clone()));
+        let later = crate::entry::Entry::message(serde_json::json!({"role":"user","content":"do not copy"}))
+            .with_parent(Some(selected.id.clone()));
+        source.session().commit(
+            crate::entry::Transaction::new()
+                .with(crate::entry::Write::entry(root.clone()))
+                .with(crate::entry::Write::entry(selected.clone()))
+                .with(crate::entry::Write::entry(later.clone()))
+                .with(crate::entry::Write::set(
+                    crate::entry::Namespace::LaneLeaf,
+                    MAIN_LANE,
+                    Some(later.id.clone()),
+                )),
+        ).await?;
+        let source_log = source.session().id().to_string();
+        let forked = house.fork_chat(&second.id, &source_log, Some(selected.id.clone())).await?;
+        anyhow::ensure!(forked.log_id != source_log && forked.previous_log_id == source_log);
+        let fork_entries = house.transcript(&second.id).await?;
+        anyhow::ensure!(fork_entries.iter().map(|entry| &entry.id).eq([&root.id, &selected.id]));
+        anyhow::ensure!(house.prompt(&second.id, "stale source", Some(&source_log)).await.is_err());
+        let fresh = house.new_chat(&second.id, &forked.log_id).await?;
+        anyhow::ensure!(fresh.log_id != forked.log_id && fresh.previous_log_id == forked.log_id);
+        anyhow::ensure!(house.transcript(&second.id).await?.is_empty());
+        anyhow::ensure!(house.prompt(&second.id, "stale fork", Some(&forked.log_id)).await.is_err());
         let old_log = house.inner.ready_harness(&second.id)?.session().id().to_string();
         house.delete_bot(&second.id).await?;
         let make = |name: &str| CreateSpec {name:name.into(),title:String::new(),description:String::new(),soul:None,model:None,avatar:None};

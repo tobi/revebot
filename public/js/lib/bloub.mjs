@@ -145,3 +145,5 @@ const BLOUB = (() => {
 
   return { svg, parseSpec, COLORS, SHAPE_IDS };
 })();
+
+export { BLOUB };

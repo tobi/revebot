@@ -11,6 +11,7 @@ pub mod resources;
 mod roster;
 pub mod secret;
 pub mod serve;
+pub(crate) mod skill_improve;
 pub mod tools;
 pub mod usage;
 pub mod wrap;
@@ -23,7 +24,7 @@ mod microvm_tests;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::fs::OpenOptions;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -93,9 +94,20 @@ pub(crate) struct Inner {
     skill_seen: Mutex<HashMap<String, BTreeMap<String, u64>>>,
     /// One in-flight `AskUserForSecret` per bot.
     secret_asks: Mutex<HashMap<String, tokio::sync::oneshot::Sender<SecretAskResult>>>,
+    /// Per-bot plugin tool names currently offered to the model.
+    plugin_offers: Mutex<HashMap<String, std::collections::BTreeSet<String>>>,
+    /// Per-bot statusline slots (`loop` → `2 loops`).
+    plugin_status: Mutex<HashMap<String, BTreeMap<String, String>>>,
+    /// Extra plugin wakes from `ctx.set_timer`.
+    plugin_wake: Mutex<HashMap<String, std::time::Instant>>,
+    /// Last `update` fire per plugin.
+    plugin_last: Mutex<HashMap<String, std::time::Instant>>,
     usage: usage::UsageLog,
     memory_edits: tokio::sync::Mutex<()>,
     profile_edits: tokio::sync::Mutex<()>,
+    skill_edits: tokio::sync::Mutex<()>,
+    /// User turns since the last skill-improve nudge, per bot.
+    skill_turns: Mutex<HashMap<String, u32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +159,11 @@ enum BotCmd {
     },
     KickNow,
     Stop(tokio::sync::oneshot::Sender<()>),
+    Compact {
+        instructions: Option<String>,
+        reply: tokio::sync::oneshot::Sender<Result<CompactAck, String>>,
+    },
+    Quiesce(tokio::sync::oneshot::Sender<Result<(), String>>),
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +173,25 @@ pub struct PromptAck {
     pub operation_id: String,
     pub entry_id: String,
     pub mode: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompactAck {
+    pub log_id: String,
+    pub operation_id: String,
+    pub outcome: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub struct SwitchAck {
+    pub log_id: String,
+    pub previous_log_id: String,
+}
+
+#[derive(Debug, Clone)]
+enum SwitchKind {
+    New,
+    Fork(Option<crate::ids::EntryId>),
 }
 
 #[derive(Serialize)]
@@ -254,9 +290,15 @@ impl House {
             last_fired: Mutex::new(HashMap::new()),
             skill_seen: Mutex::new(HashMap::new()),
             secret_asks: Mutex::new(HashMap::new()),
+            plugin_offers: Mutex::new(HashMap::new()),
+            plugin_status: Mutex::new(HashMap::new()),
+            plugin_wake: Mutex::new(HashMap::new()),
+            plugin_last: Mutex::new(HashMap::new()),
             usage: usage::UsageLog::open(&project.state_dir()),
             memory_edits: tokio::sync::Mutex::new(()),
             profile_edits: tokio::sync::Mutex::new(()),
+            skill_edits: tokio::sync::Mutex::new(()),
+            skill_turns: Mutex::new(HashMap::new()),
         });
         *inner.me.lock() = Arc::downgrade(&inner);
 
@@ -266,7 +308,7 @@ impl House {
             profiles = scan_checked(&project.root)?;
         }
         for profile in profiles {
-            if let Err(error) = inner.spawn_ready(profile).await {
+            if let Err(error) = Box::pin(inner.spawn_ready(profile)).await {
                 let _ = Self {
                     inner: inner.clone(),
                 }
@@ -283,6 +325,14 @@ impl House {
             .controllers
             .lock()
             .push(spawn_routines(Arc::downgrade(&inner)));
+        inner
+            .controllers
+            .lock()
+            .push(spawn_plugins(Arc::downgrade(&inner)));
+        inner
+            .controllers
+            .lock()
+            .push(spawn_curator(Arc::downgrade(&inner)));
         inner.controllers.lock().push(spawn_resource_observers(
             Arc::downgrade(&inner),
             inner.house_events.subscribe(),
@@ -310,6 +360,16 @@ impl House {
                     obj.insert("cwd".into(), serde_json::json!(rt.context.cwd()));
                     obj.insert("log_id".into(), serde_json::json!(rt.session.id()));
                     obj.insert("status".into(), "ready".into());
+                    Some(value)
+                }
+                BotSlot::Replacing { profile, .. } => {
+                    let mut value = serde_json::to_value(profile).ok()?;
+                    let obj = value.as_object_mut()?;
+                    obj.insert(
+                        "profile_error".into(),
+                        serde_json::json!("Switching conversation"),
+                    );
+                    obj.insert("status".into(), "switching".into());
                     Some(value)
                 }
                 BotSlot::Deleting {
@@ -381,6 +441,33 @@ impl House {
         log_id: Option<&str>,
     ) -> anyhow::Result<PromptAck> {
         self.inner.prompt(bot, text, log_id).await
+    }
+
+    pub async fn compact(
+        &self,
+        bot: &str,
+        instructions: Option<String>,
+        log_id: &str,
+    ) -> anyhow::Result<CompactAck> {
+        self.inner.compact(bot, instructions, log_id).await
+    }
+
+    pub async fn new_chat(&self, bot: &str, log_id: &str) -> anyhow::Result<SwitchAck> {
+        Box::pin(self.inner.clone().switch_chat(bot, log_id, SwitchKind::New)).await
+    }
+
+    pub async fn fork_chat(
+        &self,
+        bot: &str,
+        log_id: &str,
+        entry_id: Option<crate::ids::EntryId>,
+    ) -> anyhow::Result<SwitchAck> {
+        Box::pin(
+            self.inner
+                .clone()
+                .switch_chat(bot, log_id, SwitchKind::Fork(entry_id)),
+        )
+        .await
     }
 
     pub async fn abort(&self, bot: &str) -> anyhow::Result<()> {
@@ -524,10 +611,27 @@ impl House {
     }
 
     pub fn skills_for(&self, bot: &str) -> Vec<crate::skills::SkillListing> {
-        crate::skills::listings_for(
+        let mut listings = crate::skills::listings_for(
             &self.inner.project.workspace(),
             &self.inner.project.bot_dir(bot),
-        )
+        );
+        for plugin in &self.inner.project.runtime.plugins {
+            if !plugin.has_command() {
+                continue;
+            }
+            if plugin.owner.as_deref().is_some_and(|id| id != bot) {
+                continue;
+            }
+            if listings.iter().any(|s| s.name == plugin.name) {
+                continue;
+            }
+            listings.push(crate::skills::SkillListing {
+                name: plugin.name.clone(),
+                description: format!("/{0} plugin command", plugin.name),
+                source: "plugin".into(),
+            });
+        }
+        listings
     }
 
     pub async fn complete_secret(
@@ -769,6 +873,99 @@ impl Inner {
         Ok(planned.result)
     }
 
+    fn take_skill_nudge(&self, bot: &str) -> bool {
+        let interval = skill_improve::nudge_interval(&self.project.root);
+        if interval == 0 {
+            return false;
+        }
+        let mut turns = self.skill_turns.lock();
+        let slot = turns.entry(bot.to_string()).or_insert(0);
+        *slot = slot.saturating_add(1);
+        if *slot >= interval {
+            *slot = 0;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) async fn skill_manage(
+        &self,
+        bot: &str,
+        args: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<String, String> {
+        let request = skill_improve::Request::parse(&args)?;
+        let expected = self
+            .ready_harness(bot)
+            .map_err(|e| e.to_string())?
+            .session()
+            .id()
+            .to_string();
+        let _guard = self.skill_edits.lock().await;
+        if self
+            .ready_harness(bot)
+            .map_err(|e| e.to_string())?
+            .session()
+            .id()
+            != expected
+        {
+            return Err("bot was replaced during skill_manage".into());
+        }
+        let plan = skill_improve::plan(&self.project.root, bot, &request)?;
+        for change in &plan.writes {
+            change
+                .apply(&self.sandbox)
+                .await
+                .map_err(|e| e.to_string())?;
+            self.workspace_changed(bot, vec![format!("/{}", change.relative.display())], false)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        for relative in &plan.remove {
+            let path = format!("/{}", relative.display());
+            let cmd = format!("rm -f -- {}", shell_words::quote(&path));
+            let output = self
+                .sandbox
+                .exec(&cmd, crate::sandbox::ExecOptions::default(), None)
+                .await
+                .map_err(|e| e.to_string())?;
+            if !output.success || output.cancelled {
+                return Err(format!("failed to remove {path}: {}", output.stderr.trim()));
+            }
+            self.workspace_changed(bot, vec![path], false)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        if let Some(name) = &plan.archive {
+            let curator = crate::curator::Curator::open(&self.project.root);
+            let _ = curator.adopt(name);
+            curator.archive(name).map_err(|e| e.to_string())?;
+        }
+        let curator = crate::curator::Curator::open(&self.project.root);
+        if plan.created {
+            curator.mark_agent_created(&request.name);
+        }
+        if plan.patched {
+            curator.record_patch(&request.name);
+        }
+        Ok(plan.result)
+    }
+
+    pub(crate) fn skills_list(&self, bot: &str) -> String {
+        skill_improve::list_text(&self.project.root, bot)
+    }
+
+    pub(crate) fn skill_view(
+        &self,
+        bot: &str,
+        name: &str,
+        file_path: Option<&str>,
+    ) -> Result<String, String> {
+        let text = skill_improve::view_text(&self.project.root, bot, name, file_path)?;
+        crate::curator::Curator::open(&self.project.root).record_view(name);
+        Ok(text)
+    }
+
     fn ready_profiles(&self) -> Vec<Profile> {
         self.refresh_profiles();
         let snap = self.snapshot.read();
@@ -813,6 +1010,9 @@ impl Inner {
         context
             .change(harness.session(), MAIN_LANE, &self.sandbox, ".")
             .await?;
+        if let Some(ack) = self.try_plugin_command(bot, text, &harness).await? {
+            return Ok(ack);
+        }
         let skills =
             crate::skills::catalog_for(&self.project.workspace(), &self.project.bot_dir(bot));
         let (updated, removed) = {
@@ -830,13 +1030,61 @@ impl Inner {
             };
             self.usage
                 .record(&usage::UsageEvent::skill(bot, &skill.name, source));
+            crate::curator::record_use(&self.project.root, &skill.name);
         }
-        let wrapped = wrap::wrap_user_turn_at(
+        let mut wrapped = wrap::wrap_user_turn_at(
             text,
             &self.ready_profiles(),
             &skills,
             &updated,
             &removed,
+            &wrap::timestamp_now(),
+        );
+        if self.take_skill_nudge(bot) {
+            wrapped = skill_improve::with_nudge(&wrapped);
+        }
+        let wrapped = wrap::with_cwd(&wrapped, &context.cwd());
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        tx.send(BotCmd::UserText {
+            text: wrapped,
+            reply,
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("bot supervisor gone"))?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("bot supervisor dropped"))?
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    async fn dispatch_user_text(
+        &self,
+        bot: &str,
+        text: &str,
+        expected: Option<&str>,
+    ) -> anyhow::Result<PromptAck> {
+        let (harness, context, tx) = {
+            let roster = self.snapshot.read();
+            match roster.get(bot) {
+                Some(BotSlot::Ready(rt)) => {
+                    if expected.is_some_and(|id| id != rt.session.id()) {
+                        anyhow::bail!("bot was replaced; refresh before sending");
+                    }
+                    (rt.harness.clone(), rt.context.clone(), rt.cmds.clone())
+                }
+                _ => anyhow::bail!("unknown or unavailable bot {bot}"),
+            }
+        };
+        context
+            .change(harness.session(), MAIN_LANE, &self.sandbox, ".")
+            .await?;
+        let skills =
+            crate::skills::catalog_for(&self.project.workspace(), &self.project.bot_dir(bot));
+        let wrapped = wrap::wrap_user_turn_at(
+            text,
+            &self.ready_profiles(),
+            &skills,
+            &[],
+            &[],
             &wrap::timestamp_now(),
         );
         let wrapped = wrap::with_cwd(&wrapped, &context.cwd());
@@ -850,6 +1098,37 @@ impl Inner {
         rx.await
             .map_err(|_| anyhow::anyhow!("bot supervisor dropped"))?
             .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    async fn compact(
+        &self,
+        bot: &str,
+        instructions: Option<String>,
+        expected: &str,
+    ) -> anyhow::Result<CompactAck> {
+        let tx = {
+            let roster = self.snapshot.read();
+            match roster.get(bot) {
+                Some(BotSlot::Ready(runtime)) if runtime.session.id() == expected => {
+                    runtime.cmds.clone()
+                }
+                Some(BotSlot::Ready(_)) => {
+                    anyhow::bail!("bot was replaced; refresh before compacting")
+                }
+                _ => anyhow::bail!("unknown or unavailable bot {bot}"),
+            }
+        };
+        let (reply, result) = tokio::sync::oneshot::channel();
+        tx.send(BotCmd::Compact {
+            instructions,
+            reply,
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("bot supervisor gone"))?;
+        result
+            .await
+            .map_err(|_| anyhow::anyhow!("bot supervisor dropped"))?
+            .map_err(anyhow::Error::msg)
     }
 
     async fn abort_bot(&self, bot: &str) -> anyhow::Result<()> {
@@ -936,7 +1215,7 @@ impl Inner {
             token: token.clone(),
             finished: false,
         };
-        self.prepare_ready(profile, &token).await?;
+        Box::pin(self.prepare_ready(profile, &token)).await?;
         guard.finished = true;
         Ok(())
     }
@@ -956,114 +1235,21 @@ impl Inner {
             format!("{id}:{token}"),
             Some(home::guest(&id)?),
         )?;
-        let session = Session::spawn(storage);
+        let (runtime, cmd_rx) = self.make_runtime(profile, token, storage).await?;
+        let session = runtime.session.clone();
+        let harness = runtime.harness.clone();
         self.sessions.lock().insert(token.into(), session.clone());
-        let model = resolve_model(&self.project, profile.model.as_deref());
-        let context = crate::working_directory::Context::new(&id)?;
-        if let Err(error) = context.restore(&session, MAIN_LANE, &self.sandbox).await {
-            session.close().await;
-            self.sessions.lock().remove(token);
-            return Err(error);
-        }
-        let toolbox = Toolbox::for_context(
-            self.sandbox.clone(),
-            self.project.runtime_arc(),
-            context.clone(),
-        );
-        let house_tools = HouseTools {
-            inner: toolbox,
-            house: Arc::downgrade(self),
-            bot_id: id.clone(),
-        };
-        let active_tool_names = house_tools.tool_names();
-        let tools = Arc::new(house_tools);
-        let prompt_profile = profile.clone();
-        let prompt_context = context.clone();
-        let prompt_house = Arc::downgrade(self);
-        let runtime = self.project.runtime.clone();
-        let hooks = Hooks::new().on_before_tool(Arc::new(move |event| {
-            let runtime = runtime.clone();
-            Box::pin(async move { runtime.run_guards(&event).await })
-        }));
-        let harness = Harness::new(
-            session.clone(),
-            HarnessConfig {
-                model: model.clone(),
-                tools: tools.clone(),
-                hooks,
-                system_prompt: Arc::new(move || {
-                    let Some(inner) = prompt_house.upgrade() else {
-                        return String::new();
-                    };
-                    format!(
-                        "{}\n\nCurrent directory: {}\n{}",
-                        system_prompt(&inner.project, &prompt_profile, &inner.ready_profiles()),
-                        prompt_context.cwd(),
-                        prompt_context.instructions()
-                    )
-                }),
-                settings: RunSettings::default(),
-                retry: RetryPolicy::default(),
-                configuration: LaneConfiguration {
-                    model: ModelRef {
-                        provider: profile.model.clone().unwrap_or_else(|| {
-                            self.project
-                                .runtime
-                                .agent
-                                .model
-                                .clone()
-                                .unwrap_or_else(|| "none".into())
-                        }),
-                        model_id: profile.model.clone().unwrap_or_else(|| {
-                            self.project
-                                .runtime
-                                .agent
-                                .model
-                                .clone()
-                                .unwrap_or_else(|| "none".into())
-                        }),
-                    },
-                    thinking_level: self
-                        .project
-                        .runtime
-                        .agent
-                        .thinking
-                        .clone()
-                        .unwrap_or_else(|| "default".into()),
-                    active_tool_names,
-                },
-                event_capacity: 1024,
-            },
-        );
-
-        bind_profile_environment(
-            &harness,
-            self.project.clone(),
-            id.clone(),
-            tools.tool_names(),
-        );
-        let (cmds, cmd_rx) = mpsc::channel(32);
-        let runtime = BotRuntime {
-            profile: profile.clone(),
-            harness: harness.clone(),
-            session: session.clone(),
-            cmds: cmds.clone(),
-            context,
-            profile_error: None,
-            session_key: token.into(),
-            supervisor: None,
-        };
         let published = {
-            let mut snap = self.snapshot.write();
-            match snap.publish(&id, token, runtime) {
+            let mut snapshot = self.snapshot.write();
+            match snapshot.publish(&id, token, runtime) {
                 Ok(()) => {
                     let handle =
                         spawn_supervisor(harness, cmd_rx, Arc::downgrade(self), id.clone());
                     let abort = handle.abort_handle();
                     let mut controllers = self.controllers.lock();
-                    controllers.retain(|h| !h.is_finished());
+                    controllers.retain(|task| !task.is_finished());
                     controllers.push(handle);
-                    for (key, runtime) in snap.ready_mut() {
+                    for (key, runtime) in snapshot.ready_mut() {
                         if key == &id {
                             runtime.supervisor = Some(abort.clone());
                         }
@@ -1081,19 +1267,320 @@ impl Inner {
         {
             let catalog =
                 crate::skills::catalog_for(&self.project.workspace(), &self.project.bot_dir(&id));
-            let snap: BTreeMap<String, u64> = catalog
+            let skill_snapshot: BTreeMap<String, u64> = catalog
                 .iter()
-                .map(|s| (s.name.clone(), crate::skills::fingerprint(s)))
+                .map(|skill| (skill.name.clone(), crate::skills::fingerprint(skill)))
                 .collect();
-            self.skill_seen.lock().insert(id.clone(), snap);
+            self.skill_seen.lock().insert(id.clone(), skill_snapshot);
         }
         let _ = self.house_events.send(Event::new(
             "house",
             None,
             Kind::RosterChanged {
-                ids: self.ready_profiles().into_iter().map(|p| p.id).collect(),
+                ids: self
+                    .ready_profiles()
+                    .into_iter()
+                    .map(|profile| profile.id)
+                    .collect(),
             },
         ));
+        Ok(())
+    }
+
+    async fn make_runtime(
+        self: &Arc<Self>,
+        profile: Profile,
+        token: &str,
+        storage: Storage,
+    ) -> anyhow::Result<(BotRuntime, mpsc::Receiver<BotCmd>)> {
+        let id = profile.id.clone();
+        profile::validate_id(&id)?;
+        let context = crate::working_directory::Context::new(&id)?;
+        let session = Session::spawn(storage);
+        if let Err(error) = context.restore(&session, MAIN_LANE, &self.sandbox).await {
+            session.close().await;
+            return Err(error);
+        }
+        let toolbox = Toolbox::for_context(
+            self.sandbox.clone(),
+            self.project.runtime_arc(),
+            context.clone(),
+        );
+        let house_tools = HouseTools {
+            inner: toolbox,
+            house: Arc::downgrade(self),
+            bot_id: id.clone(),
+        };
+        let active_tool_names = house_tools.tool_names();
+        let tools = Arc::new(house_tools);
+        let model = resolve_model(&self.project, profile.model.as_deref());
+        let prompt_profile = profile.clone();
+        let prompt_context = context.clone();
+        let prompt_house = Arc::downgrade(self);
+        let lua = self.project.runtime.clone();
+        let hooks = Hooks::new().on_before_tool(Arc::new(move |event| {
+            let lua = lua.clone();
+            Box::pin(async move { lua.run_guards(&event).await })
+        }));
+        let configured_model = profile
+            .model
+            .clone()
+            .or_else(|| self.project.runtime.agent.model.clone())
+            .unwrap_or_else(|| "none".into());
+        let harness = Harness::new(
+            session.clone(),
+            HarnessConfig {
+                model,
+                tools: tools.clone(),
+                hooks,
+                system_prompt: Arc::new(move || {
+                    let Some(inner) = prompt_house.upgrade() else {
+                        return String::new();
+                    };
+                    format!(
+                        "{}\n\nCurrent directory: {}\n{}",
+                        system_prompt(&inner.project, &prompt_profile, &inner.ready_profiles()),
+                        prompt_context.cwd(),
+                        prompt_context.instructions()
+                    )
+                }),
+                settings: RunSettings::default(),
+                retry: RetryPolicy::default(),
+                configuration: LaneConfiguration {
+                    model: ModelRef {
+                        provider: configured_model.clone(),
+                        model_id: configured_model,
+                    },
+                    thinking_level: self
+                        .project
+                        .runtime
+                        .agent
+                        .thinking
+                        .clone()
+                        .unwrap_or_else(|| "default".into()),
+                    active_tool_names,
+                },
+                event_capacity: 1024,
+            },
+        );
+        bind_profile_environment(&harness, self.project.clone(), id, {
+            let tools = tools.clone();
+            Arc::new(move || tools.tool_names())
+        });
+        let (cmds, cmd_rx) = mpsc::channel(32);
+        Ok((
+            BotRuntime {
+                profile,
+                harness,
+                session,
+                cmds,
+                context,
+                profile_error: None,
+                session_key: token.into(),
+                supervisor: None,
+            },
+            cmd_rx,
+        ))
+    }
+
+    async fn switch_chat(
+        self: Arc<Self>,
+        bot: &str,
+        expected: &str,
+        kind: SwitchKind,
+    ) -> anyhow::Result<SwitchAck> {
+        let bot = bot.to_string();
+        let expected = expected.to_string();
+        let inner = self.clone();
+        Box::pin(
+            self.owned(
+                async move { Box::pin(inner.switch_chat_inner(&bot, &expected, kind)).await },
+            ),
+        )
+        .await
+    }
+
+    async fn switch_chat_inner(
+        self: &Arc<Self>,
+        bot: &str,
+        expected: &str,
+        kind: SwitchKind,
+    ) -> anyhow::Result<SwitchAck> {
+        let _profiles = self.profile_edits.lock().await;
+        let guest_home = home::guest(bot)?;
+        let path = self.project.bot_conversation_path(bot, MAIN_LANE);
+        let relative = path.strip_prefix(&self.project.root)?.to_path_buf();
+        let (token, previous) = {
+            let mut roster = self.snapshot.write();
+            let profile = match roster.get(bot) {
+                Some(BotSlot::Ready(runtime)) if runtime.session.id() == expected => {
+                    runtime.profile.clone()
+                }
+                Some(BotSlot::Ready(_)) => {
+                    anyhow::bail!("bot was replaced; refresh before switching conversations")
+                }
+                _ => anyhow::bail!("unknown or unavailable bot {bot}"),
+            };
+            roster.begin_replace(bot, profile)?
+        };
+        self.announce_roster();
+
+        let (reply, quiesced) = tokio::sync::oneshot::channel();
+        let quiesce_result = match previous.cmds.send(BotCmd::Quiesce(reply)).await {
+            Ok(()) => quiesced
+                .await
+                .map_err(|_| anyhow::anyhow!("bot supervisor dropped while switching")),
+            Err(_) => Err(anyhow::anyhow!(
+                "bot supervisor unavailable while switching"
+            )),
+        };
+        match quiesce_result {
+            Ok(Ok(())) => {}
+            Ok(Err(message)) => {
+                self.rollback_replace(bot, &token, previous, false)?;
+                return Err(anyhow::anyhow!(message));
+            }
+            Err(error) => {
+                self.rollback_replace(bot, &token, previous, true)?;
+                return Err(error);
+            }
+        }
+
+        let fork = match kind {
+            SwitchKind::New => None,
+            SwitchKind::Fork(target) => {
+                match previous.session.fork_snapshot(MAIN_LANE, target).await {
+                    Ok(snapshot) => Some(snapshot),
+                    Err(error) => {
+                        self.rollback_replace(bot, &token, previous, true)?;
+                        return Err(error.into());
+                    }
+                }
+            }
+        };
+        let storage_result = if let Some(snapshot) = fork {
+            let parent = snapshot.parent_session_id().to_string();
+            Storage::create_fork_beneath(
+                &self.project.root,
+                &relative,
+                format!("{bot}:{token}"),
+                Some(guest_home.clone()),
+                parent,
+            )
+            .and_then(|mut storage| snapshot.apply(&mut storage).map(|_| storage))
+        } else {
+            Storage::open_beneath(
+                &self.project.root,
+                &relative,
+                format!("{bot}:{token}"),
+                Some(guest_home),
+            )
+        };
+        let storage = match storage_result {
+            Ok(storage) => storage,
+            Err(error) => {
+                let cleanup = crate::script_fs::remove_file(&self.project.root, &relative);
+                self.rollback_replace(bot, &token, previous, true)?;
+                if let Err(cleanup) = cleanup
+                    && cleanup.kind() != std::io::ErrorKind::NotFound
+                {
+                    return Err(anyhow::anyhow!(
+                        "create conversation: {error}; remove failed session: {cleanup}"
+                    ));
+                }
+                return Err(error.into());
+            }
+        };
+        let profile = previous.profile.clone();
+        let (runtime, cmd_rx) = match self.make_runtime(profile, &token, storage).await {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let cleanup = crate::script_fs::remove_file(&self.project.root, &relative);
+                self.rollback_replace(bot, &token, previous, true)?;
+                if let Err(cleanup) = cleanup
+                    && cleanup.kind() != std::io::ErrorKind::NotFound
+                {
+                    return Err(anyhow::anyhow!(
+                        "open conversation: {error}; remove failed session: {cleanup}"
+                    ));
+                }
+                return Err(error);
+            }
+        };
+        let next_session = runtime.session.clone();
+        let next_harness = runtime.harness.clone();
+        self.sessions
+            .lock()
+            .insert(token.clone(), next_session.clone());
+        let published = {
+            let mut roster = self.snapshot.write();
+            match roster.finish_replace(bot, &token, runtime) {
+                Ok(()) => {
+                    let handle = spawn_supervisor(
+                        next_harness,
+                        cmd_rx,
+                        Arc::downgrade(self),
+                        bot.to_string(),
+                    );
+                    let abort = handle.abort_handle();
+                    let mut controllers = self.controllers.lock();
+                    controllers.retain(|task| !task.is_finished());
+                    controllers.push(handle);
+                    for (id, runtime) in roster.ready_mut() {
+                        if id == bot {
+                            runtime.supervisor = Some(abort.clone());
+                        }
+                    }
+                    Ok(())
+                }
+                Err((error, runtime)) => Err((error, runtime)),
+            }
+        };
+        if let Err((error, runtime)) = published {
+            runtime.harness.close().await;
+            self.sessions.lock().remove(&token);
+            let _ = crate::script_fs::remove_file(&self.project.root, &relative);
+            previous.harness.close().await;
+            return Err(error.into());
+        }
+        let previous_log_id = previous.session.id().to_string();
+        let previous_key = previous.session_key.clone();
+        previous.harness.close().await;
+        self.sessions.lock().remove(&previous_key);
+        drop(previous);
+        self.announce_roster();
+        Ok(SwitchAck {
+            log_id: next_session.id().to_string(),
+            previous_log_id,
+        })
+    }
+
+    fn rollback_replace(
+        self: &Arc<Self>,
+        bot: &str,
+        token: &str,
+        mut runtime: BotRuntime,
+        restart_supervisor: bool,
+    ) -> anyhow::Result<()> {
+        if restart_supervisor {
+            let (cmds, cmd_rx) = mpsc::channel(32);
+            runtime.cmds = cmds;
+            let handle = spawn_supervisor(
+                runtime.harness.clone(),
+                cmd_rx,
+                Arc::downgrade(self),
+                bot.to_string(),
+            );
+            runtime.supervisor = Some(handle.abort_handle());
+            let mut controllers = self.controllers.lock();
+            controllers.retain(|task| !task.is_finished());
+            controllers.push(handle);
+        }
+        self.snapshot
+            .write()
+            .cancel_replace(bot, token, runtime)
+            .map_err(|(error, _runtime)| anyhow::Error::from(error))?;
+        self.announce_roster();
         Ok(())
     }
 
@@ -1112,7 +1599,7 @@ impl Inner {
             finished: false,
         };
         self.write_bot_files(&reserved, &spec).await?;
-        self.finish_create(&reserved.id, &token).await?;
+        Box::pin(self.finish_create(&reserved.id, &token)).await?;
         let mut guard = guard;
         guard.finished = true;
         Ok(reserved)
@@ -1183,7 +1670,7 @@ impl Inner {
             anyhow::bail!("stale create reservation");
         }
         let profile = Profile::load_for(&self.project.root, id)?;
-        self.prepare_ready(profile, token).await
+        Box::pin(self.prepare_ready(profile, token)).await
     }
 
     fn abort_create(&self, id: &str, token: &str) {
@@ -1350,20 +1837,61 @@ impl Inner {
         Ok(format!("sent to {to_name}"))
     }
 
+    pub(crate) fn prepare_user_attachment(
+        &self,
+        bot: &str,
+        file: &str,
+        mimetype: &str,
+    ) -> anyhow::Result<attach::Prepared> {
+        let resolved = self.context(bot)?.resolve(file);
+        let relative = Path::new(&resolved)
+            .strip_prefix("/workspace")
+            .map_err(|_| anyhow::anyhow!("attachment must be inside /workspace"))?;
+        if relative.as_os_str().is_empty() {
+            anyhow::bail!("attachment path must name a file");
+        }
+        attach::prepare(&self.project.root, relative, mimetype).map_err(Into::into)
+    }
+
+    fn user_notice(
+        bot: &str,
+        text: &str,
+        attachments: Vec<attach::Prepared>,
+    ) -> anyhow::Result<(PendingEntry, String)> {
+        let fingerprints: Vec<_> = attachments
+            .iter()
+            .map(|attachment| {
+                serde_json::json!({
+                    "name": attachment.saved.name,
+                    "mime": attachment.saved.mime,
+                    "sha256": attachment.sha256,
+                })
+            })
+            .collect();
+        let digest_source = serde_json::to_vec(&(text, fingerprints))?;
+        let saved: Vec<_> = attachments
+            .into_iter()
+            .map(|attachment| attachment.saved)
+            .collect();
+        let notice = PendingEntry::custom(
+            "user_notice",
+            serde_json::json!({ "text": text, "bot": bot, "attachments": saved }),
+        );
+        let mut digest = String::with_capacity(64);
+        for byte in sha2::Sha256::digest(digest_source) {
+            let _ = write!(digest, "{byte:02x}");
+        }
+        Ok((notice, digest))
+    }
+
     pub(crate) async fn send_user_message(
         &self,
         bot: &str,
         text: &str,
+        attachments: Vec<attach::Prepared>,
     ) -> anyhow::Result<crate::ids::EntryId> {
         let harness = self.ready_harness(bot)?;
-        let notice = PendingEntry::custom(
-            "user_notice",
-            serde_json::json!({ "text": text, "bot": bot }),
-        );
-        let mut digest = String::with_capacity(64);
-        for b in sha2::Sha256::digest(text.as_bytes()) {
-            let _ = write!(digest, "{b:02x}");
-        }
+        let (notice, digest) = Self::user_notice(bot, text, attachments)?;
         match harness
             .write_once(MAIN_LANE, &format!("user_notice/{digest}"), notice.clone())
             .await
@@ -1429,6 +1957,256 @@ impl Inner {
             self.last_fired.lock().insert(id.clone(), stamp);
             if let Err(e) = self.run_routine(&id).await {
                 eprintln!("revebot: routine {id}: {e}");
+            }
+        }
+    }
+
+    pub(crate) async fn invoke_plugin_tool(
+        &self,
+        bot: &str,
+        name: &str,
+        args: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<String, String> {
+        let plugin = self
+            .project
+            .runtime
+            .plugins
+            .iter()
+            .find(|p| p.tools.iter().any(|t| t.name == name))
+            .map(|p| p.name.clone())
+            .ok_or_else(|| format!("no plugin tool named {name}"))?;
+        let snap = self
+            .plugin_snapshot(bot, &plugin)
+            .await
+            .map_err(|e| e.to_string())?;
+        let effect = self
+            .project
+            .runtime
+            .run_plugin_tool(name, args, snap)
+            .await
+            .map_err(|e| e.to_string())?;
+        let notice = effect.notice.clone();
+        let (_, sends) = self
+            .apply_plugin_effect(bot, &plugin, effect)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.deliver_plugin_sends(&plugin, sends).await;
+        Ok(notice.unwrap_or_default())
+    }
+
+    pub(crate) fn offered_plugin_tools(&self, bot: &str) -> Vec<String> {
+        self.plugin_offers
+            .lock()
+            .get(bot)
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    async fn plugin_snapshot(
+        &self,
+        bot: &str,
+        plugin: &str,
+    ) -> anyhow::Result<crate::plugin::PluginSnapshot> {
+        let harness = self.ready_harness(bot)?;
+        let busy = match harness.session().lane_state(MAIN_LANE).await {
+            Ok(Some((state, _))) => state.current_operation_id.is_some(),
+            _ => false,
+        };
+        let key = crate::plugin::PluginSnapshot::fact_key(plugin);
+        let state = match harness
+            .session()
+            .register_json(crate::entry::Namespace::FactCustom, &key)
+            .await?
+        {
+            Some((serde_json::Value::Object(map), _)) => map,
+            _ => serde_json::Map::new(),
+        };
+        Ok(crate::plugin::PluginSnapshot {
+            bot: bot.to_string(),
+            now: chrono::Utc::now().timestamp(),
+            busy,
+            lane: MAIN_LANE.to_string(),
+            state,
+        })
+    }
+
+    async fn apply_plugin_effect(
+        &self,
+        bot: &str,
+        plugin: &str,
+        effect: crate::plugin::PluginEffect,
+    ) -> anyhow::Result<(Option<crate::ids::EntryId>, Vec<(String, String)>)> {
+        if effect.state_dirty {
+            let harness = self.ready_harness(bot)?;
+            let key = crate::plugin::PluginSnapshot::fact_key(plugin);
+            harness
+                .session()
+                .set_fact(
+                    crate::entry::Namespace::FactCustom,
+                    &key,
+                    Some(serde_json::Value::Object(effect.state)),
+                )
+                .await?;
+        }
+        {
+            let mut offers = self.plugin_offers.lock();
+            let slot = offers.entry(bot.to_string()).or_default();
+            for name in effect.offers {
+                slot.insert(name);
+            }
+            for name in effect.retracts {
+                slot.remove(&name);
+            }
+        }
+        if !effect.statusline.is_empty() {
+            let text = {
+                let mut status = self.plugin_status.lock();
+                let slot = status.entry(bot.to_string()).or_default();
+                for (key, value) in effect.statusline {
+                    if value.trim().is_empty() {
+                        slot.remove(&key);
+                    } else {
+                        slot.insert(key, value);
+                    }
+                }
+                crate::plugin::join_statusline(slot)
+            };
+            let _ = self.house_events.send(Event::new(
+                "house",
+                None,
+                Kind::Statusline {
+                    bot_id: bot.to_string(),
+                    text,
+                },
+            ));
+        }
+        if let Some(ms) = effect.timer_ms {
+            self.plugin_wake.lock().insert(
+                plugin.to_string(),
+                std::time::Instant::now() + Duration::from_millis(ms),
+            );
+        }
+        let mut notice_id = None;
+        if let Some(notice) = effect.notice.filter(|s| !s.trim().is_empty()) {
+            notice_id = Some(self.send_user_message(bot, &notice, Vec::new()).await?);
+        }
+        Ok((notice_id, effect.sends))
+    }
+
+    async fn deliver_plugin_sends(&self, plugin: &str, sends: Vec<(String, String)>) {
+        for (target, text) in sends {
+            let body = format!("[plugin:{plugin}] {text}");
+            if let Err(e) = self.dispatch_user_text(&target, &body, None).await {
+                eprintln!("revebot: plugin {plugin} send {target}: {e}");
+            }
+        }
+    }
+
+    async fn try_plugin_command(
+        &self,
+        bot: &str,
+        text: &str,
+        harness: &crate::harness::Harness,
+    ) -> anyhow::Result<Option<PromptAck>> {
+        let Some((name, args)) = crate::plugin::slash_command(text) else {
+            return Ok(None);
+        };
+        let Some(def) = self.project.runtime.plugin(name) else {
+            return Ok(None);
+        };
+        if !def.has_command() {
+            return Ok(None);
+        }
+        if def.owner.as_deref().is_some_and(|id| id != bot) {
+            return Ok(None);
+        }
+        let snap = self.plugin_snapshot(bot, name).await?;
+        let effect = self
+            .project
+            .runtime
+            .run_plugin_command(name, args, snap)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let (notice_id, sends) = self.apply_plugin_effect(bot, name, effect).await?;
+        self.deliver_plugin_sends(name, sends).await;
+        let entry_id = notice_id.map(|id| id.to_string()).unwrap_or_default();
+        Ok(Some(PromptAck {
+            log_id: harness.session().id().into(),
+            record: if entry_id.is_empty() {
+                None
+            } else {
+                harness
+                    .session()
+                    .log_record(crate::ids::EntryId::from(entry_id.clone()))
+                    .await
+                    .ok()
+                    .flatten()
+            },
+            operation_id: String::new(),
+            entry_id,
+            mode: "plugin",
+        }))
+    }
+
+    async fn tick_plugins(self: &Arc<Self>) {
+        let now = std::time::Instant::now();
+        let plugins: Vec<(String, u64, Option<String>)> = self
+            .project
+            .runtime
+            .plugins
+            .iter()
+            .filter(|p| p.has_update())
+            .map(|p| (p.name.clone(), p.interval_ms, p.owner.clone()))
+            .collect();
+        let bots: Vec<String> = {
+            let snap = self.snapshot.read();
+            snap.iter()
+                .filter_map(|(id, slot)| match slot {
+                    BotSlot::Ready(_) => Some(id.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        for (name, interval_ms, owner) in plugins {
+            let extra_due = self
+                .plugin_wake
+                .lock()
+                .get(&name)
+                .copied()
+                .is_some_and(|at| at <= now);
+            let interval_due = self
+                .plugin_last
+                .lock()
+                .get(&name)
+                .copied()
+                .is_none_or(|last| {
+                    u64::try_from(now.saturating_duration_since(last).as_millis())
+                        .unwrap_or(u64::MAX)
+                        >= interval_ms
+                });
+            if !extra_due && !interval_due {
+                continue;
+            }
+            self.plugin_wake.lock().remove(&name);
+            self.plugin_last.lock().insert(name.clone(), now);
+            for bot in &bots {
+                if owner.as_deref().is_some_and(|id| id != bot) {
+                    continue;
+                }
+                let snap = match self.plugin_snapshot(bot, &name).await {
+                    Ok(snap) => snap,
+                    Err(e) => {
+                        eprintln!("revebot: plugin {name} snapshot {bot}: {e}");
+                        continue;
+                    }
+                };
+                match self.project.runtime.run_plugin_update(&name, snap).await {
+                    Ok(effect) => match self.apply_plugin_effect(bot, &name, effect).await {
+                        Ok((_, sends)) => self.deliver_plugin_sends(&name, sends).await,
+                        Err(e) => eprintln!("revebot: plugin {name} {bot}: {e}"),
+                    },
+                    Err(e) => eprintln!("revebot: plugin {name} update {bot}: {e}"),
+                }
             }
         }
     }
@@ -1513,6 +2291,42 @@ fn spawn_routines(house: Weak<Inner>) -> tokio::task::JoinHandle<()> {
     })
 }
 
+fn spawn_plugins(house: Weak<Inner>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let Some(inner) = house.upgrade() else {
+                break;
+            };
+            if inner.snapshot.read().is_closed() {
+                break;
+            }
+            inner.tick_plugins().await;
+            drop(inner);
+            tokio::time::sleep(Duration::from_millis(crate::plugin::MIN_INTERVAL_MS)).await;
+        }
+    })
+}
+
+fn spawn_curator(house: Weak<Inner>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let Some(inner) = house.upgrade() else {
+                break;
+            };
+            if inner.snapshot.read().is_closed() {
+                break;
+            }
+            let root = inner.project.root.clone();
+            drop(inner);
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = crate::curator::Curator::open(&root).maybe_run();
+            })
+            .await;
+            tokio::time::sleep(Duration::from_hours(1)).await;
+        }
+    })
+}
+
 fn publish_busy(house: &Weak<Inner>, bot_id: &str, busy: bool) {
     let Some(inner) = house.upgrade() else {
         return;
@@ -1555,7 +2369,7 @@ fn spawn_supervisor(
                         BotCmd::Stop(reply) => {
                             cmds.close();
                             while let Ok(cmd) = cmds.try_recv() {
-                                if let BotCmd::UserText {reply,..} = cmd { let _ = reply.send(Err("bot is stopping".into())); }
+                                reject_bot_cmd(cmd, "bot is stopping");
                             }
                             let _ = harness.abort(MAIN_LANE).await;
                             harness.close().await;
@@ -1564,6 +2378,57 @@ fn spawn_supervisor(
                             // still runs. Close prevents late kicks from starting.
                             while drives.join_next().await.is_some() {}
                             let _ = reply.send(());
+                            break;
+                        }
+                        BotCmd::Compact {
+                            instructions,
+                            reply,
+                        } => {
+                            let h = harness.clone();
+                            drives.spawn(async move {
+                                let result = h
+                                    .compact(MAIN_LANE, instructions)
+                                    .await
+                                    .map(|result| CompactAck {
+                                        log_id: h.session().id().into(),
+                                        operation_id: result.operation_id.to_string(),
+                                        outcome: result.outcome.as_str(),
+                                    })
+                                    .map_err(|error| error.to_string());
+                                let _ = reply.send(result);
+                            });
+                        }
+                        BotCmd::Quiesce(reply) => {
+                            while drives.try_join_next().is_some() {}
+                            let lane_idle = harness
+                                .session()
+                                .lane_state(MAIN_LANE)
+                                .await
+                                .is_ok_and(|state| {
+                                    state.is_none_or(|(state, _)| {
+                                        state.current_operation_id.is_none()
+                                            && state.pending_next_run.is_empty()
+                                    })
+                                });
+                            // A drive may have made its terminal commit but not returned
+                            // yet. Once the durable lane is idle it has no remaining
+                            // effect, so drain it rather than spuriously rejecting a
+                            // conversation switch.
+                            if lane_idle {
+                                while drives.join_next().await.is_some() {}
+                            }
+                            if !lane_idle || !drives.is_empty() {
+                                let _ = reply.send(Err(
+                                    "bot is busy; wait for its current and queued work to finish"
+                                        .into(),
+                                ));
+                                continue;
+                            }
+                            cmds.close();
+                            while let Ok(cmd) = cmds.try_recv() {
+                                reject_bot_cmd(cmd, "bot conversation changed before command ran");
+                            }
+                            let _ = reply.send(Ok(()));
                             break;
                         }
                         BotCmd::KickNow => {
@@ -1578,10 +2443,12 @@ fn spawn_supervisor(
                     match event {
                         Ok(ev) => {
                             match &ev.kind {
-                                Kind::RunStart | Kind::RunResume { .. } => {
+                                Kind::RunStart
+                                | Kind::RunResume { .. }
+                                | Kind::CompactionStart { .. } => {
                                     publish_busy(&house, &bot_id, true);
                                 }
-                                Kind::RunEnd { .. } => {
+                                Kind::RunEnd { .. } | Kind::CompactionEnd { .. } => {
                                     publish_busy(&house, &bot_id, false);
                                     let h = harness.clone();
                                     drives.spawn(async move {
@@ -1609,6 +2476,21 @@ fn spawn_supervisor(
             }
         }
     })
+}
+
+fn reject_bot_cmd(cmd: BotCmd, reason: &str) {
+    match cmd {
+        BotCmd::UserText { reply, .. } => {
+            let _ = reply.send(Err(reason.into()));
+        }
+        BotCmd::Compact { reply, .. } => {
+            let _ = reply.send(Err(reason.into()));
+        }
+        BotCmd::Quiesce(reply) => {
+            let _ = reply.send(Err(reason.into()));
+        }
+        BotCmd::KickNow | BotCmd::Stop(_) => {}
+    }
 }
 
 async fn claim_then_drive(
@@ -1728,7 +2610,7 @@ pub(crate) fn bind_profile_environment(
     harness: &Harness,
     project: Arc<Project>,
     id: String,
-    tool_names: Vec<String>,
+    tool_names: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
 ) {
     let model_project = project.clone();
     harness.set_environment_sources(
@@ -1749,7 +2631,7 @@ pub(crate) fn bind_profile_environment(
                     .thinking
                     .clone()
                     .unwrap_or_else(|| "default".into()),
-                active_tool_names: tool_names.clone(),
+                active_tool_names: tool_names(),
             })
         }),
         Arc::new(move |configuration| {
@@ -1790,7 +2672,7 @@ fn resolve_model_checked(project: &Project, spec: &str) -> Result<Arc<dyn Model>
 
 #[cfg(test)]
 mod tests {
-    use super::{CreateSpec, page_transcript};
+    use super::{CreateSpec, Inner, page_transcript};
     use crate::entry::Entry;
     use serde_json::json;
 
@@ -1813,6 +2695,49 @@ mod tests {
         ] {
             assert!(serde_json::from_value::<CreateSpec>(value).is_err());
         }
+    }
+
+    fn prepared(id: &str, mime: &str, sha256: &str) -> super::attach::Prepared {
+        super::attach::Prepared {
+            saved: super::attach::Saved {
+                id: id.into(),
+                name: "report.md".into(),
+                path: format!("/workspace/tmp/{id}/report.md"),
+                bytes: 42,
+                mime: mime.into(),
+            },
+            sha256: sha256.into(),
+        }
+    }
+
+    #[test]
+    fn user_notice_persists_attachment_metadata_and_deduplicates_by_content() {
+        let (notice, digest) = Inner::user_notice(
+            "miku",
+            "Done",
+            vec![prepared("first", "text/markdown", "abc")],
+        )
+        .unwrap();
+        let (_, repeated_digest) = Inner::user_notice(
+            "miku",
+            "Done",
+            vec![prepared("second", "text/markdown", "abc")],
+        )
+        .unwrap();
+        let (_, changed_digest) =
+            Inner::user_notice("miku", "Done", vec![prepared("third", "text/plain", "abc")])
+                .unwrap();
+        assert_eq!(digest, repeated_digest);
+        assert_ne!(digest, changed_digest);
+        assert_eq!(notice.custom_type.as_deref(), Some("user_notice"));
+        assert_eq!(
+            notice.payload.as_ref().unwrap()["attachments"][0]["id"],
+            "first"
+        );
+        assert_eq!(
+            notice.payload.as_ref().unwrap()["attachments"][0]["mime"],
+            "text/markdown"
+        );
     }
 
     #[test]

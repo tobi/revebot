@@ -83,6 +83,17 @@ pub(crate) fn create_new(root: &Path, relative: &Path) -> io::Result<File> {
     .into())
 }
 
+pub(crate) fn remove_file(root: &Path, relative: &Path) -> io::Result<()> {
+    let parent = relative
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing parent"))?;
+    let name = relative
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing filename"))?;
+    let directory = open_dir(root, parent)?;
+    rustix::fs::unlinkat(&directory, name, rustix::fs::AtFlags::empty()).map_err(Into::into)
+}
+
 /// List actual child directories, refusing symlinks rather than following them
 /// into a host tree. Used when discovering per-bot script directories.
 pub(crate) fn child_dirs(root: &Path, relative: &Path) -> io::Result<Vec<PathBuf>> {

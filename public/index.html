@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#000000">
+<meta name="color-scheme" content="dark">
+<meta name="reve-token" content="{{TOKEN}}">
+<meta name="reve-bind" content="{{BIND}}">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="revebot">
+<meta name="application-name" content="revebot">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
+<title>revebot</title>
+<link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+<input type="checkbox" id="nav-toggle" class="drawer-check">
+<input type="checkbox" id="meta-toggle" class="drawer-check">
+<label class="scrim" id="nav-scrim" for="nav-toggle" aria-label="Close"></label>
+<label class="scrim" id="meta-scrim" for="meta-toggle" aria-label="Close"></label>
+<div class="drop-veil" id="drop-veil">Drop to attach</div>
+<div id="app">
+  <aside class="rail" id="rail">
+    <div class="topbar"><button class="plus" id="new" type="button" title="New agent">+</button></div>
+    <div class="search">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#7a7f87" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+      <input id="q" placeholder="Search" autocomplete="off">
+    </div>
+    <div id="bots"></div>
+    <div class="plug">
+      <span class="ic">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 3v4M8 7h8v3a4 4 0 0 1-8 0V7zM12 14v7"/></svg>
+      </span>
+      <span>Plugins</span>
+      <button class="install" id="install" type="button">Install</button>
+    </div>
+  </aside>
+  <main>
+    <div class="chat-head" id="head" title="Edit bot">
+      <label class="menu-btn" for="nav-toggle" title="Agents">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </label>
+      <div class="av" id="head-av"></div>
+      <div style="flex:1;min-width:0">
+        <h1 id="head-name">revebot</h1>
+        <div class="sub" id="head-sub"></div>
+      </div>
+      <label class="meta-btn" for="meta-toggle" title="Routines">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M8 9h8M8 13h5"/></svg>
+      </label>
+    </div>
+    <reve-feed id="feed"></reve-feed>
+    <reve-composer id="compose"></reve-composer>
+    <reve-autocomplete id="ac"></reve-autocomplete>
+  </main>
+  <aside class="side" id="side">
+    <div class="side-tabs" role="tablist">
+      <button type="button" class="side-tab on" data-pane="screen" role="tab" aria-selected="true">Screen</button>
+      <button type="button" class="side-tab" data-pane="files" role="tab" aria-selected="false">Files</button>
+      <button type="button" class="side-tab" data-pane="routines" role="tab" aria-selected="false">Routines</button>
+    </div>
+    <div class="side-pane on" id="pane-screen" role="tabpanel">
+      <div class="side-pad">
+        <h2 id="screen-title">Screen</h2>
+        <div class="screen" id="desktop" title="Click to take over the desktop">
+          <div class="bar">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+            <span class="grow"></span>
+            <span class="hint-label" id="desktop-hint">live preview</span>
+          </div>
+          <div class="body" id="desktop-body">
+            <div class="hint">House computer is the microVM.<br>/workspace is shared by every bot.</div>
+          </div>
+          <div class="veil" id="desktop-veil"></div>
+        </div>
+      </div>
+    </div>
+    <div class="side-pane" id="pane-files" role="tabpanel">
+      <div class="file-peek" id="file-peek" hidden>
+        <div class="file-peek-bar">
+          <span id="file-peek-name"></span>
+          <button type="button" class="tree-act" id="file-peek-close" title="Close preview">×</button>
+        </div>
+        <pre id="file-peek-body"></pre>
+      </div>
+      <div class="tree-wrap">
+        <div class="side-pad tree-head">
+          <h2>Files</h2>
+          <div class="tree-acts">
+            <button type="button" class="tree-act" id="tree-refresh" title="Refresh Explorer">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path stroke="currentColor" stroke-width="1.4" stroke-linecap="round" d="M3.2 8a4.8 4.8 0 1 1 .9 2.8M3.2 8V4.5M3.2 8H6.4"/></svg>
+            </button>
+            <button type="button" class="tree-act" id="tree-collapse" title="Collapse Folders in Explorer">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path stroke="currentColor" stroke-width="1.4" stroke-linecap="round" d="M3 4.5h10M3 8h10M3 11.5h6"/></svg>
+            </button>
+          </div>
+        </div>
+        <div id="tree" tabindex="0" role="tree" aria-label="Workspace"></div>
+      </div>
+    </div>
+    <div class="side-pane" id="pane-routines" role="tabpanel">
+      <div class="side-pad" style="display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0">Routines</h2>
+        <span class="plus" title="Edit routines/*.lua" style="padding:0">+</span>
+      </div>
+      <div id="routines"></div>
+    </div>
+  </aside>
+</div>
+<div class="takeover" id="desktop-takeover">
+  <div class="takeover-bar">
+    <strong>Desktop</strong>
+    <span>You have the keyboard and mouse. Esc or Give back returns to chat.</span>
+    <span class="grow"></span>
+    <button type="button" id="desktop-close">Give back</button>
+  </div>
+  <div class="takeover-slot" id="desktop-takeover-slot"></div>
+</div>
+<div class="sheet" id="sheet" popover="auto">
+  <form class="card" id="bot-form">
+    <h2 id="sheet-title">New bot</h2>
+    <div class="av-preview" id="sheet-av"></div>
+    <label>Look</label>
+    <div class="swatches" id="swatches"></div>
+    <div class="shapes" id="shapes" style="margin-top:8px"></div>
+    <div class="row">
+      <div>
+        <label>Name</label>
+        <input id="f-name" required autocomplete="off">
+      </div>
+      <div>
+        <label>Title</label>
+        <input id="f-title" autocomplete="off">
+      </div>
+    </div>
+    <label>Description</label>
+    <input id="f-desc" autocomplete="off">
+    <label>Model</label>
+    <select id="f-model"></select>
+    <label>Soul — identity, voice, and standing remit</label>
+    <textarea class="soul-editor" id="f-soul" spellcheck="false"></textarea>
+    <div class="actions">
+      <button class="ghost" type="button" id="sheet-cancel" popovertarget="sheet" popovertargetaction="hide">Cancel</button>
+      <button class="primary" type="submit" id="sheet-save">Save</button>
+    </div>
+  </form>
+</div>
+<div id="ctx" class="ctx" hidden>
+  <button type="button" id="ctx-edit">Edit…</button>
+  <button type="button" id="ctx-delete" class="danger">Delete</button>
+</div>
+<div id="msg-ctx" class="ctx" hidden>
+  <button type="button" id="msg-copy">Copy message</button>
+  <button type="button" id="msg-fork">Fork from here</button>
+</div>
+<script type="module" src="/js/app.mjs"></script>
+</body>
+</html>

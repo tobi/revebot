@@ -1,9 +1,9 @@
 ---
 name: plugins
 description: >
-  Complete Reve Lua API reference: plugin tools, parameters, guards, cron routines,
-  callback contexts, results, replay, cancellation, and host-only configuration.
-  Use to write or debug Lua integrations, or when the user runs /plugins.
+  Complete Reve Lua API reference: plugin tools, plugin() commands/update/statusline,
+  parameters, guards, cron routines, callback contexts, results, replay, cancellation,
+  and host-only configuration. Use to write or debug Lua integrations, or when the user runs /plugins.
 ---
 
 # Reve Lua API
@@ -15,9 +15,9 @@ inside the mandatory microVM through `ctx.sh`. There is no host shell fallback.
 
 | Location | Declarations | Trust |
 |---|---|---|
-| `plugins/*.lua`, `tools/*.lua` at the house root | `tool`, `guard`, `cron`, `on_change` | Trusted host-installed code; outside the VM mount |
-| `/workspace/plugins/*.lua` | `tool`, `guard`, `cron`, `on_change` | Restricted, bot-editable Lua |
-| `/workspace/agents/<id>/plugins/*.lua` | `tool`, `guard`, `cron`, `on_change` | Restricted; definitions carry that folder's bot id |
+| `plugins/*.lua`, `tools/*.lua` at the house root | `tool`, `guard`, `cron`, `on_change`, `plugin` | Trusted host-installed code; outside the VM mount |
+| `/workspace/plugins/*.lua` | `tool`, `guard`, `cron`, `on_change`, `plugin` | Restricted, bot-editable Lua |
+| `/workspace/agents/<id>/plugins/*.lua` | `tool`, `guard`, `cron`, `on_change`, `plugin` | Restricted; definitions carry that folder's bot id |
 | `/workspace/routines/*.lua` | `routine` | Restricted; specify `bot` or use `run` |
 | `/workspace/agents/<id>/routines/*.lua` | `routine` | Restricted; `bot` defaults to that folder's id |
 
@@ -39,7 +39,7 @@ is not accepted. Do not put secrets into source files.
 
 Registers a model-callable tool. Rust house names (`update_state`, `cd`,
 `CreateAgent`, `UpdateAgent`, `SendAgentMessage`, `SendUserMessage`,
-`AskUserForSecret`) cannot be replaced. `update_state` supports `target="profile"`
+`AskUserForSecret`, `skills_list`, `skill_view`, `skill_manage`) cannot be replaced. `update_state` supports `target="profile"`
 (default) and `target="memory"`; the memory skill documents facts/tiers/scopes.
 These are model tools, not Lua globals or context functions. `CreateAgent` accepts
 `soul` for the initial SOUL.md, not a separate standing-instructions file.
@@ -226,6 +226,52 @@ observer replay or registration/unsubscribe API at runtime yet; definitions load
 at startup. External-editor changes are reread on the next API/model input; this
 facility is a write-path observer, not a continuously polling filesystem watcher.
 
+## `plugin(name, spec)`
+
+A first-class house plugin: slash command `/name`, paced `update`, durable
+state in the bot's session log (`fact.custom/plugin/<name>`), a compose
+statusline, and tools that can be offered only while the plugin needs them.
+`name` matches `^[a-z0-9][a-z0-9_-]*$`.
+
+| Field | Type | Default / meaning |
+|---|---|---|
+| `interval` | integer ms | `1000`; clamped to 250ms–18h. How often `update` runs. |
+| `command` | `function(args, ctx)` | Slash handler. `args` is the text after `/name`. Return a string to post a notice. |
+| `update` | `function(ctx)` | Engine-paced tick. Check elapsed time against durable state; do not busy-loop. |
+| `tools` | array of tool tables | Gated tools (`name`, `description`, `params`, `run`). Not in the model list until `ctx.offer`. |
+
+Need `command` and/or `update`. Plugin callbacks have **no** `ctx.sh`. State is
+the durable log, not a sidecar file. Timers cannot exceed 18 hours.
+
+Plugin `ctx`:
+
+| Member | Contract |
+|---|---|
+| `ctx.bot` | Invoking / target bot id |
+| `ctx.now` | Unix seconds |
+| `ctx.lane.busy`, `ctx.lane.id` | Whether the main lane is in a run |
+| `ctx.state.get(key)` / `ctx.state.set(key, value)` | JSON object in `fact.custom/plugin/<name>`. `set` with nil deletes. Applied only if the callback succeeds. |
+| `ctx.statusline[slot] = string` | Compose footer. Multiple slots join with ` \| `. Empty/nil clears. |
+| `ctx.send(bot_id, text)` | Queue a later turn. Max 32. |
+| `ctx.offer(tool_name)` / `ctx.retract(tool_name)` | Show or hide a declared plugin tool on the next run. |
+| `ctx.set_timer(ms)` | Extra `update` wake, clamped to 18h. Reconstruct due work from durable state after restart. |
+
+```lua
+-- example: plugin
+plugin("pulse", {
+  interval = 1000,
+  command = function(args, ctx)
+    ctx.state.set("last", args)
+    ctx.statusline["pulse"] = args
+    return args
+  end,
+  update = function(ctx)
+    local last = ctx.state.get("last")
+    if last then ctx.statusline["pulse"] = last end
+  end,
+})
+```
+
 ## `routine(id, spec)` and `cron(id, spec)`
 
 `routine` is the declaration in routine files. `cron` is the corresponding
@@ -315,11 +361,13 @@ to workspace Lua. Do not modify host launch code through a bot plugin.
 Each secret needs `env: string`, `source: string`, and a nonempty `hosts` map of
 hostname to `{ allow = true, headers = { Header = "Bearer $ENV" } }`. `allow`
 defaults to true; those hosts also join the sandbox allow list. Optional string:
-`placeholder`. Sources are host environment references or supported host-configured
-sources (`$(command)`, `file:...`, HTTP(S)). No literal `value` field. `$(command)`
-sources reject nested substitution. Secret resolution is host configuration
-authority, never a workspace Lua command API; the guest receives placeholders,
-with values injected only for configured hosts. A host list is not accepted.
+`placeholder`. `$NAME` sources read a host environment variable. Unprefixed
+sources are literal strings stored verbatim in host config. Other supported
+host-configured sources are `$(command)`, `file:...`, and HTTP(S); command
+sources reject nested substitution. There is no separate literal `value` field.
+Secret resolution is host configuration authority, never a workspace Lua
+command API; the guest receives placeholders, with values injected only for
+configured hosts. A host list is not accepted.
 
 Both Lua states remove `os.execute`, `io.popen`, `os.exit`, and `package.loadlib`.
 Trusted host Lua otherwise retains ambient host capabilities and must never load

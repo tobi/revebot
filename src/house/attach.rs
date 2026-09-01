@@ -5,23 +5,31 @@
 //! Guest `/tmp` is ephemeral. The message refers to `/workspace/tmp/{id}/{name}`
 //! and the page renders that tag as a pill.
 
+use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::Digest as _;
 
 use crate::ids;
 use crate::script_fs;
 
 pub const MAX_BYTES: u64 = 25 * 1024 * 1024;
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Saved {
     pub id: String,
     pub name: String,
     pub path: String,
     pub bytes: u64,
     pub mime: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct Prepared {
+    pub saved: Saved,
+    pub sha256: String,
 }
 
 pub fn sanitize_name(name: &str) -> String {
@@ -54,6 +62,11 @@ pub fn valid_id(id: &str) -> bool {
 
 pub fn relative(id: &str, name: &str) -> PathBuf {
     PathBuf::from("workspace/tmp").join(id).join(name)
+}
+fn metadata_relative(id: &str) -> PathBuf {
+    PathBuf::from("workspace/tmp")
+        .join(id)
+        .join(".attachment.json")
 }
 
 pub fn guest_path(id: &str, name: &str) -> String {
@@ -122,13 +135,43 @@ pub fn save(root: &Path, name: &str, bytes: &[u8], mime: Option<&str>) -> io::Re
     let name = sanitize_name(name);
     let id = ids::uuid_v7(ids::now_ms());
     let relative = relative(&id, &name);
-    script_fs::write_new_bytes(root, &relative, bytes)?;
-    Ok(Saved {
+    let saved = Saved {
         path: guest_path(&id, &name),
         mime: mime_of(&name, mime),
         bytes: bytes.len() as u64,
         id,
         name,
+    };
+    script_fs::write_new_bytes(root, &relative, bytes)?;
+    let metadata = serde_json::to_vec(&saved).map_err(io::Error::other)?;
+    script_fs::write_new_bytes(root, &metadata_relative(&saved.id), &metadata)?;
+    Ok(saved)
+}
+
+pub fn prepare(root: &Path, workspace_relative: &Path, mime: &str) -> io::Result<Prepared> {
+    if !looks_like_mime(mime) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid attachment mimetype",
+        ));
+    }
+    let name = workspace_relative
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "missing attachment filename")
+        })?;
+    let bytes = script_fs::read_bytes(&root.join("workspace"), workspace_relative, MAX_BYTES)?;
+    let sha256 =
+        sha2::Sha256::digest(&bytes)
+            .iter()
+            .fold(String::with_capacity(64), |mut output, byte| {
+                let _ = write!(output, "{byte:02x}");
+                output
+            });
+    Ok(Prepared {
+        saved: save(root, name, &bytes, Some(mime))?,
+        sha256,
     })
 }
 
@@ -140,15 +183,21 @@ pub fn read(root: &Path, id: &str, name: &str) -> io::Result<(Saved, Vec<u8>)> {
     if sanitize_name(&name) != name {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad name"));
     }
-    let relative = relative(id, &name);
-    let bytes = script_fs::read_bytes(root, &relative, MAX_BYTES)?;
-    let saved = Saved {
-        id: id.into(),
-        path: guest_path(id, &name),
-        mime: mime_of(&name, None),
-        bytes: bytes.len() as u64,
-        name,
-    };
+    let metadata = script_fs::read_bytes(root, &metadata_relative(id), 4096)?;
+    let saved: Saved = serde_json::from_slice(&metadata).map_err(io::Error::other)?;
+    if saved.id != id || saved.name != name || saved.path != guest_path(id, &name) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "attachment metadata does not match route",
+        ));
+    }
+    let bytes = script_fs::read_bytes(root, &relative(id, &name), MAX_BYTES)?;
+    if saved.bytes != bytes.len() as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "attachment metadata size does not match file",
+        ));
+    }
     Ok((saved, bytes))
 }
 
@@ -191,6 +240,21 @@ mod tests {
         let (again, bytes) = read(root.path(), &saved.id, "photo.png").unwrap();
         assert_eq!(again, saved);
         assert_eq!(bytes, b"hello");
+    }
+
+    #[test]
+    fn prepare_copies_workspace_files_with_persisted_mimetype() {
+        let root = tempfile::tempdir().unwrap();
+        let source = Path::new("agents/miku/workspace/report.data");
+        std::fs::create_dir_all(root.path().join("workspace/agents/miku/workspace")).unwrap();
+        std::fs::write(root.path().join("workspace").join(source), b"# Report\n").unwrap();
+        let prepared = prepare(root.path(), source, "text/markdown").unwrap();
+        assert_eq!(prepared.saved.name, "report.data");
+        assert_eq!(prepared.saved.mime, "text/markdown");
+        assert_eq!(prepared.sha256.len(), 64);
+        let (saved, bytes) = read(root.path(), &prepared.saved.id, &prepared.saved.name).unwrap();
+        assert_eq!(saved, prepared.saved);
+        assert_eq!(bytes, b"# Report\n");
     }
 
     #[test]

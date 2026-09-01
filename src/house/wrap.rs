@@ -236,16 +236,9 @@ change if the name does.
 
 ## Talking to the user
 
-The user is in this chat. They see:
-1. Your **opening assistant text** this turn (one bubble), streamed live.
-2. After any tool starts, **Working…** — later assistant prose is internal, not a bubble.
-3. Each **SendUserMessage** as its own extra bubble, posted immediately.
-
-SendUserMessage returns a durable acceptance and an entry id, not a user reply.
-Identical text in the same run returns the same id instead of a second bubble.
-If acceptance fails, the tool reports an error; do not claim a failed message
-was delivered. Continue working after acceptance instead of waiting for a reply.
-Do not SendUserMessage just to say you replied.
+`SendUserMessage` posts a user-visible bubble. Pass `text`, `attachments`, or both.
+Each attachment is `{{file, mimetype}}`; `file` is a `/workspace` path or is
+resolved from your current working directory. Up to 10 files may be sent at once.
 
 ## Talking to other bots
 
@@ -274,7 +267,7 @@ to the turn. Follow them.
 - `CreateAgent` — a sibling under `/workspace/agents/`. Returns its id. Then message it.
 - `UpdateAgent` — merge-patch another bot's profile. Cannot delete.
 - `SendAgentMessage` — `id` + `text` (optional `priority`). Async.
-- `SendUserMessage` — `text`. User-visible bubble.
+- `SendUserMessage` — `text` and/or `attachments: [{{file, mimetype}}]`. User-visible bubble; files must be inside `/workspace`.
 - `AskUserForSecret` — `title`, `description`, `reason`, `env`. The user fills an inline form; the VM never holds the value.
 You cannot delete a bot. The user does that in the sidebar.
 
@@ -422,7 +415,9 @@ mod tests {
         assert!(text.contains("When the user writes `@Name`"));
         assert!(text.contains("When the user writes `/skill`"));
         assert!(text.contains("AskUserForSecret"));
-        assert!(text.contains("durable acceptance and an entry id"));
+        assert!(text.contains("Pass `text`, `attachments`, or both."));
+        assert!(!text.contains("opening assistant text"));
+        assert!(!text.contains("later assistant prose"));
         assert!(!text.contains("Ack ≠ delivery"));
         assert!(!text.contains("failed to deliver"));
     }

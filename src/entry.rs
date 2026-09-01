@@ -64,6 +64,8 @@ pub struct Header {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
 }
 
 impl Header {
@@ -73,6 +75,7 @@ impl Header {
             id: id.into(),
             storage_version: STORAGE_VERSION,
             cwd,
+            parent_session_id: None,
             created_at: Some(crate::ids::now_ms()),
         }
     }

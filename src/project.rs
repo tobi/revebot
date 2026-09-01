@@ -80,6 +80,14 @@ const TEMPLATES: &[(&str, &str)] = &[
         "workspace/skills/computer/SKILL.md",
         include_str!("templates/computer_skill.md"),
     ),
+    (
+        "workspace/skills/curator/SKILL.md",
+        include_str!("templates/curator_skill.md"),
+    ),
+    (
+        "workspace/skills/learn/SKILL.md",
+        include_str!("templates/learn_skill.md"),
+    ),
     ("models.yml", include_str!("templates/models.yml")),
     ("workspace/VM.md", include_str!("templates/VM.md")),
     (
@@ -289,8 +297,9 @@ impl Project {
 
     pub fn bot_conversation_path(&self, bot: &str, name: &str) -> PathBuf {
         let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.6f");
+        let unique = crate::ids::uuid_v7(crate::ids::now_ms());
         self.bot_sessions_dir(bot)
-            .join(format!("{name}-{stamp}.jsonl"))
+            .join(format!("{name}-{stamp}-{unique}.jsonl"))
     }
 
     /// The newest existing session for a conversation, if there is one.
@@ -446,6 +455,14 @@ mod tests {
             .expect("GITHUB_TOKEN secret");
         assert!(github.hosts["github.com"].allow);
         assert!(github.hosts["github.com"].headers.is_empty());
+        let openrouter = project
+            .runtime
+            .policy
+            .secrets
+            .iter()
+            .find(|secret| secret.env == "OPENROUTER_API_KEY")
+            .expect("OPENROUTER_API_KEY secret");
+        assert_eq!(openrouter.source, "$OPENROUTER_API_KEY");
     }
 
     #[test]
@@ -489,6 +506,8 @@ mod tests {
             "secrets",
             "browser",
             "computer",
+            "curator",
+            "learn",
         ] {
             assert!(
                 dir.path()

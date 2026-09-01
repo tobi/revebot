@@ -1,12 +1,40 @@
-//! Embedded local UI. One HTML file, no npm.
+//! Embedded browser assets generated from `public/` at build time.
 
+include!(concat!(env!("OUT_DIR"), "/public_assets.rs"));
+
+#[must_use]
 pub fn page(token: &str, bind: &str) -> String {
-    include_str!("index.html")
-        .replace("{{TOKEN}}", token)
-        .replace("{{BIND}}", bind)
-        .replace("/*{{BLOUB}}*/", include_str!("bloub.js"))
-        .replace("/*{{LOG}}*/", include_str!("log.js"))
-        .replace("/*{{CHAT}}*/", include_str!("chat.js"))
+    include_str!("../../public/index.html")
+        .replace("{{TOKEN}}", &escape_attribute(token))
+        .replace("{{BIND}}", &escape_attribute(bind))
+}
+
+fn escape_attribute(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+#[must_use]
+pub fn asset(path: &str) -> Option<(&'static [u8], &'static str)> {
+    if path == "/asset-manifest.json" {
+        return Some((
+            include_bytes!(concat!(env!("OUT_DIR"), "/asset-manifest.json")),
+            "application/json; charset=utf-8",
+        ));
+    }
+    PUBLIC_ASSETS
+        .iter()
+        .find(|(route, _, _)| *route == path)
+        .map(|(_, bytes, content_type)| (*bytes, *content_type))
 }
 
 #[cfg(test)]
@@ -14,109 +42,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn page_embeds_bloub_and_shadcn_bubbles() {
+    fn page_is_a_small_shell_over_public_modules() {
         let html = page("test-token", "127.0.0.1:7420");
         assert!(html.contains("test-token"));
-        assert!(html.contains("const BLOUB"));
-        assert!(html.contains("bubble-content"));
-        assert!(html.contains("function appendInline"));
-        assert!(html.contains("::-webkit-scrollbar"));
-        assert!(html.contains("class=\"fence\"") || html.contains("\"fence\""));
-        assert!(html.contains("contentParts"));
-        assert!(html.contains("function renderActivity"));
-        assert!(html.contains("function paintLog"));
-        assert!(!html.contains("function ensureStream"));
-        assert!(html.contains("class Log"));
-        assert!(html.contains("stickToBottom") || html.contains("nearBottom"));
-        assert!(html.contains("scroll-fab"));
-        assert!(html.contains("before="));
-        assert!(html.contains("openSheet"));
-        assert!(html.contains("swatches"));
-        assert!(html.contains("function acUpdate"));
-        assert!(html.contains("function routeBot"));
-        assert!(html.contains("function setRoute"));
-        assert!(html.contains("location.hash"));
-        assert!(html.contains("function project"));
-        assert!(!html.contains("sawTool"));
-        assert!(!html.contains("toolsStarted"));
-        assert!(html.contains("think-dot"));
-        assert!(html.contains("--blink-dur"));
-        assert!(html.contains("function setBusy"));
-        assert!(html.contains("function stickBottom"));
-        assert!(html.contains("function queueLogRender"));
-        assert!(html.contains("if (keepScroll && !pin)"));
-        assert!(html.contains("height: 36px"));
-        assert!(html.contains("function openCtx"));
-        assert!(html.contains("function loadTree"));
-        assert!(html.contains("function previewFile"));
-        assert!(html.contains("function treeBranch"));
-        assert!(html.contains("function expandRow"));
-        assert!(html.contains("function collapseTree"));
-        assert!(html.contains("function showSide"));
-        assert!(html.contains("function revealFile"));
-        assert!(html.contains("function inspectHover"));
-        assert!(html.contains("function unwrapFileRef"));
-        assert!(html.contains("function asWorkspacePath"));
-        assert!(html.contains("/api/fs"));
-        assert!(html.contains("/api/fs/file"));
-        assert!(html.contains("/api/fs/stat"));
-        assert!(html.contains("id=\"tree\""));
-        assert!(html.contains("role=\"tree\""));
-        assert!(html.contains("id=\"tree-collapse\""));
-        assert!(
-            html.contains(".tree-row.open + .tree-kids") && html.contains(".tree-kids[hidden]"),
-            "collapsed folders must actually hide their children"
-        );
-        assert!(html.contains("data-pane=\"files\""));
-        assert!(html.contains("id=\"pane-files\""));
-        assert!(html.contains("file-ref"));
-        assert!(html.contains("ctx-edit"));
-        assert!(html.contains("optgroup"));
-        assert!(html.contains("function paintBusy"));
-        assert!(html.contains("bot_busy"));
-        assert!(html.contains("/api/events"));
-        assert!(html.contains("name === 'SendUserMessage'"));
-        assert!(html.contains("user_notice"));
-        assert!(html.contains("AskUserForSecret"));
-        assert!(html.contains("function addSecretAsk"));
-        assert!(html.contains("function buildSecretForm"));
-        assert!(html.contains("/api/bots/"));
-        assert!(html.contains("/skills"));
-        assert!(html.contains("id=\"ac\""));
-        assert!(html.contains("manifest.webmanifest"));
-        assert!(html.contains("apple-mobile-web-app-capable"));
-        assert!(html.contains("viewport-fit=cover"));
-        assert!(html.contains("popover=\"auto\""));
-        assert!(html.contains("field-sizing: content"));
-        assert!(html.contains("@view-transition"));
-        assert!(html.contains("startViewTransition"));
-        assert!(html.contains("position-anchor"));
-        assert!(html.contains(":popover-open"));
-        assert!(html.contains("@starting-style"));
-        assert!(html.contains("serviceWorker"));
-        assert!(html.contains("enterkeyhint=\"send\""));
-        assert!(html.contains("for=\"file\""));
-        assert!(html.contains("function queueFile"));
-        assert!(html.contains("<file"));
-        assert!(html.contains("file-pill"));
-        assert!(html.contains("safe-area-inset-bottom"));
-        assert!(html.contains(":has(#nav-toggle:checked)"));
-        assert!(!html.contains("prompt(\"Name"));
-        assert!(html.contains("tool-name"));
-        assert!(html.contains("Plugins"));
-        assert!(html.contains("Search"));
-        assert!(html.contains("id=\"desktop\""));
-        assert!(html.contains("function loadDesktop"));
-        assert!(html.contains("function takeOverDesktop"));
-        assert!(html.contains("/api/desktop"));
-        assert!(html.contains("click to take over"));
-        assert!(
-            !html.contains("JSON.stringify(content)"),
-            "assistant content parts must be parsed, not stringified"
-        );
-        assert!(
-            !html.contains("streamTarget"),
-            "empty-bubble streamTarget dumped tokens onto the previous message"
-        );
+        assert!(html.contains("/css/app.css"));
+        assert!(html.contains("/js/app.mjs"));
+        assert!(html.contains("<reve-feed"));
+        assert!(html.contains("<reve-composer"));
+        assert!(html.contains("<reve-autocomplete"));
+    }
+
+    #[test]
+    fn page_escapes_runtime_metadata() {
+        let html = page("token\"<", "bind&>");
+        assert!(html.contains("token&quot;&lt;"));
+        assert!(html.contains("bind&amp;&gt;"));
+        assert!(!html.contains("token\"<"));
+    }
+
+    #[test]
+    fn generated_manifest_covers_authored_assets_but_not_rules() {
+        assert!(asset("/js/app.mjs").is_some());
+        assert!(asset("/css/app.css").is_some());
+        assert!(asset("/AGENTS.md").is_none());
+        let (manifest, content_type) = asset("/asset-manifest.json").expect("generated manifest");
+        assert_eq!(content_type, "application/json; charset=utf-8");
+        let manifest = std::str::from_utf8(manifest).expect("UTF-8 manifest");
+        assert!(manifest.contains("/js/app.mjs"));
+        assert!(!manifest.contains("AGENTS.md"));
+        assert!(!manifest.contains("/index.html"));
     }
 }

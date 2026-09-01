@@ -25,6 +25,15 @@ starts in microseconds. Concurrency is tokio tasks over single-owner session sta
 
 ### Added
 
+- **Skill improvement** — Hermes `skill_manage` / `skill_view` / `skills_list` as
+  house tools. Class-level create/patch, archive-on-delete, `/learn`, and a
+  hidden nudge every 15 user turns. Creates are curator-managed. Bundled skills
+  are off-limits. No aux-model background fork (nudge + foreground tools instead).
+- **Curator** — Hermes-style skill-library maintenance, host-side. Usage sidecar
+  at `.reve/curator/usage.json`, `active → stale → archived` (never delete),
+  pin/adopt, interval prune, snapshots under `.reve/curator/backups/`. CLI:
+  `revebot curator`. Bundled `/curator` skill for the optional umbrella-building
+  pass. Catalog skips hidden dirs so archives do not reappear as live skills.
 - TLA+ models of the durable rules, checked by `make tla` inside `make ci` with
   [tla-rs](https://github.com/fabracht/tla-rs): `docs/tla/DurableLog.tla` (the JSONL file
   as replay recipe, torn-line atomicity, write-once ids, seq monotonicity, compaction

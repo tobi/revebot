@@ -8,6 +8,10 @@ pub enum Slot<T> {
         token: Token,
     },
     Ready(T),
+    Replacing {
+        token: Token,
+        profile: Box<Profile>,
+    },
     Deleting {
         token: Token,
         profile: Box<Profile>,
@@ -109,6 +113,44 @@ impl<T> Roster<T> {
         self.retired.insert(id.into());
         true
     }
+    pub fn begin_replace(&mut self, id: &str, profile: Profile) -> Result<(Token, T), Error> {
+        if self.closed {
+            return Err(Error::Closed);
+        }
+        if !matches!(self.entries.get(id), Some(Slot::Ready(_))) {
+            return Err(if self.entries.contains_key(id) {
+                Error::Busy
+            } else {
+                Error::Unknown
+            });
+        }
+        let token = crate::ids::uuid_v7(crate::ids::now_ms());
+        let previous = self.entries.insert(
+            id.into(),
+            Slot::Replacing {
+                token: token.clone(),
+                profile: Box::new(profile),
+            },
+        );
+        let Some(Slot::Ready(runtime)) = previous else {
+            return Err(Error::Stale);
+        };
+        Ok((token, runtime))
+    }
+
+    pub fn finish_replace(&mut self, id: &str, token: &str, runtime: T) -> Result<(), (Error, T)> {
+        if !matches!(self.entries.get(id), Some(Slot::Replacing {token:current,..}) if current == token)
+        {
+            return Err((Error::Stale, runtime));
+        }
+        self.entries.insert(id.into(), Slot::Ready(runtime));
+        Ok(())
+    }
+
+    pub fn cancel_replace(&mut self, id: &str, token: &str, runtime: T) -> Result<(), (Error, T)> {
+        self.finish_replace(id, token, runtime)
+    }
+
     pub fn begin_delete(
         &mut self,
         id: &str,
@@ -180,7 +222,7 @@ impl<T> Roster<T> {
             .drain()
             .filter_map(|(_, slot)| match slot {
                 Slot::Ready(value) => Some(value),
-                _ => None,
+                Slot::Creating { .. } | Slot::Replacing { .. } | Slot::Deleting { .. } => None,
             })
             .collect()
     }

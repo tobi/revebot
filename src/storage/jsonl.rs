@@ -96,7 +96,7 @@ impl Storage {
             .unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent)?;
         let directory = File::open(parent)?;
-        Self::open_in(directory, path, id, cwd)
+        Self::open_in(directory, path, id, cwd, None)
     }
 
     /// Bot sessions use a rooted directory capability. Neither a parent nor the
@@ -121,7 +121,39 @@ impl Storage {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing session parent")
         })?;
         let directory = crate::script_fs::ensure_dir(root, parent)?;
-        Self::open_in(directory, root.join(relative), id, cwd)
+        Self::open_in(directory, root.join(relative), id, cwd, None)
+    }
+
+    /// Create a child session beneath a descriptor-rooted directory. A fresh
+    /// file records the source session id in its header.
+    pub(crate) fn create_fork_beneath(
+        root: &Path,
+        relative: &Path,
+        id: impl Into<String>,
+        cwd: Option<String>,
+        parent_session_id: String,
+    ) -> Result<Self> {
+        if relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "unsafe session path",
+            )
+            .into());
+        }
+        let parent = relative.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing session parent")
+        })?;
+        let directory = crate::script_fs::ensure_dir(root, parent)?;
+        Self::open_in(
+            directory,
+            root.join(relative),
+            id,
+            cwd,
+            Some(parent_session_id),
+        )
     }
 
     fn open_in(
@@ -129,6 +161,7 @@ impl Storage {
         path: PathBuf,
         id: impl Into<String>,
         cwd: Option<String>,
+        parent_session_id: Option<String>,
     ) -> Result<Self> {
         let name = path.file_name().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing session filename")
@@ -175,7 +208,11 @@ impl Storage {
                     reason: "missing header".into(),
                 });
             }
-            None => Header::new(id, cwd),
+            None => {
+                let mut header = Header::new(id, cwd);
+                header.parent_session_id = parent_session_id;
+                header
+            }
         };
         if header.v != FORMAT_VERSION {
             return Err(StorageError::Version(header.v, FORMAT_VERSION));

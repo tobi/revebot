@@ -43,6 +43,10 @@ graders:
     path: workspace/skills/plugins/SKILL.md
   - kind: file_exists
     path: workspace/skills/secrets/SKILL.md
+  - kind: file_exists
+    path: workspace/skills/curator/SKILL.md
+  - kind: file_exists
+    path: workspace/skills/learn/SKILL.md
   - kind: file_contains
     path: workspace/skills/secrets/SKILL.md
     text: AskUserForSecret

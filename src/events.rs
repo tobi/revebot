@@ -129,6 +129,11 @@ pub enum Kind {
         bot_id: String,
         busy: bool,
     },
+    /// Plugin statusline slots joined for the compose footer.
+    Statusline {
+        bot_id: String,
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -190,5 +195,21 @@ mod tests {
         assert_eq!(json["type"], "bot_busy");
         assert_eq!(json["bot_id"], "rune");
         assert_eq!(json["busy"], true);
+    }
+
+    #[test]
+    fn a_statusline_event_names_the_bot() {
+        let event = Event::new(
+            "house",
+            None,
+            Kind::Statusline {
+                bot_id: "rune".into(),
+                text: "2 loops".into(),
+            },
+        );
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "statusline");
+        assert_eq!(json["bot_id"], "rune");
+        assert_eq!(json["text"], "2 loops");
     }
 }

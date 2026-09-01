@@ -23,7 +23,14 @@ Show the draft and let them edit it.
 
 ## 3. Write the file
 
-Create the directory, then `SKILL.md`:
+Prefer the house tool `skill_manage` (create/patch). `write` / `edit` still work;
+`skill_manage` marks the skill curator-managed and validates frontmatter.
+
+```json
+{"action":"create","name":"deploy-k8s","scope":"house","content":"---\nname: deploy-k8s\ndescription: …\n---\n…"}
+```
+
+Or create the directory, then `SKILL.md`:
 
 ```
 ---
@@ -45,5 +52,8 @@ Tell them:
 - Slash: `/<name>`
 - House vs bot path you used
 - Bot-local skills shadow house skills of the same `name`
+- New skills are **unmanaged**. If they want the curator to stale/archive it later:
+  `revebot curator adopt <name>`. Pin anything load-bearing:
+  `revebot curator pin <name>`. See `/curator`.
 
-Do not invent a host command path. Skills are markdown.
+Do not invent a host command path. Skills are markdown. You cannot run `revebot` from the VM.

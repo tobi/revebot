@@ -93,8 +93,8 @@ EditPolicy(p) ==
     /\ UNCHANGED <<desired, vmStatus, vmDisk, vmProvisioned, vmDefined, vmEffective,
                    fingerprint, house, bootedPolicy, held, active, digests, idleArmed, bots, staleAcquire>>
 
-\* A host environment variable or `$(command)` result changed. Reve is not
-\* told; it notices only through runtime_secret_digests at acquire.
+\* A `$` host-environment source or another dynamic source such as `$(command)`
+\* changed. Reve notices only through runtime_secret_digests at acquire.
 RotateHostSecret ==
     /\ Bounded /\ Tick
     /\ desired < MaxSecretV

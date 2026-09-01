@@ -24,6 +24,7 @@ use thiserror::Error;
 
 use crate::cron::Cron;
 use crate::hooks::{BeforeToolEvent, BeforeToolResult, Block};
+use crate::plugin::{self, PluginEffect, PluginSnapshot};
 use crate::sandbox::{Policy, Sandbox, Secret, SecretHost};
 use crate::state::Replay;
 
@@ -172,6 +173,27 @@ impl RoutineDef {
     }
 }
 
+/// A `plugin()` declaration: slash command, paced `update`, gated tools.
+pub struct PluginDef {
+    pub name: String,
+    pub interval_ms: u64,
+    pub owner: Option<String>,
+    lua: Lua,
+    update: Option<mlua::RegistryKey>,
+    command: Option<mlua::RegistryKey>,
+    pub tools: Vec<ToolDef>,
+}
+
+impl PluginDef {
+    pub fn has_command(&self) -> bool {
+        self.command.is_some()
+    }
+
+    pub fn has_update(&self) -> bool {
+        self.update.is_some()
+    }
+}
+
 /// Owns separate trusted-host/restricted-workspace Lua states and their definitions.
 pub struct Runtime {
     lua: Lua,
@@ -179,6 +201,7 @@ pub struct Runtime {
     pub agent: AgentConfig,
     pub policy: Policy,
     pub tools: Vec<ToolDef>,
+    pub plugins: Vec<PluginDef>,
     pub routines: Vec<RoutineDef>,
     pub guards: Vec<GuardDef>,
     changes: Vec<ChangeDef>,
@@ -221,6 +244,126 @@ const HOST_COMMAND_PATH: &[(&str, &str)] = &[
     ("package", "loadlib"),
 ];
 
+fn lua_result_text(lua: &Lua, result: LuaValue) -> Result<Option<String>> {
+    Ok(match result {
+        LuaValue::Nil => None,
+        LuaValue::String(s) => Some(s.to_string_lossy()),
+        other => {
+            let json: Value = lua.from_value(other)?;
+            match json {
+                Value::Null => None,
+                Value::String(s) => Some(s),
+                other => Some(serde_json::to_string_pretty(&other).unwrap_or_default()),
+            }
+        }
+    })
+}
+
+fn plugin_ctx(
+    lua: &Lua,
+    _plugin: &str,
+    snap: &PluginSnapshot,
+    effects: Arc<Mutex<PluginEffect>>,
+) -> Result<Table> {
+    let ctx = lua.create_table()?;
+    ctx.set("bot", snap.bot.clone())?;
+    ctx.set("now", snap.now)?;
+    let lane = lua.create_table()?;
+    lane.set("busy", snap.busy)?;
+    lane.set("id", snap.lane.clone())?;
+    ctx.set("lane", lane)?;
+
+    let state = lua.create_table()?;
+    let get_fx = effects.clone();
+    state.set(
+        "get",
+        lua.create_function(move |lua, key: String| {
+            let held = get_fx.lock();
+            lua.to_value(held.state.get(&key).unwrap_or(&Value::Null))
+        })?,
+    )?;
+    let set_fx = effects.clone();
+    state.set(
+        "set",
+        lua.create_function(move |lua, (key, value): (String, LuaValue)| {
+            let json: Value = lua.from_value(value)?;
+            let mut held = set_fx.lock();
+            if json.is_null() {
+                held.state.remove(&key);
+            } else {
+                held.state.insert(key, json);
+            }
+            held.state_dirty = true;
+            Ok(())
+        })?,
+    )?;
+    ctx.set("state", state)?;
+
+    let status = lua.create_table()?;
+    let sl_fx = effects.clone();
+    let mt = lua.create_table()?;
+    mt.set(
+        "__newindex",
+        lua.create_function(move |_, (_, key, value): (Table, String, LuaValue)| {
+            let text = match value {
+                LuaValue::String(s) => s.to_string_lossy(),
+                LuaValue::Boolean(b) => b.to_string(),
+                LuaValue::Integer(n) => n.to_string(),
+                LuaValue::Number(n) => n.to_string(),
+                _ => String::new(),
+            };
+            sl_fx.lock().statusline.insert(key, text);
+            Ok(())
+        })?,
+    )?;
+    status.set_metatable(Some(mt))?;
+    ctx.set("statusline", status)?;
+
+    let send_fx = effects.clone();
+    ctx.set(
+        "send",
+        lua.create_function(move |_, (bot, text): (String, String)| {
+            crate::house::profile::validate_id(&bot).map_err(mlua::Error::external)?;
+            let mut held = send_fx.lock();
+            if held.sends.len() >= 32 {
+                return Err(mlua::Error::external("plugin send limit exceeded"));
+            }
+            held.sends.push((bot, text));
+            Ok(())
+        })?,
+    )?;
+
+    let offer_fx = effects.clone();
+    ctx.set(
+        "offer",
+        lua.create_function(move |_, name: String| {
+            offer_fx.lock().offers.push(name);
+            Ok(())
+        })?,
+    )?;
+    let retract_fx = effects.clone();
+    ctx.set(
+        "retract",
+        lua.create_function(move |_, name: String| {
+            retract_fx.lock().retracts.push(name);
+            Ok(())
+        })?,
+    )?;
+
+    let timer_fx = effects;
+    ctx.set(
+        "set_timer",
+        lua.create_function(move |_, ms: u64| {
+            if let Some(ms) = plugin::clamp_timer_ms(ms) {
+                let mut held = timer_fx.lock();
+                held.timer_ms = Some(held.timer_ms.map_or(ms, |cur| cur.min(ms)));
+            }
+            Ok(())
+        })?,
+    )?;
+    Ok(ctx)
+}
+
 impl Runtime {
     pub fn new() -> Result<Self> {
         let lua = Lua::new();
@@ -231,6 +374,7 @@ impl Runtime {
             agent: AgentConfig::default(),
             policy: Policy::default(),
             tools: Vec::new(),
+            plugins: Vec::new(),
             routines: Vec::new(),
             guards: Vec::new(),
             changes: Vec::new(),
@@ -391,6 +535,15 @@ impl Runtime {
                 Ok(())
             })?,
         )?;
+        let plugins: Arc<Mutex<Vec<(String, Table)>>> = Arc::default();
+        let plugin_sink = plugins.clone();
+        lua.globals().set(
+            "plugin",
+            lua.create_function(move |_, (name, spec): (String, Table)| {
+                plugin_sink.lock().push((name, spec));
+                Ok(())
+            })?,
+        )?;
         for (path, source) in sources {
             Self::exec_source(lua, &path, &source)?;
         }
@@ -444,6 +597,14 @@ impl Runtime {
                 lua: lua.clone(),
                 key: lua.create_registry_value(run)?,
             });
+        }
+        for (name, spec) in std::mem::take(&mut *plugins.lock()) {
+            self.plugins.push(Self::plugin_from_table(
+                lua,
+                name,
+                &spec,
+                owner.map(str::to_string),
+            )?);
         }
         Ok(())
     }
@@ -630,7 +791,169 @@ impl Runtime {
     }
 
     pub fn tool(&self, name: &str) -> Option<&ToolDef> {
-        self.tools.iter().find(|t| t.name == name)
+        self.tools.iter().find(|t| t.name == name).or_else(|| {
+            self.plugins
+                .iter()
+                .flat_map(|plugin| plugin.tools.iter())
+                .find(|t| t.name == name)
+        })
+    }
+
+    pub fn plugin(&self, name: &str) -> Option<&PluginDef> {
+        self.plugins.iter().find(|p| p.name == name)
+    }
+
+    pub fn plugin_tool_names(&self) -> impl Iterator<Item = (&str, &ToolDef)> {
+        self.plugins.iter().flat_map(|plugin| {
+            plugin
+                .tools
+                .iter()
+                .map(move |tool| (plugin.name.as_str(), tool))
+        })
+    }
+
+    fn plugin_from_table(
+        lua: &Lua,
+        name: String,
+        spec: &Table,
+        owner: Option<String>,
+    ) -> Result<PluginDef> {
+        if !plugin::is_plugin_name(&name) {
+            return Err(invalid(
+                "plugin",
+                format!("{name} must match /^[a-z0-9][a-z0-9_-]*$/"),
+            ));
+        }
+        let interval_ms = plugin::clamp_interval_ms(
+            spec.get::<Option<u64>>("interval")?
+                .unwrap_or(plugin::DEFAULT_INTERVAL_MS),
+        );
+        let update = spec
+            .get::<Option<mlua::Function>>("update")?
+            .map(|f| lua.create_registry_value(f))
+            .transpose()?;
+        let command = spec
+            .get::<Option<mlua::Function>>("command")?
+            .map(|f| lua.create_registry_value(f))
+            .transpose()?;
+        if update.is_none() && command.is_none() {
+            return Err(invalid(
+                "plugin",
+                format!("{name} needs `update` and/or `command`"),
+            ));
+        }
+        let mut tools = Vec::new();
+        if let Ok(list) = spec.get::<Table>("tools") {
+            let mut i = 1;
+            while let Ok(row) = list.get::<Table>(i) {
+                let tool_name: String = row
+                    .get("name")
+                    .map_err(|_| invalid("plugin", format!("{name} tools[{i}] needs a `name`")))?;
+                tools.push(Self::tool_from_table(lua, tool_name, &row, owner.clone())?);
+                i += 1;
+            }
+        }
+        Ok(PluginDef {
+            name,
+            interval_ms,
+            owner,
+            lua: lua.clone(),
+            update,
+            command,
+            tools,
+        })
+    }
+
+    pub async fn run_plugin_update(
+        &self,
+        name: &str,
+        snap: PluginSnapshot,
+    ) -> Result<PluginEffect> {
+        let def = self
+            .plugin(name)
+            .ok_or_else(|| invalid("plugin", format!("no plugin named {name:?}")))?;
+        let Some(key) = &def.update else {
+            return Ok(PluginEffect {
+                state: snap.state,
+                ..PluginEffect::default()
+            });
+        };
+        self.invoke_plugin(def, key, None, snap).await
+    }
+
+    pub async fn run_plugin_command(
+        &self,
+        name: &str,
+        args: &str,
+        snap: PluginSnapshot,
+    ) -> Result<PluginEffect> {
+        let def = self
+            .plugin(name)
+            .ok_or_else(|| invalid("plugin", format!("no plugin named {name:?}")))?;
+        let Some(key) = &def.command else {
+            return Err(invalid("plugin", format!("{name} has no command")));
+        };
+        self.invoke_plugin(def, key, Some(args), snap).await
+    }
+
+    pub async fn run_plugin_tool(
+        &self,
+        name: &str,
+        args: Map<String, Value>,
+        snap: PluginSnapshot,
+    ) -> Result<PluginEffect> {
+        let (plugin, tool) = self
+            .plugins
+            .iter()
+            .find_map(|plugin| {
+                plugin
+                    .tools
+                    .iter()
+                    .find(|t| t.name == name)
+                    .map(|tool| (plugin, tool))
+            })
+            .ok_or_else(|| invalid("plugin", format!("no plugin tool named {name:?}")))?;
+        let args = tool.prepare(args)?;
+        let lua = &tool.lua;
+        let effects = Arc::new(Mutex::new(PluginEffect {
+            state: snap.state.clone(),
+            ..PluginEffect::default()
+        }));
+        let ctx = plugin_ctx(lua, &plugin.name, &snap, effects.clone())?;
+        let function: mlua::Function = lua.registry_value(&tool.key)?;
+        let lua_args = lua.to_value(&Value::Object(args))?;
+        let result: LuaValue = function.call_async((lua_args, ctx)).await?;
+        let mut effect = std::mem::take(&mut *effects.lock());
+        if let Some(notice) = lua_result_text(lua, result)? {
+            effect.notice = Some(notice);
+        }
+        Ok(effect)
+    }
+
+    async fn invoke_plugin(
+        &self,
+        def: &PluginDef,
+        key: &mlua::RegistryKey,
+        args: Option<&str>,
+        snap: PluginSnapshot,
+    ) -> Result<PluginEffect> {
+        let lua = &def.lua;
+        let effects = Arc::new(Mutex::new(PluginEffect {
+            state: snap.state.clone(),
+            ..PluginEffect::default()
+        }));
+        let ctx = plugin_ctx(lua, &def.name, &snap, effects.clone())?;
+        let function: mlua::Function = lua.registry_value(key)?;
+        let result: LuaValue = if let Some(args) = args {
+            function.call_async((args.to_string(), ctx)).await?
+        } else {
+            function.call_async(ctx).await?
+        };
+        let mut effect = std::mem::take(&mut *effects.lock());
+        if let Some(notice) = lua_result_text(lua, result)? {
+            effect.notice = Some(notice);
+        }
+        Ok(effect)
     }
 
     /// Workspace `guard()` plugins. Fail closed: a Lua error blocks the tool.
@@ -977,7 +1300,7 @@ fn policy_from_table(table: &Table) -> Result<Policy> {
             let source: String = entry.get("source").map_err(|_| {
                 invalid(
                     "sandbox secret",
-                    "each secret needs a host `source` (env var or `$(command)`); literal `value` secrets are not supported",
+                    "each secret needs a `source` (`$ENV`, a literal string, `$(command)`, `file:`, or HTTP(S))",
                 )
             })?;
             if source.trim().starts_with("$(")
@@ -1248,7 +1571,7 @@ mod tests {
             "sandbox.lua",
             r#"
             sandbox {
-              secrets = { { env = "TOKEN", source = "HOST_TOKEN" } },
+              secrets = { { env = "TOKEN", source = "$HOST_TOKEN" } },
             }
         "#,
         );
@@ -1266,7 +1589,7 @@ mod tests {
             r#"
             sandbox {
               secrets = {
-                { env = "GITHUB_TOKEN", source = "HOST_GITHUB_TOKEN",
+                { env = "GITHUB_TOKEN", source = "$HOST_GITHUB_TOKEN",
                   placeholder = "reve-github-token",
                   hosts = { ["github.com"] = { allow = true } } },
               },
@@ -1277,7 +1600,7 @@ mod tests {
         rt.load_sandbox(&path).unwrap();
         let secret = &rt.policy.secrets[0];
         assert_eq!(secret.env, "GITHUB_TOKEN");
-        assert_eq!(secret.source, "HOST_GITHUB_TOKEN");
+        assert_eq!(secret.source, "$HOST_GITHUB_TOKEN");
         assert_eq!(secret.placeholder.as_deref(), Some("reve-github-token"));
         assert_eq!(secret.hostnames(), vec!["github.com".to_string()]);
         assert!(secret.hosts["github.com"].allow);
@@ -1293,7 +1616,7 @@ mod tests {
             sandbox {
               open = false,
               secrets = {
-                { env = "TOOL_GATEWAY", source = "TOOL_GATEWAY",
+                { env = "TOOL_GATEWAY", source = "$TOOL_GATEWAY",
                   placeholder = "reve-tool-gateway",
                   hosts = {
                     ["tool-gateway.shopify.io"] = {
@@ -1329,7 +1652,7 @@ mod tests {
             r#"
             sandbox {
               secrets = {
-                { env = "TOKEN", source = "HOST_TOKEN",
+                { env = "TOKEN", source = "$HOST_TOKEN",
                   hosts = { "github.com" } },
               },
             }
@@ -1381,7 +1704,7 @@ mod tests {
     }
 
     #[test]
-    fn a_literal_secret_value_is_rejected() {
+    fn a_value_field_without_source_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let path = write(
             dir.path(),
@@ -1397,7 +1720,7 @@ mod tests {
         );
         let mut rt = Runtime::new().unwrap();
         let err = rt.load_sandbox(&path).unwrap_err();
-        assert!(err.to_string().contains("host `source`"), "got {err}");
+        assert!(err.to_string().contains("needs a `source`"), "got {err}");
     }
 
     #[test]

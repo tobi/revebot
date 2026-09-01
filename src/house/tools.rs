@@ -4,6 +4,7 @@
 use std::fmt::Write as _;
 use std::sync::{Arc, Weak};
 
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::model::{BoxFuture, ToolSchema};
@@ -14,6 +15,48 @@ use crate::tools::{Toolbox, Tools};
 use super::{CreateSpec, Inner};
 
 type HouseTool = (&'static str, &'static str, fn() -> Value);
+const MAX_USER_ATTACHMENTS: usize = 10;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserAttachmentArgs {
+    file: String,
+    mimetype: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserMessageArgs {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    attachments: Vec<UserAttachmentArgs>,
+}
+
+fn parse_user_message(args: Map<String, Value>) -> Result<UserMessageArgs, String> {
+    let mut request: UserMessageArgs = serde_json::from_value(Value::Object(args))
+        .map_err(|error| format!("invalid SendUserMessage arguments: {error}"))?;
+    request.text = request.text.trim().to_string();
+    if request.attachments.len() > MAX_USER_ATTACHMENTS {
+        return Err(format!(
+            "at most {MAX_USER_ATTACHMENTS} attachments may be sent at once"
+        ));
+    }
+    for (index, attachment) in request.attachments.iter_mut().enumerate() {
+        attachment.file = attachment.file.trim().to_string();
+        attachment.mimetype = attachment.mimetype.trim().to_string();
+        if attachment.file.is_empty() {
+            return Err(format!("attachment {} is missing file", index + 1));
+        }
+        if attachment.mimetype.is_empty() {
+            return Err(format!("attachment {} is missing mimetype", index + 1));
+        }
+    }
+    if request.text.is_empty() && request.attachments.is_empty() {
+        return Err("SendUserMessage needs text or at least one attachment".into());
+    }
+    Ok(request)
+}
 const HOUSE_TOOLS: &[HouseTool] = &[
     (
         "update_state",
@@ -100,14 +143,30 @@ const HOUSE_TOOLS: &[HouseTool] = &[
     ),
     (
         "SendUserMessage",
-        "Durably accept a user-visible message and return its entry id. Repeating identical text in the same run returns the same id, not a second bubble. An acknowledgment is not a user reply. Acceptance failures are errors; do not claim the user received a failed write.",
+        "Durably accept a user-visible message with optional workspace files and return its entry id. Attachments are an array of {file, mimetype}; file is absolute or relative to the current working directory and must resolve inside /workspace. Repeating identical text and attachment content in the same run returns the same id, not a second bubble. An acknowledgment is not a user reply. Acceptance failures are errors; do not claim the user received a failed write.",
         || {
             json!({
                 "type": "object",
                 "properties": {
-                    "text": {"type": "string"}
+                    "text": {"type": "string"},
+                    "attachments": {
+                        "type": "array",
+                        "maxItems": 10,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "file": {"type": "string", "description": "Workspace file path, absolute or relative to the current working directory"},
+                                "mimetype": {"type": "string", "description": "IANA media type, for example image/png or text/markdown"}
+                            },
+                            "required": ["file", "mimetype"],
+                            "additionalProperties": false
+                        }
+                    }
                 },
-                "required": ["text"],
+                "anyOf": [
+                    {"required": ["text"]},
+                    {"required": ["attachments"]}
+                ],
                 "additionalProperties": false
             })
         },
@@ -125,6 +184,48 @@ const HOUSE_TOOLS: &[HouseTool] = &[
                     "env": {"type": "string", "description": "ENV_NAME, e.g. GITHUB_TOKEN"}
                 },
                 "required": ["title", "description", "reason", "env"],
+                "additionalProperties": false
+            })
+        },
+    ),
+    (
+        "skills_list",
+        "List house and this bot's skills (name, source, description). Use before skill_view or skill_manage.",
+        || json!({"type":"object","properties":{},"additionalProperties":false}),
+    ),
+    (
+        "skill_view",
+        "Load a skill's SKILL.md, or a support file under references/, templates/, scripts/, or assets/.",
+        || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "file_path": {"type": "string", "description": "Optional support file, e.g. references/api.md"}
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            })
+        },
+    ),
+    (
+        "skill_manage",
+        "Create, patch, or archive a skill (procedural memory). Prefer patch on an existing class-level umbrella. Never hard-delete — archive. Bundled skills are off-limits.",
+        || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["create", "patch", "edit", "delete", "write_file", "remove_file"]},
+                    "name": {"type": "string"},
+                    "content": {"type": "string", "description": "Full SKILL.md for create/edit/patch rewrite"},
+                    "old_string": {"type": "string"},
+                    "new_string": {"type": "string"},
+                    "replace_all": {"type": "boolean"},
+                    "file_path": {"type": "string"},
+                    "file_content": {"type": "string"},
+                    "scope": {"type": "string", "enum": ["house", "bot"], "description": "create only; default house"}
+                },
+                "required": ["action", "name"],
                 "additionalProperties": false
             })
         },
@@ -148,7 +249,17 @@ impl HouseTools {
             names.retain(|n| n != name);
             names.push((*name).to_string());
         }
+        names.extend(self.offered_plugin_tools());
+        names.sort();
+        names.dedup();
         names
+    }
+
+    fn offered_plugin_tools(&self) -> Vec<String> {
+        let Some(house) = self.house.upgrade() else {
+            return Vec::new();
+        };
+        house.offered_plugin_tools(&self.bot_id)
     }
 }
 
@@ -169,6 +280,21 @@ impl Tools for HouseTools {
                 description: (*description).to_string(),
                 schema: schema(),
             });
+        }
+        if let Some(house) = self.house.upgrade() {
+            let offered = house.offered_plugin_tools(&self.bot_id);
+            for (plugin_name, tool) in house.project.runtime.plugin_tool_names() {
+                if !offered.iter().any(|n| n == &tool.name) {
+                    continue;
+                }
+                let _ = plugin_name;
+                schemas.retain(|s| s.name != tool.name);
+                schemas.push(ToolSchema {
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    schema: tool.schema(),
+                });
+            }
         }
         schemas
     }
@@ -197,7 +323,29 @@ impl Tools for HouseTools {
                 "SendAgentMessage" => self.send_agent(arguments).await,
                 "SendUserMessage" => self.send_user(arguments).await,
                 "AskUserForSecret" => self.ask_secret(arguments, cancel).await,
+                "skills_list" => Ok(self.house()?.skills_list(&self.bot_id)),
+                "skill_view" => {
+                    let name = arguments
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .ok_or("skill_view requires name")?;
+                    let file_path = arguments.get("file_path").and_then(Value::as_str);
+                    self.house()?.skill_view(&self.bot_id, name, file_path)
+                }
+                "skill_manage" => self.house()?.skill_manage(&self.bot_id, arguments).await,
                 other => {
+                    if let Some(house) = self.house.upgrade()
+                        && house
+                            .project
+                            .runtime
+                            .plugins
+                            .iter()
+                            .any(|p| p.tools.iter().any(|t| t.name == other))
+                    {
+                        return house
+                            .invoke_plugin_tool(&self.bot_id, other, arguments)
+                            .await;
+                    }
                     if let Some(house) = self.house.upgrade()
                         && let Some(def) = house.project.runtime.tool(other)
                     {
@@ -335,15 +483,17 @@ impl HouseTools {
 
     async fn send_user(&self, args: Map<String, Value>) -> Result<String, String> {
         let house = self.house()?;
-        let text = args
-            .get("text")
-            .or_else(|| args.get("message"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or("missing text")?;
+        let request = parse_user_message(args)?;
+        let mut attachments = Vec::with_capacity(request.attachments.len());
+        for (index, attachment) in request.attachments.into_iter().enumerate() {
+            attachments.push(
+                house
+                    .prepare_user_attachment(&self.bot_id, &attachment.file, &attachment.mimetype)
+                    .map_err(|error| format!("attachment {}: {error}", index + 1))?,
+            );
+        }
         let id = house
-            .send_user_message(&self.bot_id, text)
+            .send_user_message(&self.bot_id, &request.text, attachments)
             .await
             .map_err(|e| e.to_string())?;
         Ok(format!("Message accepted: {id}"))
@@ -374,5 +524,47 @@ impl HouseTools {
                 hosts.join(", ")
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(value: Value) -> Map<String, Value> {
+        let Value::Object(arguments) = value else {
+            panic!("test arguments must be an object");
+        };
+        arguments
+    }
+
+    #[test]
+    fn user_message_accepts_attachment_arrays_without_text() {
+        let parsed = parse_user_message(args(json!({
+            "attachments": [
+                {"file": " report.md ", "mimetype": " text/markdown "},
+                {"file": "/workspace/image.png", "mimetype": "image/png"}
+            ]
+        })))
+        .unwrap();
+        assert!(parsed.text.is_empty());
+        assert_eq!(parsed.attachments.len(), 2);
+        assert_eq!(parsed.attachments[0].file, "report.md");
+        assert_eq!(parsed.attachments[0].mimetype, "text/markdown");
+    }
+
+    #[test]
+    fn user_message_rejects_empty_or_unbounded_attachment_requests() {
+        assert!(parse_user_message(args(json!({"text": "  "}))).is_err());
+        assert!(
+            parse_user_message(args(json!({
+                "attachments": [{"file": "a", "mimetype": ""}]
+            })))
+            .is_err()
+        );
+        let attachments: Vec<_> = (0..=MAX_USER_ATTACHMENTS)
+            .map(|index| json!({"file": format!("{index}.txt"), "mimetype": "text/plain"}))
+            .collect();
+        assert!(parse_user_message(args(json!({"attachments": attachments}))).is_err());
     }
 }

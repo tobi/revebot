@@ -248,7 +248,10 @@ pub async fn run(project: Project, sandbox: Arc<Sandbox>) -> anyhow::Result<()> 
                 &harness,
                 project.clone(),
                 crate::house::profile::FIRST_BOT.into(),
-                toolbox.tool_names(),
+                {
+                    let names = toolbox.tool_names();
+                    std::sync::Arc::new(move || names.clone())
+                },
             );
             let events = tokio::spawn(forward_events(harness.subscribe(), updates.clone()));
 

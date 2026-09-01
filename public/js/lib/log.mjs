@@ -1,10 +1,5 @@
 /* One log model, independent of transport and DOM. */
-(function (root, factory) {
-  const api = factory();
-  if (typeof module === 'object') module.exports = api;
-  else root.ReveLog = api;
-})(globalThis, function () {
-  'use strict';
+
   function text(content) {
     if (typeof content === 'string') return content;
     if (!Array.isArray(content)) return '';
@@ -58,17 +53,15 @@
       const e = record.entry, m = e.message || {}, display = e.display || {};
       const base = {id:e.id, run:display.run_id || '', status:record.status};
       if (e.type === 'custom' && e.customType === 'user_notice') {
-        if (e.data && e.data.text) rows.push({...base, kind:'assistant', text:e.data.text});
+        const attachments = Array.isArray(e.data && e.data.attachments) ? e.data.attachments : [];
+        const body = e.data && typeof e.data.text === 'string' ? e.data.text : '';
+        if (body || attachments.length) rows.push({...base, kind:'assistant', text:body, attachments});
       } else if (e.type === 'compaction') {
         rows.push({...base, kind:'marker', text:'Context compacted'});
       } else if (m.role === 'user') {
         rows.push({...base, kind:'user', text:text(m.content), from:m.from_bot, fromName:m.from_name});
       } else if (m.role === 'assistant') {
         const failed = m.stopReason === 'error' || m.stopReason === 'aborted';
-        if (display.audience === 'internal') {
-          if (failed && m.errorMessage) rows.push({...base, kind:'notice', text:m.errorMessage});
-          continue;
-        }
         const body = record.draftText || text(m.content);
         if (body || (failed && m.errorMessage)) rows.push({...base, kind:'assistant', text:body || m.errorMessage,
           label:record.draftText ? 'Interrupted draft · not persisted' : failed ? (m.stopReason === 'aborted' ? 'Interrupted' : 'Request failed') : record.status === 'interrupted' ? 'Interrupted draft · not persisted' : ''});
@@ -118,5 +111,5 @@
     if (failed) parts.push(`${failed} failed`);
     return parts.join(' · ');
   }
-  return {Log, text, project, group, summary, action};
-});
+
+export { Log, action, group, project, summary, text };

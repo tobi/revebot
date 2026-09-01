@@ -28,9 +28,9 @@ sandbox {
 
   -- A credential the VM may use without ever holding it: the guest sees only
   -- the placeholder and the proxy substitutes the real value for these hosts.
-  -- `source` is a host env var, or `$(command)` run on the host at boot.
-  -- `$(gh auth token)` reads the OS keyring; export GITHUB_TOKEN=... also works.
-  --   export OPENROUTER_API_KEY=...
+  -- `$NAME` reads a host env var; an unprefixed source is a literal string.
+  -- `$(command)` runs on the host at boot. `$(gh auth token)` reads the OS
+  -- keyring; export OPENROUTER_API_KEY=... supplies `$OPENROUTER_API_KEY`.
   secrets = {
     {
       env = "GITHUB_TOKEN",
@@ -43,7 +43,7 @@ sandbox {
     },
     {
       env = "OPENROUTER_API_KEY",
-      source = "OPENROUTER_API_KEY",
+      source = "$OPENROUTER_API_KEY",
       placeholder = "reve-openrouter-key",
       hosts = {
         ["openrouter.ai"] = { allow = true },

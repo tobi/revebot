@@ -405,7 +405,7 @@ async fn runtime_secrets_rotate_without_a_rebuild_and_deleted_secrets_are_revoke
     let state_dir = dir.path().join(".reve");
     let secret = Secret {
         env: GUEST.into(),
-        source: SOURCE.into(),
+        source: format!("${SOURCE}"),
         placeholder: Some("reve-secret-placeholder".into()),
         hosts: Secret::scoped_hosts(["github.com"]),
     };

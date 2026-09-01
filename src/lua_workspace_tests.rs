@@ -242,7 +242,7 @@ async fn plugins_skill_examples_load_and_pure_callbacks_execute() {
         }
         examples += 1;
     }
-    assert_eq!(examples, 5, "every executable example must be exercised");
+    assert_eq!(examples, 6, "every executable example must be exercised");
     let event = crate::house::resources::Change::new(
         "miku",
         "/repo".into(),
@@ -341,4 +341,90 @@ fn workspace_bytecode_is_never_loaded() {
         rt.load_workspace_tools(dir.path(), Path::new("workspace/plugins"), None)
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn plugin_command_update_and_gated_tools_use_durable_state() {
+    let dir = tempfile::tempdir().unwrap();
+    source(
+        dir.path(),
+        "workspace/plugins/loop.lua",
+        r#"
+        plugin("loop", {
+          interval = 1000,
+          command = function(args, ctx)
+            assert(ctx.now > 0 and ctx.lane.busy == false)
+            ctx.state.set("prompt", args)
+            ctx.offer("LoopUpdate")
+            ctx.statusline["loop"] = "1 loop"
+            ctx.set_timer(5000)
+            return "created " .. args
+          end,
+          update = function(ctx)
+            if ctx.state.get("prompt") then
+              ctx.offer("LoopUpdate")
+              ctx.statusline["loop"] = "running"
+            end
+          end,
+          tools = {
+            { name = "LoopUpdate", description = "Update the running loop",
+              params = { { name = "status", type = "string", required = true } },
+              run = function(args, ctx)
+                ctx.state.set("status", args.status)
+                if args.status == "completed" then
+                  ctx.retract("LoopUpdate")
+                  ctx.statusline["loop"] = ""
+                end
+                return args.status
+              end },
+          },
+        })
+        "#,
+    );
+    let mut rt = Runtime::new().unwrap();
+    rt.load_workspace_tools(dir.path(), Path::new("workspace/plugins"), None)
+        .unwrap();
+    let plugin = rt.plugin("loop").unwrap();
+    assert!(plugin.has_command() && plugin.has_update());
+    assert_eq!(plugin.tools.len(), 1);
+    assert!(rt.tools.iter().all(|t| t.name != "LoopUpdate"));
+
+    let snap = crate::plugin::PluginSnapshot {
+        bot: "chief-of-staff".into(),
+        now: 10,
+        busy: false,
+        lane: "main".into(),
+        state: serde_json::Map::new(),
+    };
+    let created = rt
+        .run_plugin_command("loop", "5m check", snap.clone())
+        .await
+        .unwrap();
+    assert_eq!(created.notice.as_deref(), Some("created 5m check"));
+    assert_eq!(created.offers, vec!["LoopUpdate".to_string()]);
+    assert_eq!(
+        created.statusline.get("loop").map(String::as_str),
+        Some("1 loop")
+    );
+    assert_eq!(created.timer_ms, Some(5000));
+    assert_eq!(created.state["prompt"], "5m check");
+
+    let mut snap = snap;
+    snap.state = created.state;
+    let updated = rt.run_plugin_update("loop", snap.clone()).await.unwrap();
+    assert_eq!(updated.offers, vec!["LoopUpdate".to_string()]);
+    assert_eq!(
+        updated.statusline.get("loop").map(String::as_str),
+        Some("running")
+    );
+
+    let mut args = serde_json::Map::new();
+    args.insert(
+        "status".into(),
+        serde_json::Value::String("completed".into()),
+    );
+    let tool = rt.run_plugin_tool("LoopUpdate", args, snap).await.unwrap();
+    assert_eq!(tool.notice.as_deref(), Some("completed"));
+    assert_eq!(tool.retracts, vec!["LoopUpdate".to_string()]);
+    assert_eq!(crate::plugin::join_statusline(&tool.statusline), "");
 }

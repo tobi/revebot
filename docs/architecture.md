@@ -65,16 +65,21 @@ src/
                       the catalog.
   sandbox.rs          mandatory microsandbox VM; public internet by default,
                       lock down with `open = false` + `allow`. Secret
-                      `source` is a host env var or `$(command)` resolved
-                      at apply into `REVEBOT_SECRET_*` for microsandbox —
-                      not a Lua host-exec path. Command argv and `file:`
-                      paths expand a leading `~/`. Secret `hosts` is a
-                      hostname map (`allow`, `headers`); `allow: true`
-                      joins the sandbox allow list.
+                      `source` uses `$NAME` for a host env var; unprefixed
+                      values are literals. `$(command)`, `file:`, and HTTP(S)
+                      sources resolve on the host and non-env sources are
+                      copied into `REVEBOT_SECRET_*` for microsandbox — not a
+                      Lua host-exec path. Command argv and `file:` paths expand
+                      a leading `~/`. Secret `hosts` is a hostname map
+                      (`allow`, `headers`); `allow: true` joins the sandbox
+                      allow list.
   lua.rs              host config/tools and a separate restricted workspace Lua
                       state; definitions retain their originating Lua state.
                       Workspace callbacks get explicit guest/messaging capabilities,
                       never ambient host IO/environment/module access.
+                      `plugin(name)` adds slash commands, paced `update`, gated
+                      tools, statusline slots and durable `fact.custom/plugin/<name>` state.
+  plugin.rs           slash routing, 18h timer clamp, statusline join.
   script_fs.rs        descriptor-relative NOFOLLOW source/profile/memory reads,
                       missing-only scaffold creation and session-directory opens.
                       Lua source is regular UTF-8 text <= 1 MiB.
@@ -82,11 +87,23 @@ src/
                       fact.custom/cwd/<lane>; fixed HOME, current cwd, guest-only
                       canonicalization/full root-to-leaf instruction reads.
   cron.rs             five-field cron for house routines
+  house/skill_improve.rs  Hermes skill-improvement loop: `skill_manage` /
+                      `skill_view` / `skills_list` house tools, class-level
+                      create/patch, archive-on-delete, `/learn`, hidden nudge
+                      every `skills.creation_nudge_interval` user turns (15).
+                      Creates are curator-managed. Bundled skills off-limits.
+  curator.rs          skill-library maintenance (Hermes curator, host-side):
+                      `.reve/curator/` usage sidecar, `active → stale → archived`
+                      (never delete), pin/adopt, prune on interval, backups.
+                      Bundled scaffold skills are off-limits unless
+                      `curator.prune_builtins`. LLM consolidation is the
+                      `/curator` skill, not a forked aux-model. `revebot curator`.
   tools.rs            the Tools trait plus seven built-ins, replay declarations
   skills.rs           recursive SKILL.md catalog; workspace ∪ bot, bot shadows
                       name. Folded YAML descriptions; a broken file is skipped
-                      in the house catalog. Created/edited skills attach to the
-                      next user wrap as a hidden card.
+                      in the house catalog. Hidden dirs (`.archive/`) are skipped.
+                      Created/edited skills attach to the next user wrap as a
+                      hidden card.
   heartbeat.rs        schedule reload and response-contract validation
   channels.rs         inbox broadcast and namespaced durable KV
   log.rs              in-memory draft log + broadcast bus. Snapshots are
@@ -100,6 +117,8 @@ src/
   house/              multi-bot house: roster, supervisors, HTTP/WS, routine ticker;
                       usage.jsonl in `.reve/` logs skill `/name` and Lua plugin
                       invocations (one JSON object per line) for later stats.
+                      The same `/name` bump also feeds `.reve/curator/usage.json`.
+                      A hourly controller seeds/runs `curator.maybe_run`.
                       roster.rs is the only admission lock: Creating/Ready/Deleting
                       slots, generation tokens, last-ready-bot floor, process-lifetime
                       retired create slugs. Guest I/O never runs under that lock.
@@ -111,37 +130,76 @@ src/
                       files.rs serialised compare-before-replace guest writes.
                       resources.rs shared post-write notifications; Lua on_change
                       observes asynchronously, never vetoes writes.
-                      SendUserMessage is accepted once per run (SHA-256 of text)
-                      as a durable chat entry; tool intent is never a delivered
-                      bubble. @mention cards carry the bot's real id; `/skill` cards
-                      attach the skill body. Boot never awaits `resume_all` /
+                      SendUserMessage accepts text and up to ten `{file, mimetype}`
+                      attachments. Descriptor-rooted reads copy regular `/workspace`
+                      files into `workspace/tmp`, persist file/MIME metadata on the
+                      durable `user_notice`, and deduplicate within a run by text plus
+                      attachment name, MIME and content SHA-256. Tool intent is never a
+                      delivered bubble. @mention cards carry the bot's real id;
+                      `/skill` cards attach the skill body. Boot never awaits
+                      `resume_all` /
                       drive; each supervisor resumes then kicks in the
                       background so the HTTP server binds even if a bot is mid-tool.
                       Delete stops the supervisor, drains owned effects, closes the
-                      session, then removes the guest home. Recreate uses a new
-                      log identity; clients send the log_id they subscribed to.
-  web/                embedded local UI: OpenGrok roster + shadcn-style
-                      bubbles, bloub avatars, routines rail. `web/log.js` is the
-                      pure log reducer; `web/chat.js` is the only renderer for
-                      snapshots, streams, pagination, reloads and conversation
-                      switches. Markdown uses one `formatText` for drafts and
-                      committed replies. Tools collapse to one Activity row with
-                      an updating Working… line. GET / is Cache-Control: no-store.
-                      PWA: manifest, SVG icon, service worker (shell only;
-                      HTML stays uncached because the token is embedded).
+                      session, then removes the guest home. `/new` and `/fork` use the
+                      same roster replacement boundary: reserve the replacement, require
+                      an idle supervisor, create the fresh or branch-scoped JSONL session,
+                      publish its runtime, then close the previous session. Recreate and
+                      conversation switches use a new log identity; clients send the
+                      log_id they subscribed to.
+  web/                Rust bridge for the local browser UI. `public/` is the
+                      authored web root; `build.rs` recursively generates the
+                      embedded route table and `/asset-manifest.json`, excluding
+                      directory-scoped `AGENTS.md` files. GET / renders only the
+                      HTML shell and escaped runtime metadata; CSS, JavaScript,
+                      icon and manifest use stable public URLs. Authored modules
+                      require no npm or runtime asset toolchain.
+                      `public/js/lib/log.mjs` is the pure keyed log reducer.
+                      `public/js/app.mjs` projects snapshots, stream frames,
+                      pagination and conversation switches through one renderer.
+                      Markdown uses one `formatText` for drafts and committed
+                      replies. `display.audience` is ignored so post-tool assistant
+                      text stays a bubble. Tools collapse to one Activity row with
+                      an updating Working… line. GET / is Cache-Control: no-store;
+                      immutable source assets revalidate. The PWA service worker
+                      caches the complete authored module graph while HTML remains
+                      network-first because it carries the session token.
+                      HTTP responses and both WebSocket feeds publish
+                      `reve:server-state` on `document` with source, topic,
+                      request id, owner, status and response data. UI intents use
+                      bubbling `reve:intent:*` events. Tokens, request headers,
+                      request bodies and pasted secret values are not included in
+                      server-state details. Request ids plus bot ownership reject
+                      stale autocomplete and replaced-session responses.
+                      `<reve-feed>` owns transcript reconciliation, virtualization,
+                      status and pagination intent; `<reve-composer>` owns per-bot
+                      drafts, attachment queues and send settlement;
+                      `/compact [instructions]`, `/new`, and `/fork` are intercepted
+                      before normal message placement. Per-message context actions copy
+                      the original plain body or fork at that entry. A fork pre-opens its
+                      destination tab; the source tab closes its old WebSocket and remains
+                      a read-only rendering of the parent while the new tab connects to
+                      the replacement session.
+                      `<reve-autocomplete>` owns one fresh catalog request per open
+                      invocation, local filtering and stale-response rejection.
                       Phone layout is 100dvh + safe-area; drawers are CSS
-                      radios/:has(); the bot sheet is a popover with
-                      ::backdrop and @starting-style; bot switches use the
-                      View Transition API; compose uses field-sizing and CSS
-                      anchor positioning. Attachments POST to
-                      /api/bots/<id>/attachments and land in
-                      workspace/tmp/{id}/{name} (guest /workspace/tmp/…);
-                      the message names them as <file/> pills. Large pastes
-                      and dropped/picked files take the same path.
+                      radios/:has(); the bot sheet is a popover with ::backdrop and
+                      @starting-style; bot switches use the View Transition API;
+                      compose uses field-sizing and CSS anchor positioning.
+                      Attachments POST to /api/bots/<id>/attachments and land in
+                      workspace/tmp/{id}/{name} (guest /workspace/tmp/…) with a hidden
+                      metadata sidecar preserving MIME for later reads. Large pastes and
+                      dropped/picked files take the same component path; inbound message
+                      tags remain compact pills. Structured outbound attachments render
+                      through `<reve-attachment>` as Slack-style file cards. Images have
+                      thumbnails and lightbox views, HTML is fetched into a scriptless
+                      sandboxed lightbox, Markdown uses the shared safe DOM renderer,
+                      and every card exposes a same-origin download action.
                       House events refresh sidebar/header metadata from profile.json;
                       invalid edits show a labelled last-good profile, not silent stale UI.
                       Soul editor reads/writes SOUL.md through /api/bots/<id>/soul.
-                      Compose autocomplete: `/` skills, `@` other bots.
+                      Autocomplete skills are rescanned from shared and bot-local
+                      directories; mentions come from the current bot roster.
                       AskUserForSecret renders an inline host-secret form.
                       Right rail is tabbed (Screen / Files / Routines); Files
                       is hidden until chosen. Hovering chat text that is a
@@ -201,14 +259,17 @@ reloaded state instead of writing something it decided under stale assumptions.
   `payload_*`. Flush every append; a torn last line is discarded whole on reopen; a
   malformed line anywhere else is corruption and we refuse to open. Bot sessions
   open relative to a held, no-symlink directory descriptor; replay uses the locked
-  file descriptor, not a second pathname lookup. Compaction creates/locks its new
-  inode before descriptor-relative rename, and owner drop explicitly releases
-  the lock even if a fork temporarily duplicated the fd. Snapshot compaction
-  rewrites through a temp file and a rename, **in seq order** (not grouped by kind:
-  entries-then-usage-then-registers would put an early usage `seq` after a later
-  entry and fail the next open). A grouped snapshot from an earlier build is
-  accepted when seqs are unique, replayed sorted, and rewritten. Duplicate seq
-  is still corruption. Cross-process exclusion via `File::try_lock`.
+  file descriptor, not a second pathname lookup. A fork creates a fresh rooted JSONL
+  file whose header names `parentSessionId`, then applies one coherent owner-task
+  snapshot: selected branch entries, in-scope facts and total lane configuration only;
+  operation/pending/result registers and usage never cross the boundary, and lane state
+  is reset. Compaction creates/locks its new inode before descriptor-relative rename,
+  and owner drop explicitly releases the lock even if a fork temporarily duplicated the
+  fd. Snapshot compaction rewrites through a temp file and a rename, **in seq order**
+  (not grouped by kind: entries-then-usage-then-registers would put an early usage `seq`
+  after a later entry and fail the next open). A grouped snapshot from an earlier build
+  is accepted when seqs are unique, replayed sorted, and rewritten. Duplicate seq is
+  still corruption. Cross-process exclusion via `File::try_lock`.
 - **The session.** Owner task, `Commit` / `Read` / `Close` commands, CAS tokens, typed
   register reads, `ensure_lane`, `restore` with the specification's bounded validation, and
   `project_context` — which stops at a compaction, expands its summary plus retained tail,
@@ -353,23 +414,27 @@ code or the spec, never the invariant.
 | An abort committed before the crash survives it | `tests/harness.rs::an_abort_committed_before_the_crash_ends_the_resumed_run_aborted` |
 | A really-killed process leaves a resumable session | `tests/crash.rs` (spawns and SIGKILLs a real child) |
 | The compaction tail is widened to a user turn | `compaction::tests::the_tail_is_widened_to_a_user_turn_and_the_head_is_summarised` |
+| A branch fork copies only selected entries, facts and total lane configuration, records its parent, and starts without operations or usage | `session::tests::a_branch_fork_copies_only_conversation_facts_and_configuration` |
+| Standalone compaction publishes a checkpoint and projects its summary plus retained tail | `tests/harness.rs::standalone_compact_replaces_old_context_with_a_checkpoint` |
 | Lua cannot execute a command on the host | `lua::tests::{the_host_command_path_is_gone_before_any_script_runs, a_tool_that_tries_to_shell_out_on_the_host_fails_to_load}` |
 | Workspace Lua has no ambient host authority and cannot inherit trusted aliases | `lua::workspace_tests::{workspace_lua_has_no_ambient_host_authority, workspace_scripts_cannot_read_or_write_host_sentinels, workspace_mutation_cannot_change_the_host_lua_state}` |
 | All workspace loaders and callbacks use the restricted state | `lua::workspace_tests::{all_workspace_script_locations_use_the_restricted_loader, workspace_guards_and_routines_execute_in_the_restricted_state, deferred_workspace_callback_cannot_use_host_io}` |
 | Workspace source cannot traverse symlinks, load nonfiles/oversized files, or import bytecode | `script_fs::tests::{script_and_ancestor_symlinks_are_refused, traversal_nonfiles_and_oversized_sources_are_refused}`, `lua::workspace_tests::{symlinked_script_files_and_bot_directories_are_rejected_before_load, workspace_bytecode_is_never_loaded}` |
 | The complete plugins reference's examples load; pure callbacks execute | `lua::workspace_tests::plugins_skill_examples_load_and_pure_callbacks_execute` |
+| Plugin command/update/gated tools collect durable state, statusline, offers | `lua::workspace_tests::plugin_command_update_and_gated_tools_use_durable_state` |
 | The documented workspace tool actually enters the microVM | `tests/workspace_microvm.rs::documented_workspace_tool_reads_a_note_inside_the_microvm` (opt-in) |
 | Directory/profile ids reject traversal, mismatches and symlinks | `house::profile::tests::{ids_are_directory_owned_and_paths_or_mismatches_are_rejected, profiles_refuse_file_and_parent_symlinks}` |
 | Session compaction stays on its held directory and lock ownership ends with Storage | `storage::jsonl::tests::{rooted_sessions_and_compaction_never_follow_replaced_paths, owner_drop_releases_the_lock_even_with_a_stray_descriptor}` |
 | Soul/private memory do not bleed between agents; disk profile changes reach prompts | `house::prompt::tests::souls_profiles_and_memory_do_not_bleed_across_agents` |
 | Agent-specific home scaffolding keeps edited souls and refuses symlink redirects | `project::tests::{each_agent_gets_its_own_home_and_edited_souls_are_kept, init_does_not_follow_a_symlinked_home_subdirectory}` |
 | Memory dedup/exact forget/scope/recency/bounds preserve manual prose | `house::memory::tests` |
-| Metadata refresh/error handling and UI header updates use current profiles | `house::profile::tests::direct_profile_edits_refresh_metadata_and_report_invalid_files`, `node tests/profile-ui.cjs` |
+| Metadata refresh/error handling and UI header updates use current profiles | `house::profile::tests::direct_profile_edits_refresh_metadata_and_report_invalid_files`, `tests/profile-ui.test.cjs` |
 | In-flight drives keep their model; new profiles affect the next run | `tests/configuration.rs::profile_model_changes_affect_the_next_run_not_the_running_drive` |
 | Cwd rules are full/root-to-leaf, HOME stays fixed, contexts and headers are isolated | `working_directory::tests`, `house::wrap::tests::cwd_is_an_escaped_message_header_not_part_of_the_user_query` |
 | Change observers are filtered/scoped and failures do not veto another observer | `lua::workspace_tests::change_observers_are_filtered_scoped_and_errors_do_not_veto_other_observers` |
 | Home/cwd/memory/profile effects work against the real VM | `house::microvm_tests::homes_cwd_memory_and_profile_notifications_work_in_the_guest` (opt-in) |
-| Chat is one keyed log; drafts settle by reserved id; notices are accepted once | `tests/log.rs`, `node tests/chat-log.cjs`, `node tests/chat-controller.cjs` |
+| Chat is one keyed log; drafts settle by reserved id; notices are accepted once | `tests/log.rs`, `tests/chat-log.test.mjs`, `tests/chat-controller.test.mjs` |
+| Public assets stay routable; DOM state is correlated; stale component responses are rejected | `web::tests`, `tests/web_components.test.mjs` |
 | Tool settlement keeps completed output across a steer CAS miss | `tests/log.rs::notices_are_durable_once_and_known_tool_results_survive_state_changes` |
 | Roster tokens, last-bot floor, and capacity include creating/deleting slots | `house::roster::tests` |
 | Supervisor stop seals persistence and waits for owned effects | `house::lifecycle_tests::supervisor_stop_seals_the_session_and_waits_for_owned_effects` |
@@ -383,10 +448,9 @@ code or the spec, never the invariant.
 | Secret hosts are a per-host map; `allow: true` joins the sandbox allow list | `sandbox::tests::secret_hosts_join_the_egress_allow_list`, `lua::tests::a_secret_host_map_carries_headers_and_joins_allow`, `house::secret::tests::upsert_appends_a_secret_to_the_template` |
 | Chat attachments stay under `workspace/tmp/{id}/` and are named in the message | `house::attach::tests::{save_writes_under_workspace_tmp_id_and_tags_the_guest_path, names_are_basenames_without_traversal, read_refuses_traversal_and_bad_ids}` |
 
-**Not covered yet.** Standalone `compact()` and `navigate()` have no end-to-end test — the
-machinery is shared with the in-run compaction path, which is exercised only through the
-overflow route. Lane concurrency is implemented (a lane claim per operation, drivers as
-independent tasks) but there is no Rust test that runs two lanes at once — the TLA+ harness
-model interleaves two lanes, but the Rust side is unexercised. `cancel_queued` is specified
-(§3.11) and modelled (`CancelQueued`, triaged on queue-list membership so an abort-drained id
-is `not_found`) but not implemented.
+**Not covered yet.** Standalone `navigate()` has no end-to-end test. Lane concurrency is
+implemented (a lane claim per operation, drivers as independent tasks) but there is no
+Rust test that runs two lanes at once — the TLA+ harness model interleaves two lanes, but
+the Rust side is unexercised. `cancel_queued` is specified (§3.11) and modelled
+(`CancelQueued`, triaged on queue-list membership so an abort-drained id is `not_found`)
+but not implemented.

@@ -28,6 +28,7 @@ clippy:
 	cargo clippy --locked --all-targets -- -D warnings
 
 test:
+	node --test tests/*.test.cjs tests/*.test.mjs
 	cargo test --locked
 
 # Model-check docs/tla — the durable log, the lane/inbox/tool state machine

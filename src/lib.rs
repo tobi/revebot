@@ -8,6 +8,7 @@
 pub mod channels;
 pub mod compaction;
 pub mod cron;
+pub mod curator;
 pub mod entry;
 pub mod eval;
 pub mod events;
@@ -21,6 +22,7 @@ pub mod lane;
 pub mod log;
 pub mod lua;
 pub mod model;
+pub mod plugin;
 pub mod progress;
 pub mod project;
 pub mod provider;

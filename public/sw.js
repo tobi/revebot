@@ -1,6 +1,17 @@
-const CACHE = "revebot-shell-v1";
-const SHELL = ["/manifest.webmanifest", "/icon.svg"];
-
+const CACHE = "revebot-shell-v2";
+const SHELL = [
+  "/",
+  "/manifest.webmanifest",
+  "/icon.svg",
+  "/css/app.css",
+  "/js/app.mjs",
+  "/js/events.mjs",
+  "/js/lib/bloub.mjs",
+  "/js/lib/log.mjs",
+  "/js/components/reve-feed.mjs",
+  "/js/components/reve-autocomplete.mjs",
+  "/js/components/reve-composer.mjs",
+];
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches.open(CACHE).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting())

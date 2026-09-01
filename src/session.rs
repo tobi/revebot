@@ -16,7 +16,7 @@
 //! rejected, nothing partial is visible, and reopening restores each lane
 //! from its registers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -65,6 +65,24 @@ impl Expect {
             key: key.into(),
             seq,
         }
+    }
+}
+
+/// One coherent source-session snapshot for a branch fork. It contains only
+/// copied conversation state; operation state and usage never cross sessions.
+#[derive(Debug, Clone)]
+pub(crate) struct ForkSnapshot {
+    parent_session_id: String,
+    transaction: Transaction,
+}
+
+impl ForkSnapshot {
+    pub(crate) fn parent_session_id(&self) -> &str {
+        &self.parent_session_id
+    }
+
+    pub(crate) fn apply(self, destination: &mut Storage) -> crate::storage::Result<CommitResult> {
+        destination.commit_copied(self.transaction)
     }
 }
 
@@ -321,6 +339,82 @@ impl Session {
             .collect()
         })
         .await
+    }
+
+    /// Capture one branch and its forkable registers on the storage owner.
+    /// `target: None` means the lane's current leaf; an explicitly supplied
+    /// entry may be any node in this session tree.
+    pub(crate) async fn fork_snapshot(
+        &self,
+        lane: &str,
+        target: Option<EntryId>,
+    ) -> Result<ForkSnapshot> {
+        let lane = lane.to_string();
+        self.read(move |storage| {
+            let target = match target {
+                Some(target) => {
+                    if storage.entry(&target).is_none() {
+                        return Err(SessionError::Corrupt(format!(
+                            "cannot fork from unknown entry {target}"
+                        )));
+                    }
+                    Some(target)
+                }
+                None => storage
+                    .register_value::<Option<EntryId>>(Namespace::LaneLeaf, &lane)
+                    .and_then(|(leaf, _)| leaf),
+            };
+            let entries: Vec<_> = storage
+                .scan_branch(&BranchScan {
+                    start: target.clone(),
+                    order: Order::OldestFirst,
+                    ..Default::default()
+                })
+                .into_iter()
+                .cloned()
+                .collect();
+            let copied_ids: HashSet<_> = entries.iter().map(|entry| entry.id.clone()).collect();
+            let mut transaction = Transaction::new();
+            for entry in entries {
+                transaction.push(Write::entry(entry));
+            }
+            for namespace in [Namespace::FactName, Namespace::FactCustom] {
+                for register in storage.list_registers(namespace, "") {
+                    transaction.push(Write::set(
+                        register.namespace,
+                        register.key.clone(),
+                        register.value.clone(),
+                    ));
+                }
+            }
+            for register in storage.list_registers(Namespace::FactLabel, "") {
+                if copied_ids.contains(&EntryId::from(register.key.as_str())) {
+                    transaction.push(Write::set(
+                        register.namespace,
+                        register.key.clone(),
+                        register.value.clone(),
+                    ));
+                }
+            }
+            if let Some(register) = storage.register(Namespace::LaneConfig, &lane) {
+                transaction.push(Write::set(
+                    Namespace::LaneConfig,
+                    MAIN_LANE,
+                    register.value.clone(),
+                ));
+            }
+            transaction.push(Write::set(Namespace::LaneLeaf, MAIN_LANE, target));
+            transaction.push(Write::set(
+                Namespace::LaneState,
+                MAIN_LANE,
+                LaneState::default(),
+            ));
+            Ok(ForkSnapshot {
+                parent_session_id: storage.header().id.clone(),
+                transaction,
+            })
+        })
+        .await?
     }
 
     /// One owner read of the full branch plus exactly the pending ids named by
@@ -1020,5 +1114,159 @@ mod tests {
         assert_eq!(context[1].message_value().unwrap()["content"], "kept");
         assert_eq!(context[2].id, after.id);
         assert!(estimate_tokens(&context) > 0);
+    }
+    #[tokio::test]
+    async fn a_branch_fork_copies_only_conversation_facts_and_configuration() {
+        let source = Session::spawn(Storage::memory("source"));
+        let root = user("root");
+        let selected = user("selected").with_parent(Some(root.id.clone()));
+        let sibling = user("sibling").with_parent(Some(root.id.clone()));
+        source
+            .commit(
+                Transaction::new()
+                    .with(Write::entry(root.clone()))
+                    .with(Write::entry(selected.clone()))
+                    .with(Write::entry(sibling.clone())),
+            )
+            .await
+            .unwrap();
+        source
+            .ensure_lane(MAIN_LANE, None, &config())
+            .await
+            .unwrap();
+        source
+            .commit(
+                Transaction::new()
+                    .with(Write::set(
+                        Namespace::LaneLeaf,
+                        MAIN_LANE,
+                        Some(sibling.id.clone()),
+                    ))
+                    .with(Write::set(Namespace::FactName, "", "named"))
+                    .with(Write::set(
+                        Namespace::FactCustom,
+                        "cwd/main",
+                        json!({"path":"/workspace"}),
+                    ))
+                    .with(Write::set(
+                        Namespace::FactLabel,
+                        selected.id.as_str(),
+                        "keep",
+                    ))
+                    .with(Write::set(
+                        Namespace::FactLabel,
+                        sibling.id.as_str(),
+                        "drop",
+                    ))
+                    .with(Write::set(
+                        Namespace::PendingEntry,
+                        "queued",
+                        json!({"message":{}}),
+                    ))
+                    .with(Write::set(
+                        Namespace::OpState,
+                        "operation",
+                        json!({"phase":"open"}),
+                    ))
+                    .with(Write::set(
+                        Namespace::LaneLastResult,
+                        MAIN_LANE,
+                        json!({"outcome":"completed"}),
+                    ))
+                    .with(Write::usage(crate::entry::UsageRow::new(
+                        crate::ids::UsageId::new(),
+                        crate::entry::Usage::default(),
+                        Some(selected.id.clone()),
+                    ))),
+            )
+            .await
+            .unwrap();
+        let selected_source = source.entry(selected.id.clone()).await.unwrap().unwrap();
+        let snapshot = source
+            .fork_snapshot(MAIN_LANE, Some(selected.id.clone()))
+            .await
+            .unwrap();
+
+        let directory = tempfile::tempdir().unwrap();
+        let relative = std::path::Path::new("sessions/child.jsonl");
+        let mut destination = Storage::create_fork_beneath(
+            directory.path(),
+            relative,
+            "child",
+            None,
+            snapshot.parent_session_id().to_string(),
+        )
+        .unwrap();
+        snapshot.apply(&mut destination).unwrap();
+
+        assert_eq!(
+            destination.header().parent_session_id.as_deref(),
+            Some("source")
+        );
+        assert_eq!(
+            destination
+                .scan_entries(Order::OldestFirst)
+                .into_iter()
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>(),
+            vec![root.id.clone(), selected.id.clone()]
+        );
+        assert_eq!(
+            destination.entry(&selected.id).map(|entry| entry.timestamp),
+            Some(selected_source.timestamp),
+            "forking preserves entry-local time"
+        );
+        assert_eq!(
+            destination.register_json(Namespace::FactName, ""),
+            Some(&json!("named"))
+        );
+        assert!(
+            destination
+                .register(Namespace::FactLabel, selected.id.as_str())
+                .is_some()
+        );
+        assert!(
+            destination
+                .register(Namespace::FactLabel, sibling.id.as_str())
+                .is_none()
+        );
+        assert!(
+            destination
+                .register(Namespace::LaneConfig, MAIN_LANE)
+                .is_some()
+        );
+        assert_eq!(
+            destination.register_value::<LaneState>(Namespace::LaneState, MAIN_LANE),
+            Some((
+                LaneState::default(),
+                destination
+                    .register(Namespace::LaneState, MAIN_LANE)
+                    .unwrap()
+                    .seq
+            ))
+        );
+        assert!(
+            destination
+                .list_registers(Namespace::OpState, "")
+                .is_empty()
+        );
+        assert!(
+            destination
+                .list_registers(Namespace::PendingEntry, "")
+                .is_empty()
+        );
+        assert!(
+            destination
+                .list_registers(Namespace::LaneLastResult, "")
+                .is_empty()
+        );
+        assert!(destination.scan_usage(0).is_empty());
+        drop(destination);
+        let reopened = Storage::open(directory.path().join(relative), "ignored", None).unwrap();
+        assert_eq!(
+            reopened.header().parent_session_id.as_deref(),
+            Some("source")
+        );
+        source.close().await;
     }
 }

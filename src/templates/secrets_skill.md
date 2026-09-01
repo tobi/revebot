@@ -8,7 +8,7 @@ description: >
 
 # Secrets
 
-The guest never holds a real credential. Config stores a **source** (host env, host command, HTTP URL, or a host-side file under `.reve/secrets/`), a placeholder name, and a per-host map: each hostname has `allow: true` (also joining the sandbox allow list) and optional `headers` such as `Authorization: "Bearer $ENV"`. Microsandbox injects the real value at the network boundary for those hosts only.
+Config stores a **source** (`$HOST_ENV`, a literal string, host command, HTTP URL, or a host-side file under `.reve/secrets/`), a placeholder name, and a per-host map: each hostname has `allow: true` (also joining the sandbox allow list) and optional `headers` such as `Authorization: "Bearer $ENV"`. Microsandbox injects the real value at the network boundary for those hosts only. Unprefixed sources are stored and used literally.
 
 Never write a token into `/workspace`, never print one, never `echo $SECRET` to debug.
 
@@ -24,7 +24,7 @@ AskUserForSecret
   env: GITHUB_TOKEN
 ```
 
-The user gets an inline form: they can change `env`, limit hosts (e.g. `github.com`, `api.github.com`), set a header overwrite (`Authorization` + `Bearer`, stored as `Authorization: "Bearer $ENV"` on each host), and choose how to obtain the value — paste (password field), host env var, host shell (`$(gh auth token)`), or HTTP GET. Saving writes `config.yml` (and a host file for paste). The tool result is an ack with the env name and hosts — **not the secret**.
+The user gets an inline form: they can change `env`, limit hosts (e.g. `github.com`, `api.github.com`), set a header overwrite (`Authorization` + `Bearer`, stored as `Authorization: "Bearer $ENV"` on each host), and choose how to obtain the value — paste (password field), host env var (stored as `$NAME`), host shell (`$(gh auth token)`), or HTTP GET. Saving writes `config.yml` (and a host file for paste). The tool result is an ack with the env name and hosts — **not the secret**.
 
 ## Using it
 

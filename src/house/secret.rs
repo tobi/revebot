@@ -94,7 +94,9 @@ pub fn to_secret(house_root: &Path, decision: &SecretDecision) -> Result<Secret,
             if src.is_empty() {
                 return Err("host environment variable name required".into());
             }
-            src.to_string()
+            let name = src.strip_prefix('$').unwrap_or(src);
+            validate_env(name)?;
+            format!("${name}")
         }
         SecretKind::Command => {
             let cmd = decision.source.trim();
@@ -255,6 +257,24 @@ mod tests {
             acme[0]["hosts"]["api.acme.test"]["headers"]["Authorization"].as_str(),
             Some("Bearer $ACME_TOKEN")
         );
+    }
+
+    #[test]
+    fn env_sources_are_persisted_with_a_dollar_prefix() {
+        for source in ["HOST_DEMO_KEY", "$HOST_DEMO_KEY"] {
+            let decision = SecretDecision {
+                accept: true,
+                env: "DEMO_KEY".into(),
+                kind: SecretKind::Env,
+                source: source.into(),
+                value: String::new(),
+                hosts: vec!["example.com".into()],
+                header: None,
+                prefix: None,
+            };
+            let secret = to_secret(Path::new("/tmp"), &decision).unwrap();
+            assert_eq!(secret.source, "$HOST_DEMO_KEY");
+        }
     }
 
     #[test]

@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use reve::entry::{MAIN_LANE, Namespace};
+use reve::entry::{Entry, MAIN_LANE, Namespace, Transaction, Write};
 use reve::events::Kind;
 use reve::harness::{Harness, HarnessConfig, HarnessError};
 use reve::hooks::{AfterToolResult, BeforeToolResult, Block, Hooks};
@@ -21,8 +21,8 @@ use reve::model::{
 use reve::sandbox::tokio_util_lite::CancelRx;
 use reve::session::Session;
 use reve::state::{
-    LaneConfiguration, ModelRef, OperationState, Outcome, PendingEntry, Replay, RetryPolicy,
-    RunSettings,
+    CompactionSettings, LaneConfiguration, ModelRef, OperationState, Outcome, PendingEntry, Replay,
+    RetryPolicy, RunSettings,
 };
 use reve::storage::Storage;
 use reve::tools::Tools;
@@ -1082,5 +1082,90 @@ async fn place_idle_notice_keeps_custom_type() {
     let entry = entries.iter().find(|e| e.id == id).expect("placed");
     assert_eq!(entry.entry_type, "custom");
     assert_eq!(entry.custom_type.as_deref(), Some("user_notice"));
+    session.close().await;
+}
+
+#[tokio::test]
+async fn standalone_compact_replaces_old_context_with_a_checkpoint() {
+    let world = World::new();
+    let session = world.session();
+    session
+        .ensure_lane(MAIN_LANE, None, &configuration())
+        .await
+        .unwrap();
+    let first = Entry::message(
+        json!({"role":"user","content":"first question with enough detail to summarize"}),
+    );
+    let second = Entry::message(json!({
+        "role":"assistant",
+        "content":[{"type":"text","text":"first detailed answer with enough material to summarize"}],
+        "stopReason":"stop"
+    }))
+    .with_parent(Some(first.id.clone()));
+    let third = Entry::message(json!({"role":"user","content":"recent question"}))
+        .with_parent(Some(second.id.clone()));
+    let fourth = Entry::message(json!({
+        "role":"assistant",
+        "content":[{"type":"text","text":"recent answer"}],
+        "stopReason":"stop"
+    }))
+    .with_parent(Some(third.id.clone()));
+    session
+        .commit(
+            Transaction::new()
+                .with(Write::entry(first))
+                .with(Write::entry(second))
+                .with(Write::entry(third.clone()))
+                .with(Write::entry(fourth.clone()))
+                .with(Write::set(
+                    Namespace::LaneLeaf,
+                    MAIN_LANE,
+                    Some(fourth.id.clone()),
+                )),
+        )
+        .await
+        .unwrap();
+    let harness = Harness::new(
+        session.clone(),
+        HarnessConfig {
+            model: world.scripted(vec![assistant_text("faithful compact summary")]),
+            tools: no_tools(),
+            hooks: Hooks::new(),
+            system_prompt: Arc::new(|| "test".into()),
+            settings: RunSettings {
+                compaction: CompactionSettings {
+                    enabled: true,
+                    reserve_tokens: 0,
+                    keep_recent_tokens: 8,
+                },
+                ..RunSettings::default()
+            },
+            retry: RetryPolicy::default(),
+            configuration: configuration(),
+            event_capacity: 32,
+        },
+    );
+
+    let result = harness
+        .compact(MAIN_LANE, Some("keep exact paths".into()))
+        .await
+        .unwrap();
+
+    assert_eq!(result.outcome, Outcome::Completed);
+    let checkpoint = session
+        .entry(result.result_entry_id.expect("compaction entry"))
+        .await
+        .unwrap()
+        .expect("persisted compaction entry");
+    assert_eq!(checkpoint.entry_type, "compaction");
+    assert_eq!(checkpoint.payload["summary"], "faithful compact summary");
+    let context = world.context(&session).await;
+    assert!(
+        context
+            .first()
+            .is_some_and(|(_, text)| text.contains("faithful compact summary"))
+    );
+    assert!(context.iter().any(|(_, text)| text == "recent question"));
+    assert!(context.iter().any(|(_, text)| text == "recent answer"));
     session.close().await;
 }

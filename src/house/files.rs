@@ -15,6 +15,7 @@ pub fn read_optional(root: &Path, relative: &Path) -> anyhow::Result<Option<Stri
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Change {
     pub relative: PathBuf,
     pub before: Option<String>,
