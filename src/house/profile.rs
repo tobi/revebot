@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-pub const FIRST_BOT: &str = "chief-of-staff";
+pub const FIRST_BOT: &str = "reve";
 pub const BOT_CAP: usize = 50;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

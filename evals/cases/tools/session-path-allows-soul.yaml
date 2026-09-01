@@ -4,7 +4,7 @@ mode: offline
 runner: unit
 unit: session_path
 input:
-  path: agents/chief-of-staff/SOUL.md
+  path: agents/reve/SOUL.md
 graders:
   - kind: equals
     text: "false"

@@ -1966,7 +1966,7 @@ mod tests {
             routine("morning", {
               name = "Morning briefing",
               cron = "0 9 * * 1-5",
-              bot = "chief-of-staff",
+              bot = "reve",
               message = "Brief me.",
             })
             "#,
@@ -2037,7 +2037,7 @@ mod tests {
             routine("fan", {
               cron = "0 * * * *",
               run = function(ctx)
-                ctx.send("chief-of-staff", "one")
+                ctx.send("reve", "one")
                 ctx.send("researcher", "two")
               end,
             })
@@ -2049,7 +2049,7 @@ mod tests {
         assert_eq!(
             sends,
             vec![
-                ("chief-of-staff".into(), "one".into()),
+                ("reve".into(), "one".into()),
                 ("researcher".into(), "two".into()),
             ]
         );

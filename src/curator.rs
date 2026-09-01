@@ -1402,23 +1402,19 @@ mod tests {
     #[test]
     fn bot_local_skill_can_be_adopted_and_archived() {
         let dir = tempfile::tempdir().unwrap();
-        write_skill(
-            dir.path(),
-            "workspace/agents/chief-of-staff/skills",
-            "local",
-        );
+        write_skill(dir.path(), "workspace/agents/reve/skills", "local");
         let c = Curator::open(dir.path());
         c.adopt("local").unwrap();
         c.archive("local").unwrap();
         assert!(
             dir.path()
-                .join("workspace/agents/chief-of-staff/skills/.archive/local/SKILL.md")
+                .join("workspace/agents/reve/skills/.archive/local/SKILL.md")
                 .is_file()
         );
         c.restore("local").unwrap();
         assert!(
             dir.path()
-                .join("workspace/agents/chief-of-staff/skills/local/SKILL.md")
+                .join("workspace/agents/reve/skills/local/SKILL.md")
                 .is_file()
         );
     }

@@ -211,7 +211,7 @@ on_change("review_memory_updates", {
   run = function(event, ctx)
     -- Pure callback: an error here cannot undo the original write.
     assert(event.unknown == false)
-    -- Optional: ctx.send("chief-of-staff", "Review the changed memory file.")
+    -- Optional: ctx.send("reve", "Review the changed memory file.")
     -- Only send when action is needed, to avoid self-triggering message loops.
   end,
 })
@@ -296,7 +296,7 @@ routine("chief_weekday_briefing", {
   name = "Weekday briefing",
   cron = "0 9 * * 1-5",
   enabled = false, -- enable after testing
-  bot = "chief-of-staff",
+  bot = "reve",
   message = "Summarize what needs my attention.",
 })
 ```
@@ -312,7 +312,7 @@ Routine `run(ctx)` has a **different** context from tool `run(args, ctx)`:
 -- example: routine
 routine("reviewer_morning", {
   cron = "0 10 * * 1-5",
-  bot = "chief-of-staff",
+  bot = "reve",
   enabled = false,
   run = function(ctx)
     ctx.send(ctx.bot, "What needs attention?")

@@ -305,10 +305,10 @@ mod tests {
     fn roster() -> Vec<Profile> {
         vec![
             Profile {
-                id: "chief-of-staff".into(),
-                name: "Chief of Staff".into(),
-                title: String::new(),
-                description: "Own the roster.".into(),
+                id: "reve".into(),
+                name: "Reve".into(),
+                title: "Chief of Staff".into(),
+                description: "Be the grand coordinator of your house of agents.".into(),
                 avatar: None,
                 group: String::new(),
                 created_at: None,
@@ -361,7 +361,7 @@ mod tests {
         assert!(wrapped.contains("QMD Hero (id: qmd-hero) — Maintain tobi/qmd."));
         assert!(wrapped.contains("SendAgentMessage using their id"));
         assert!(wrapped.contains("ask @QMD Hero to triage"));
-        assert!(!wrapped.contains("Chief of Staff (id:"));
+        assert!(!wrapped.contains("Reve (id:"));
     }
 
     #[test]
@@ -407,7 +407,7 @@ mod tests {
         let roster = roster();
         let text = house_kernel(&roster[0], &roster);
         assert!(text.starts_with("# House\n"));
-        assert!(text.contains("id (folder name) is `chief-of-staff`"));
+        assert!(text.contains("id (folder name) is `reve`"));
         assert!(text.contains("SendUserMessage"));
         assert!(text.contains("SendAgentMessage"));
         assert!(text.contains("QMD Hero (id: qmd-hero)"));

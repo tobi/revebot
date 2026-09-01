@@ -569,9 +569,9 @@ mod tests {
 
     #[test]
     fn write_refuses_a_session_jsonl_path() {
-        assert!(is_session_path("agents/chief-of-staff/sessions/main.jsonl"));
+        assert!(is_session_path("agents/reve/sessions/main.jsonl"));
         assert!(is_session_path("/workspace/agents/x/sessions/a.jsonl"));
-        assert!(!is_session_path("agents/chief-of-staff/instructions.md"));
+        assert!(!is_session_path("agents/reve/instructions.md"));
         assert!(refuse_session_path("agents/a/sessions/x.jsonl").is_err());
         assert!(refuse_session_path("notes/today.md").is_ok());
     }

@@ -28,7 +28,7 @@ async fn homes_cwd_memory_and_profile_notifications_work_in_the_guest() -> anyho
     ))
     .await?;
     let result: anyhow::Result<()> = Box::pin(async {
-        let first = "chief-of-staff";
+        let first = "reve";
         let second = house.create_bot(CreateSpec { name:"Miku".into(), title:"Music".into(), description:"Compose music".into(), soul:Some("MUSIC_ONLY_SOUL".into()), model:None, avatar:None }).await?;
         anyhow::ensure!(house.bot_soul(&second.id)?.contains("MUSIC_ONLY_SOUL"));
         let context = house.inner.context(first)?;
@@ -42,7 +42,7 @@ async fn homes_cwd_memory_and_profile_notifications_work_in_the_guest() -> anyho
         anyhow::ensure!(changed.find("ROOT_RULE") < changed.find("SUB_RULE"));
         let tools = HouseTools { inner:Toolbox::for_context(sandbox.clone(), house.project().runtime_arc(), context.clone()), house:Arc::downgrade(&house.inner), bot_id:first.into() };
         let output = tools.invoke("bash", serde_json::json!({"command":"printf '%s\\n' \"$HOME\"; pwd"}).as_object().unwrap().clone(), None).await.map_err(anyhow::Error::msg)?;
-        anyhow::ensure!(output.contains("/workspace/agents/chief-of-staff\n/workspace/projects/qmd/sub"));
+        anyhow::ensure!(output.contains("/workspace/agents/reve\n/workspace/projects/qmd/sub"));
         tools.invoke("write", serde_json::json!({"path":"note.txt","content":"working output"}).as_object().unwrap().clone(), None).await.map_err(anyhow::Error::msg)?;
         anyhow::ensure!(std::fs::read_to_string(dir.path().join("workspace/projects/qmd/sub/note.txt"))? == "working output");
         anyhow::ensure!(other.cwd() == "/workspace/agents/miku/workspace");
@@ -150,7 +150,7 @@ async fn homes_cwd_memory_and_profile_notifications_work_in_the_guest() -> anyho
     let removed = microsandbox::Sandbox::remove(&name).await;
     anyhow::ensure!(
         actual_ids == remaining_ids,
-        "restart must not resurrect the deleted chief-of-staff"
+        "restart must not resurrect the deleted reve"
     );
     stopped?;
     removed?;

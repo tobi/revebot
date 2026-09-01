@@ -1,28 +1,38 @@
-id: house.init-chief-of-staff
+id: house.init-reve
 suite: house
 mode: offline
 runner: files
-description: revebot init writes the Chief of Staff bot and gitignores sessions.
+description: revebot init writes the Reve bot (Chief of Staff) and gitignores sessions.
 graders:
   - kind: file_exists
     path: config.yml
   - kind: file_exists
-    path: workspace/agents/chief-of-staff/SOUL.md
+    path: workspace/agents/reve/SOUL.md
   - kind: file_exists
-    path: workspace/agents/chief-of-staff/profile.json
+    path: workspace/agents/reve/profile.json
   - kind: file_contains
-    path: workspace/agents/chief-of-staff/SOUL.md
+    path: workspace/agents/reve/SOUL.md
+    text: "# Reve"
+  - kind: file_contains
+    path: workspace/agents/reve/SOUL.md
     text: Chief of Staff
   - kind: file_contains
-    path: workspace/agents/chief-of-staff/SOUL.md
+    path: workspace/agents/reve/SOUL.md
+    text: grand coordinator
+  - kind: file_contains
+    path: workspace/agents/reve/SOUL.md
     text: do not ask what to be called
   - kind: json_pointer
-    path: workspace/agents/chief-of-staff/profile.json
+    path: workspace/agents/reve/profile.json
     pointer: /id
-    equals: chief-of-staff
+    equals: reve
   - kind: json_pointer
-    path: workspace/agents/chief-of-staff/profile.json
+    path: workspace/agents/reve/profile.json
     pointer: /name
+    equals: Reve
+  - kind: json_pointer
+    path: workspace/agents/reve/profile.json
+    pointer: /title
     equals: Chief of Staff
   - kind: file_contains
     path: .gitignore
@@ -30,7 +40,7 @@ graders:
   - kind: file_not_exists
     path: workspace/SOUL.md
   - kind: file_exists
-    path: workspace/agents/chief-of-staff/routines/example.lua
+    path: workspace/agents/reve/routines/example.lua
   - kind: file_exists
     path: workspace/plugins/web_fetch.lua
   - kind: file_exists
@@ -51,5 +61,5 @@ graders:
     path: workspace/skills/secrets/SKILL.md
     text: AskUserForSecret
   - kind: file_contains
-    path: workspace/agents/chief-of-staff/profile.json
+    path: workspace/agents/reve/profile.json
     text: orange:goutte

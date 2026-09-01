@@ -635,7 +635,7 @@ mod tests {
         let mut request = req(Action::Create, "deploy-k8s");
         request.content =
             Some("---\nname: deploy-k8s\ndescription: Deploy the k8s app.\n---\n1. apply\n".into());
-        let plan = plan(dir.path(), "chief-of-staff", &request).unwrap();
+        let plan = plan(dir.path(), "reve", &request).unwrap();
         assert!(plan.created);
         assert_eq!(
             plan.writes[0].relative,
@@ -649,10 +649,10 @@ mod tests {
         write_skill(dir.path(), "workspace/skills", "mine", "body");
         let mut request = req(Action::Create, "create-skill");
         request.content = Some("---\nname: create-skill\ndescription: no\n---\nnope\n".into());
-        assert!(plan(dir.path(), "chief-of-staff", &request).is_err());
+        assert!(plan(dir.path(), "reve", &request).is_err());
         request.name = "mine".into();
         request.content = Some("---\nname: mine\ndescription: d\n---\nx\n".into());
-        assert!(plan(dir.path(), "chief-of-staff", &request).is_err());
+        assert!(plan(dir.path(), "reve", &request).is_err());
     }
 
     #[test]
@@ -662,7 +662,7 @@ mod tests {
         let mut request = req(Action::Patch, "mine");
         request.old_string = Some("step two".into());
         request.new_string = Some("step two carefully".into());
-        let plan = plan(dir.path(), "chief-of-staff", &request).unwrap();
+        let plan = plan(dir.path(), "reve", &request).unwrap();
         assert!(plan.patched);
         assert!(plan.writes[0].after.contains("carefully"));
     }
@@ -674,9 +674,9 @@ mod tests {
         let mut request = req(Action::Patch, "mine");
         request.old_string = Some("aa".into());
         request.new_string = Some("bb".into());
-        assert!(plan(dir.path(), "chief-of-staff", &request).is_err());
+        assert!(plan(dir.path(), "reve", &request).is_err());
         request.replace_all = true;
-        assert!(plan(dir.path(), "chief-of-staff", &request).is_ok());
+        assert!(plan(dir.path(), "reve", &request).is_ok());
     }
 
     #[test]
@@ -686,9 +686,9 @@ mod tests {
         let mut request = req(Action::WriteFile, "mine");
         request.file_path = Some("../host".into());
         request.file_content = Some("x".into());
-        assert!(plan(dir.path(), "chief-of-staff", &request).is_err());
+        assert!(plan(dir.path(), "reve", &request).is_err());
         request.file_path = Some("references/api.md".into());
-        let plan = plan(dir.path(), "chief-of-staff", &request).unwrap();
+        let plan = plan(dir.path(), "reve", &request).unwrap();
         assert!(plan.patched);
     }
 
@@ -696,7 +696,7 @@ mod tests {
     fn delete_archives_instead_of_unlinking() {
         let dir = tempfile::tempdir().unwrap();
         write_skill(dir.path(), "workspace/skills", "mine", "body");
-        let plan = plan(dir.path(), "chief-of-staff", &req(Action::Delete, "mine")).unwrap();
+        let plan = plan(dir.path(), "reve", &req(Action::Delete, "mine")).unwrap();
         assert_eq!(plan.archive.as_deref(), Some("mine"));
         assert!(plan.writes.is_empty());
     }
@@ -706,7 +706,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut request = req(Action::Create, "alpha");
         request.content = Some("---\nname: beta\ndescription: d\n---\nbody\n".into());
-        let err = plan(dir.path(), "chief-of-staff", &request).unwrap_err();
+        let err = plan(dir.path(), "reve", &request).unwrap_err();
         assert!(err.contains("does not match"));
     }
 
@@ -714,9 +714,9 @@ mod tests {
     fn list_and_view_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         write_skill(dir.path(), "workspace/skills", "mine", "hello");
-        let list = list_text(dir.path(), "chief-of-staff");
+        let list = list_text(dir.path(), "reve");
         assert!(list.contains("mine"));
-        let view = view_text(dir.path(), "chief-of-staff", "mine", None).unwrap();
+        let view = view_text(dir.path(), "reve", "mine", None).unwrap();
         assert!(view.contains("hello"));
     }
 

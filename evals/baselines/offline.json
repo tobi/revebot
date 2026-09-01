@@ -135,7 +135,7 @@
       ]
     },
     {
-      "id": "house.init-chief-of-staff",
+      "id": "house.init-reve",
       "suite": "house",
       "status": "passed",
       "duration_ms": 0,
@@ -149,37 +149,37 @@
         {
           "grader": "file_exists",
           "passed": true,
-          "detail": "workspace/agents/chief-of-staff/SOUL.md",
+          "detail": "workspace/agents/reve/SOUL.md",
           "soft": false
         },
         {
           "grader": "file_exists",
           "passed": true,
-          "detail": "workspace/agents/chief-of-staff/profile.json",
+          "detail": "workspace/agents/reve/profile.json",
           "soft": false
         },
         {
           "grader": "file_contains",
           "passed": true,
-          "detail": "workspace/agents/chief-of-staff/SOUL.md has \"Chief of Staff\"",
+          "detail": "workspace/agents/reve/SOUL.md has \"Chief of Staff\"",
           "soft": false
         },
         {
           "grader": "file_contains",
           "passed": true,
-          "detail": "workspace/agents/chief-of-staff/SOUL.md has \"do not ask what to be called\"",
+          "detail": "workspace/agents/reve/SOUL.md has \"do not ask what to be called\"",
           "soft": false
         },
         {
           "grader": "json_pointer",
           "passed": true,
-          "detail": "workspace/agents/chief-of-staff/profile.json /id == \"chief-of-staff\"",
+          "detail": "workspace/agents/reve/profile.json /id == \"reve\"",
           "soft": false
         },
         {
           "grader": "json_pointer",
           "passed": true,
-          "detail": "workspace/agents/chief-of-staff/profile.json /name == \"Chief of Staff\"",
+          "detail": "workspace/agents/reve/profile.json /name == \"Reve\"",
           "soft": false
         },
         {
@@ -197,7 +197,7 @@
         {
           "grader": "file_exists",
           "passed": true,
-          "detail": "workspace/agents/chief-of-staff/routines/example.lua",
+          "detail": "workspace/agents/reve/routines/example.lua",
           "soft": false
         },
         {
@@ -245,7 +245,7 @@
         {
           "grader": "file_contains",
           "passed": true,
-          "detail": "workspace/agents/chief-of-staff/profile.json has \"orange:goutte\"",
+          "detail": "workspace/agents/reve/profile.json has \"orange:goutte\"",
           "soft": false
         }
       ]

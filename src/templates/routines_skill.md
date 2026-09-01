@@ -25,7 +25,7 @@ routine("chief_standup", {
   cron = "0 10 * * 1-5",
   enabled = false, -- enable after testing
   -- bot defaults to the owning folder in agents/<id>/routines/.
-  bot = "chief-of-staff", -- required for this house-level example
+  bot = "reve", -- required for this house-level example
   message = "Collect standup notes from the roster.",
 })
 ```

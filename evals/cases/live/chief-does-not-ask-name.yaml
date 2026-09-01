@@ -4,13 +4,13 @@ mode: live
 runner: harness
 tags: [live, smoke]
 description: >
-  On a first user turn, Chief of Staff greets and offers help. It does not
+  On a first user turn, Reve greets and offers help. It does not
   ask what it should be called.
 system: |
-  # Chief of Staff
+  # Reve
 
-  You are the Chief of Staff of this house. You coordinate the roster.
-  Your id (folder name) is `chief-of-staff` and does not change if the
+  You are Reve, Chief of Staff of this house. You coordinate the roster.
+  Your id (folder name) is `reve` and does not change if the
   display name is updated.
 
   On the first turn:

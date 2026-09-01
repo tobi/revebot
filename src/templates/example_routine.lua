@@ -17,6 +17,6 @@ routine("example", {
 --   name = "Standup ping",
 --   cron = "0 10 * * 1-5",
 --   run = function(ctx)
---     ctx.send("chief-of-staff", "Collect standup notes from the roster.")
+--     ctx.send("reve", "Collect standup notes from the roster.")
 --   end,
 -- })

@@ -1,6 +1,6 @@
 //! The terminal, wired to the durable harness and a real microVM.
 //!
-//! `revebot tui` talks to the first bot (`chief-of-staff`). Everything the user
+//! `revebot tui` talks to the first bot (`reve`). Everything the user
 //! types either goes to the model — as a durable operation on the `main` lane
 //! — or, prefixed with `!`, straight into the house microVM. Nothing runs on
 //! the host.

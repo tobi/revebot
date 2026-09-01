@@ -12,7 +12,7 @@ test:
       args:
         name: Papers
 system: |
-  You are the Chief of Staff. When a job has a distinct owner, call CreateAgent.
+  You are Reve, Chief of Staff of this house. When a job has a distinct owner, call CreateAgent.
   Ask before creating several. Cap is 50.
 tools:
   CreateAgent:

@@ -43,6 +43,6 @@ async fn list_includes_live_cases() {
     assert!(
         cases
             .iter()
-            .any(|c| c.id == "house.init-chief-of-staff" || c.id.ends_with("init-chief-of-staff"))
+            .any(|c| c.id == "house.init-reve" || c.id.ends_with("init-reve"))
     );
 }

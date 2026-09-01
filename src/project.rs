@@ -41,7 +41,7 @@ const TEMPLATES: &[(&str, &str)] = &[
         include_str!("templates/example_tool.lua"),
     ),
     (
-        "workspace/agents/chief-of-staff/routines/example.lua",
+        "workspace/agents/reve/routines/example.lua",
         include_str!("templates/example_routine.lua"),
     ),
     (
@@ -95,7 +95,7 @@ const TEMPLATES: &[(&str, &str)] = &[
         include_str!("templates/HEARTBEAT.yml"),
     ),
     (
-        "workspace/agents/chief-of-staff/profile.json",
+        "workspace/agents/reve/profile.json",
         include_str!("templates/profile.json"),
     ),
     (".gitignore", include_str!("templates/gitignore")),
@@ -112,16 +112,16 @@ const KEEP_DIRS: &[&str] = &[
     "workspace/routines",
     "workspace/tmp",
     "workspace/agents",
-    "workspace/agents/chief-of-staff/skills",
-    "workspace/agents/chief-of-staff/sessions",
-    "workspace/agents/chief-of-staff/memory",
-    "workspace/agents/chief-of-staff/memory/log",
-    "workspace/agents/chief-of-staff/memory/notes",
-    "workspace/agents/chief-of-staff/workspace",
-    "workspace/agents/chief-of-staff/knowledge",
-    "workspace/agents/chief-of-staff/notes",
-    "workspace/agents/chief-of-staff/routines",
-    "workspace/agents/chief-of-staff/plugins",
+    "workspace/agents/reve/skills",
+    "workspace/agents/reve/sessions",
+    "workspace/agents/reve/memory",
+    "workspace/agents/reve/memory/log",
+    "workspace/agents/reve/memory/notes",
+    "workspace/agents/reve/workspace",
+    "workspace/agents/reve/knowledge",
+    "workspace/agents/reve/notes",
+    "workspace/agents/reve/routines",
+    "workspace/agents/reve/plugins",
 ];
 
 #[derive(Debug, Default)]
@@ -275,7 +275,7 @@ impl Project {
     }
 
     pub fn first_bot_id() -> &'static str {
-        "chief-of-staff"
+        crate::house::profile::FIRST_BOT
     }
 
     pub fn agents_dir(&self) -> PathBuf {
@@ -473,28 +473,24 @@ mod tests {
             report
                 .created
                 .iter()
-                .any(|n| n == "workspace/agents/chief-of-staff/SOUL.md")
+                .any(|n| n == "workspace/agents/reve/SOUL.md")
         );
         assert!(
             report
                 .created
                 .iter()
-                .any(|n| n == "workspace/agents/chief-of-staff/profile.json")
+                .any(|n| n == "workspace/agents/reve/profile.json")
         );
         let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         assert!(gitignore.contains("workspace/agents/*/sessions/"));
-        assert!(
-            dir.path()
-                .join("workspace/agents/chief-of-staff/skills")
-                .is_dir()
-        );
+        assert!(dir.path().join("workspace/agents/reve/skills").is_dir());
         assert!(
             !dir.path().join("SOUL.md").exists(),
             "bot identity lives under workspace/agents/, not the house root"
         );
         assert!(
             dir.path()
-                .join("workspace/agents/chief-of-staff/routines/example.lua")
+                .join("workspace/agents/reve/routines/example.lua")
                 .is_file()
         );
         assert!(dir.path().join("workspace/plugins/web_fetch.lua").is_file());
@@ -516,14 +512,14 @@ mod tests {
                 "{skill} skill"
             );
         }
-        let edited = dir.path().join("workspace/agents/chief-of-staff/SOUL.md");
+        let edited = dir.path().join("workspace/agents/reve/SOUL.md");
         std::fs::write(&edited, "# mine\n").unwrap();
         let again = init(dir.path()).unwrap();
         assert!(
             again
                 .changed
                 .iter()
-                .any(|n| n == "workspace/agents/chief-of-staff/SOUL.md")
+                .any(|n| n == "workspace/agents/reve/SOUL.md")
         );
         assert_eq!(std::fs::read_to_string(&edited).unwrap(), "# mine\n");
     }
@@ -558,7 +554,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         init(dir.path()).unwrap();
         let outside = tempfile::tempdir().unwrap();
-        let home = dir.path().join("workspace/agents/chief-of-staff");
+        let home = dir.path().join("workspace/agents/reve");
         std::fs::remove_dir_all(home.join("memory")).unwrap();
         symlink(outside.path(), home.join("memory")).unwrap();
         assert!(init(dir.path()).is_err());
@@ -610,15 +606,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         init(dir.path()).unwrap();
         let project = Project::load(dir.path()).unwrap();
-        assert!(
-            project
-                .bot_sessions_dir("chief-of-staff")
-                .starts_with(dir.path())
-        );
+        assert!(project.bot_sessions_dir("reve").starts_with(dir.path()));
         assert!(
             project
                 .conversation_path("main")
-                .starts_with(project.bot_sessions_dir("chief-of-staff"))
+                .starts_with(project.bot_sessions_dir("reve"))
         );
         assert!(project.workspace().starts_with(dir.path()));
     }

@@ -4,7 +4,7 @@ mode: offline
 runner: unit
 unit: session_path
 input:
-  path: agents/chief-of-staff/sessions/main.jsonl
+  path: agents/reve/sessions/main.jsonl
 graders:
   - kind: equals
     text: "true"

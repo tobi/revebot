@@ -189,8 +189,8 @@ fn all_workspace_script_locations_use_the_restricted_loader() {
     for relative in [
         "workspace/plugins/probe.lua",
         "workspace/routines/probe.lua",
-        "workspace/agents/chief-of-staff/plugins/probe.lua",
-        "workspace/agents/chief-of-staff/routines/probe.lua",
+        "workspace/agents/reve/plugins/probe.lua",
+        "workspace/agents/reve/routines/probe.lua",
     ] {
         let dir = tempfile::tempdir().unwrap();
         crate::project::init(dir.path()).unwrap();
@@ -254,14 +254,11 @@ async fn plugins_skill_examples_load_and_pure_callbacks_execute() {
     assert!(rt.tool("read_note").is_some()); // Guest effect exercised by ignored microVM test.
     assert_eq!(
         rt.fire_routine("chief_weekday_briefing").await.unwrap(),
-        vec![(
-            "chief-of-staff".into(),
-            "Summarize what needs my attention.".into()
-        )]
+        vec![("reve".into(), "Summarize what needs my attention.".into())]
     );
     assert_eq!(
         rt.fire_routine("reviewer_morning").await.unwrap(),
-        vec![("chief-of-staff".into(), "What needs attention?".into())]
+        vec![("reve".into(), "What needs attention?".into())]
     );
     let event = BeforeToolEvent {
         lane: "main".into(),
@@ -399,7 +396,7 @@ async fn plugin_command_update_and_gated_tools_use_durable_state() {
     assert!(rt.tools.iter().all(|t| t.name != "LoopUpdate"));
 
     let snap = crate::plugin::PluginSnapshot {
-        bot: "chief-of-staff".into(),
+        bot: "reve".into(),
         now: 10,
         busy: false,
         lane: "main".into(),
